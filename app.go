@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,8 @@ import (
 	"golang.org/x/text/encoding/unicode"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+
+	"chipper/internal/updater"
 )
 
 // App is the root struct bound to Wails. Every exported method is callable from
@@ -25,6 +28,11 @@ type App struct {
 	pendingMu   sync.Mutex  // guards pending
 	pending     string      // latest session snapshot, flushed synchronously on close
 	chipsCancel atomic.Bool // set by CancelChips to stop an in-flight TypeChips run
+
+	// version is set from main() after NewApp(); the updater is built on startup
+	// once we know the value.
+	version string
+	updater *updater.Updater
 }
 
 // NewApp creates a new App application struct.
@@ -35,8 +43,13 @@ func NewApp() *App { return &App{} }
 // prepared under the user's home folder.
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	if home, err := os.UserHomeDir(); err == nil {
-		dir := filepath.Join(home, ".chipper")
+	if a.version == "" {
+		a.version = "dev"
+	}
+	home, _ := os.UserHomeDir()
+	cfgDir := filepath.Join(home, ".chipper")
+	if home != "" {
+		dir := cfgDir
 		if err := os.MkdirAll(dir, 0o700); err == nil {
 			a.dataDir = dir
 			// One-time migration from the previous ".md-editor" data directory.
@@ -47,6 +60,18 @@ func (a *App) startup(ctx context.Context) {
 				}
 			}
 		}
+	}
+	// Auto-updater: build against GitHub Releases, then sweep any leftover files
+	// a previous in-place swap may have left next to the binary.
+	a.updater = updater.New(updater.Config{
+		Owner:          "Leejinik",
+		Repo:           "chipper",
+		AssetName:      "chipper.exe",
+		CurrentVersion: a.version,
+		ConfigDir:      cfgDir,
+	})
+	if exe, err := os.Executable(); err == nil {
+		a.updater.CleanupLeftovers(exe)
 	}
 }
 
@@ -412,4 +437,83 @@ func (a *App) LoadSession() (string, error) {
 		return "", err
 	}
 	return string(data), nil
+}
+
+// --- Auto-update --------------------------------------------------------
+
+// GetCurrentVersion returns the build-time version (or "dev" for local builds).
+func (a *App) GetCurrentVersion() string {
+	if a.updater == nil {
+		return a.version
+	}
+	return a.updater.CurrentVersion()
+}
+
+// CheckForUpdate queries GitHub Releases for a newer build. Pure check — it
+// does NOT record an auto-apply attempt.
+func (a *App) CheckForUpdate() (updater.UpdateInfo, error) {
+	if a.updater == nil {
+		return updater.UpdateInfo{CurrentVersion: a.version}, nil
+	}
+	return a.updater.Check(a.ctx)
+}
+
+// ApplyUpdate downloads the new exe, stashes the release notes, swaps the
+// binary in place, and quits the app — the relaunched (new) binary shows the
+// release notes once on startup. This is the manual/unguarded path.
+func (a *App) ApplyUpdate(info updater.UpdateInfo) error {
+	if a.updater == nil {
+		return errors.New("updater not initialised")
+	}
+	if err := a.updater.Apply(a.ctx, info); err != nil {
+		return err
+	}
+	// Hand off. Quit in a goroutine so this call can return cleanly to the
+	// frontend before the runtime shuts down.
+	go wruntime.Quit(a.ctx)
+	return nil
+}
+
+// GetPendingReleaseNotes returns release notes stashed by the previous version
+// right before it triggered the update, iff they belong to the current binary
+// version. Returns nil when there's nothing to show.
+func (a *App) GetPendingReleaseNotes() *updater.PendingNotes {
+	if a.updater == nil {
+		return nil
+	}
+	notes, ok, _ := a.updater.LoadPendingNotes()
+	if !ok {
+		return nil
+	}
+	return &notes
+}
+
+// MarkReleaseNotesSeen deletes the stashed notes file so it won't pop again.
+func (a *App) MarkReleaseNotesSeen() error {
+	if a.updater == nil {
+		return nil
+	}
+	return a.updater.ClearPendingNotes()
+}
+
+// AutoUpdate is the GUARDED silent startup path. It checks, then only applies
+// if the loop guard green-lights (ShouldAutoApply caps repeated non-converging
+// attempts at maxAutoTries). On a blocked/available update it returns
+// Blocked=true so the frontend can show a manual "new version" badge.
+func (a *App) AutoUpdate() updater.AutoUpdateResult {
+	if a.updater == nil {
+		return updater.AutoUpdateResult{}
+	}
+	info, err := a.updater.Check(a.ctx)
+	if err != nil || !info.Available {
+		return updater.AutoUpdateResult{Info: info}
+	}
+	if !a.updater.ShouldAutoApply(info) {
+		return updater.AutoUpdateResult{Blocked: true, Info: info}
+	}
+	if err := a.updater.Apply(a.ctx, info); err != nil {
+		return updater.AutoUpdateResult{Blocked: true, Info: info}
+	}
+	go wruntime.Quit(a.ctx)
+	return updater.AutoUpdateResult{Applying: true, Info: info}
 }

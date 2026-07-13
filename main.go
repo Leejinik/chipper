@@ -11,8 +11,12 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
+// Version is injected at build time via -ldflags "-X main.Version=v1.2.3".
+var Version = "dev"
+
 func main() {
 	app := NewApp()
+	app.version = Version
 
 	err := wails.Run(&options.App{
 		Title:     "Chipper",

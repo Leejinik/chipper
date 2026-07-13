@@ -25,7 +25,12 @@ import {
   StatFile,
   TypeChips,
   CancelChips,
+  AutoUpdate,
+  ApplyUpdate,
+  GetPendingReleaseNotes,
+  MarkReleaseNotesSeen,
 } from "../wailsjs/go/main/App";
+import type { updater } from "../wailsjs/go/models";
 import {
   WindowSetTitle,
   BrowserOpenURL,
@@ -376,6 +381,10 @@ interface ChipsState {
   message: string;
 }
 
+// Module-level guard: the guarded silent auto-update path must fire at most once
+// per process, even across React StrictMode double-mounts.
+let autoApplyFired = false;
+
 function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState<string>("");
@@ -400,6 +409,19 @@ function App() {
     setCanInClause(tokenizeList(text).ok);
   }, []);
   const [chips, setChips] = useState<ChipsState | null>(null);
+
+  // --- auto-update UI state -------------------------------------------------
+  // updateBadge is the small pill shown right of the brand. When applying, it's
+  // a transient status; when blocked, it's a persistent "manual update" button
+  // that calls ApplyUpdate(info) on click.
+  const [updateBadge, setUpdateBadge] = useState<{
+    text: string;
+    info: updater.UpdateInfo | null; // non-null → clickable manual-apply badge
+  } | null>(null);
+  const [releaseNotes, setReleaseNotes] = useState<{
+    version: string;
+    notes: string;
+  } | null>(null);
 
   // Refs mirroring the latest state so stable callbacks (shortcuts, flush) can
   // read current values without being re-created.
@@ -483,6 +505,41 @@ function App() {
       setTabs([w]);
       setActiveId(w.id);
       setLoaded(true);
+    })();
+  }, []);
+
+  // --- auto-update (mount-once) ---------------------------------------------
+  // Pop any release notes stashed by the previous version, then run the guarded
+  // silent update path. On "applying" the app quits shortly; on "blocked" we
+  // leave a persistent manual-update pill next to the brand.
+  useEffect(() => {
+    if (autoApplyFired) return;
+    autoApplyFired = true;
+    (async () => {
+      try {
+        const notes = await GetPendingReleaseNotes();
+        if (notes?.version) {
+          setReleaseNotes({ version: notes.version, notes: notes.notes ?? "" });
+        }
+      } catch {
+        // ignore — notes are best-effort
+      }
+      try {
+        const r = await AutoUpdate();
+        if (r?.applying) {
+          setUpdateBadge({
+            text: `업데이트 적용 중… ${r.info?.latestVersion ?? ""}`.trim(),
+            info: null,
+          });
+        } else if (r?.blocked && r.info?.latestVersion) {
+          setUpdateBadge({
+            text: `새 버전 ${r.info.latestVersion} (수동 업데이트)`,
+            info: r.info,
+          });
+        }
+      } catch {
+        // ignore — offline / no releases
+      }
     })();
   }, []);
 
@@ -1290,6 +1347,32 @@ function App() {
     <div className="app">
       <div className="toolbar">
         <span className="brand">📎 Chipper</span>
+        {updateBadge && (
+          <button
+            className="update-pill"
+            disabled={!updateBadge.info}
+            title={updateBadge.info ? "클릭하여 업데이트 적용" : ""}
+            onClick={() => {
+              if (updateBadge.info) {
+                ApplyUpdate(updateBadge.info).catch(() => {});
+              }
+            }}
+            style={{
+              marginLeft: 8,
+              padding: "2px 10px",
+              fontSize: 12,
+              lineHeight: 1.6,
+              borderRadius: 999,
+              border: "1px solid #3a6df0",
+              background: updateBadge.info ? "#2b3550" : "transparent",
+              color: "#9db8ff",
+              cursor: updateBadge.info ? "pointer" : "default",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {updateBadge.text}
+          </button>
+        )}
         <div className="tb-group">
           <button className="tb-btn" onClick={doNew} title={`새 파일 (${keyHint("new")})`}>
             ＋ 새 파일
@@ -1811,6 +1894,68 @@ function App() {
                 }}
               >
                 닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {releaseNotes && (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            setReleaseNotes(null);
+            MarkReleaseNotesSeen().catch(() => {});
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.5)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 1000,
+          }}
+        >
+          <div
+            className="modal"
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              background: "#1e2128",
+              color: "#e6e6e6",
+              border: "1px solid #3a3f4b",
+              borderRadius: 8,
+              padding: 20,
+              width: "min(560px, 90vw)",
+              maxHeight: "80vh",
+              overflow: "auto",
+              boxShadow: "0 10px 40px rgba(0,0,0,0.5)",
+            }}
+          >
+            <h3 style={{ marginTop: 0 }}>
+              업데이트 완료 — {releaseNotes.version}
+            </h3>
+            <pre
+              style={{
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                fontFamily: "inherit",
+                fontSize: 13,
+                lineHeight: 1.6,
+                margin: "8px 0 16px",
+              }}
+            >
+              {releaseNotes.notes || "새 버전이 적용되었습니다."}
+            </pre>
+            <div style={{ textAlign: "right" }}>
+              <button
+                className="tb-btn"
+                onClick={() => {
+                  setReleaseNotes(null);
+                  MarkReleaseNotesSeen().catch(() => {});
+                }}
+              >
+                확인
               </button>
             </div>
           </div>
