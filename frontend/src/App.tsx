@@ -29,6 +29,7 @@ import {
   ApplyUpdate,
   GetPendingReleaseNotes,
   MarkReleaseNotesSeen,
+  ShowUpdateModeNoticeOnce,
 } from "../wailsjs/go/main/App";
 import type { updater } from "../wailsjs/go/models";
 import {
@@ -411,12 +412,12 @@ function App() {
   const [chips, setChips] = useState<ChipsState | null>(null);
 
   // --- auto-update UI state -------------------------------------------------
-  // updateBadge is the small pill shown right of the brand. When applying, it's
-  // a transient status; when blocked, it's a persistent "manual update" button
-  // that calls ApplyUpdate(info) on click.
+  // updateBadge is the small pill shown right of the brand. When a newer build
+  // exists it's a persistent "download" button that calls ApplyUpdate(info) on
+  // click — which opens the release page in the browser (no self-replace).
   const [updateBadge, setUpdateBadge] = useState<{
     text: string;
-    info: updater.UpdateInfo | null; // non-null → clickable manual-apply badge
+    info: updater.UpdateInfo | null; // non-null → clickable download badge
   } | null>(null);
   const [releaseNotes, setReleaseNotes] = useState<{
     version: string;
@@ -509,13 +510,17 @@ function App() {
   }, []);
 
   // --- auto-update (mount-once) ---------------------------------------------
-  // Pop any release notes stashed by the previous version, then run the guarded
-  // silent update path. On "applying" the app quits shortly; on "blocked" we
-  // leave a persistent manual-update pill next to the brand.
+  // Notify-only. Pop any release notes stashed by a previous version, then check
+  // for a newer build; if one exists, leave a persistent manual-download pill
+  // next to the brand. We never self-replace the running exe — corporate EDR
+  // quarantines self-updating binaries.
   useEffect(() => {
     if (autoApplyFired) return;
     autoApplyFired = true;
     (async () => {
+      // One-time notice: auto-update changed to notify-only due to the corporate
+      // EDR policy. Fire-and-forget (native dialog, self-guarded to show once).
+      ShowUpdateModeNoticeOnce().catch(() => {});
       try {
         const notes = await GetPendingReleaseNotes();
         if (notes?.version) {
@@ -526,14 +531,9 @@ function App() {
       }
       try {
         const r = await AutoUpdate();
-        if (r?.applying) {
+        if (r?.info?.available) {
           setUpdateBadge({
-            text: `업데이트 적용 중… ${r.info?.latestVersion ?? ""}`.trim(),
-            info: null,
-          });
-        } else if (r?.blocked && r.info?.latestVersion) {
-          setUpdateBadge({
-            text: `새 버전 ${r.info.latestVersion} (수동 업데이트)`,
+            text: `⬆️ 새 버전 ${r.info.latestVersion} — 다운로드`,
             info: r.info,
           });
         }
@@ -1351,7 +1351,11 @@ function App() {
           <button
             className="update-pill"
             disabled={!updateBadge.info}
-            title={updateBadge.info ? "클릭하여 업데이트 적용" : ""}
+            title={
+              updateBadge.info
+                ? "브라우저에서 릴리스 페이지를 열어 새 버전을 직접 내려받습니다 (자동 교체 안 함)"
+                : ""
+            }
             onClick={() => {
               if (updateBadge.info) {
                 ApplyUpdate(updateBadge.info).catch(() => {});

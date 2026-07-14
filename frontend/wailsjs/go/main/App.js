@@ -58,6 +58,10 @@ export function SaveSession(arg1) {
   return window['go']['main']['App']['SaveSession'](arg1);
 }
 
+export function ShowUpdateModeNoticeOnce() {
+  return window['go']['main']['App']['ShowUpdateModeNoticeOnce']();
+}
+
 export function StashSession(arg1) {
   return window['go']['main']['App']['StashSession'](arg1);
 }

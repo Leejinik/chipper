@@ -31,6 +31,8 @@ export function SaveFileDialog(arg1:string,arg2:string,arg3:string):Promise<main
 
 export function SaveSession(arg1:string):Promise<void>;
 
+export function ShowUpdateModeNoticeOnce():Promise<void>;
+
 export function StashSession(arg1:string):Promise<void>;
 
 export function StatFile(arg1:string):Promise<main.FileStat>;

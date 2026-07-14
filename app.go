@@ -458,19 +458,24 @@ func (a *App) CheckForUpdate() (updater.UpdateInfo, error) {
 	return a.updater.Check(a.ctx)
 }
 
-// ApplyUpdate downloads the new exe, stashes the release notes, swaps the
-// binary in place, and quits the app — the relaunched (new) binary shows the
-// release notes once on startup. This is the manual/unguarded path.
+// ApplyUpdate no longer self-replaces the running binary. It opens the GitHub
+// release page for the new version in the default browser so the user can
+// download the new exe and drop it in manually.
+//
+// Why: rewriting our own on-disk image and relaunching it is a textbook malware
+// heuristic. In the field an endpoint-security agent (EDR) quarantined and
+// path-locked the swapped-in exe AND the renamed-aside original, leaving no
+// runnable binary and no working rollback. A manual download to a fresh path
+// sidesteps the whole self-modification trip.
 func (a *App) ApplyUpdate(info updater.UpdateInfo) error {
 	if a.updater == nil {
 		return errors.New("updater not initialised")
 	}
-	if err := a.updater.Apply(a.ctx, info); err != nil {
-		return err
+	url := "https://github.com/Leejinik/chipper/releases/latest"
+	if info.LatestVersion != "" {
+		url = fmt.Sprintf("https://github.com/Leejinik/chipper/releases/tag/%s", info.LatestVersion)
 	}
-	// Hand off. Quit in a goroutine so this call can return cleanly to the
-	// frontend before the runtime shuts down.
-	go wruntime.Quit(a.ctx)
+	wruntime.BrowserOpenURL(a.ctx, url)
 	return nil
 }
 
@@ -496,10 +501,11 @@ func (a *App) MarkReleaseNotesSeen() error {
 	return a.updater.ClearPendingNotes()
 }
 
-// AutoUpdate is the GUARDED silent startup path. It checks, then only applies
-// if the loop guard green-lights (ShouldAutoApply caps repeated non-converging
-// attempts at maxAutoTries). On a blocked/available update it returns
-// Blocked=true so the frontend can show a manual "new version" badge.
+// AutoUpdate is the startup update check. It is NOTIFY-ONLY: it asks GitHub for
+// a newer build and, if one exists, reports it (Blocked=true) so the frontend
+// shows a manual "download" pill. It never self-replaces or quits — see
+// ApplyUpdate for why self-replacement was removed (사내 EDR가 자기교체식
+// 자동 업데이트를 악성으로 판정·격리하여 실행 파일이 사라지는 문제).
 func (a *App) AutoUpdate() updater.AutoUpdateResult {
 	if a.updater == nil {
 		return updater.AutoUpdateResult{}
@@ -508,12 +514,30 @@ func (a *App) AutoUpdate() updater.AutoUpdateResult {
 	if err != nil || !info.Available {
 		return updater.AutoUpdateResult{Info: info}
 	}
-	if !a.updater.ShouldAutoApply(info) {
-		return updater.AutoUpdateResult{Blocked: true, Info: info}
+	// Available → surface the manual-download pill (Blocked repurposed as
+	// "notify, do not auto-apply"). 자기교체·Quit는 제거됨.
+	return updater.AutoUpdateResult{Blocked: true, Info: info}
+}
+
+// ShowUpdateModeNoticeOnce shows a one-time native notice explaining that the
+// in-app auto-update switched from silent self-replacement to "notify + manual
+// download", because the corporate EDR security policy quarantines self-
+// replacing executables (in the field it left the app with no runnable binary).
+// It fires at most once per install, guarded by a marker file in the config dir.
+func (a *App) ShowUpdateModeNoticeOnce() {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".chipper")
+	marker := filepath.Join(dir, "update-mode-notice.seen")
+	if _, err := os.Stat(marker); err == nil {
+		return // already shown on this install
 	}
-	if err := a.updater.Apply(a.ctx, info); err != nil {
-		return updater.AutoUpdateResult{Blocked: true, Info: info}
-	}
-	go wruntime.Quit(a.ctx)
-	return updater.AutoUpdateResult{Applying: true, Info: info}
+	_, _ = wruntime.MessageDialog(a.ctx, wruntime.MessageDialogOptions{
+		Type:  wruntime.InfoDialog,
+		Title: "자동 업데이트 방식 변경 안내",
+		Message: "사내 EDR 보안 정책이 자기교체식 자동 업데이트를 차단하여, 앞으로는 새 버전이 " +
+			"나오면 자동 설치 대신 ‘알림 + 수동 다운로드’ 방식으로 동작합니다.\n\n" +
+			"새 버전이 있으면 화면에 다운로드 안내가 표시되고, 클릭하면 릴리스 페이지가 브라우저로 열립니다.",
+	})
+	_ = os.MkdirAll(dir, 0755)
+	_ = os.WriteFile(marker, []byte("seen"), 0644)
 }
