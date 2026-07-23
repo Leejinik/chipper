@@ -14,6 +14,7 @@ import (
 	"golang.org/x/text/encoding/korean"
 	"golang.org/x/text/encoding/unicode"
 
+	"github.com/wailsapp/wails/v2/pkg/options"
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"chipper/internal/updater"
@@ -28,6 +29,13 @@ type App struct {
 	pendingMu   sync.Mutex  // guards pending
 	pending     string      // latest session snapshot, flushed synchronously on close
 	chipsCancel atomic.Bool // set by CancelChips to stop an in-flight TypeChips run
+
+	// File-open delivery (double-click an associated file). openMu guards both
+	// fields. pendingOpen buffers paths that arrive before the frontend has
+	// subscribed (cold start); FrontendReady drains them.
+	openMu        sync.Mutex
+	pendingOpen   []string
+	frontendReady bool
 
 	// version is set from main() after NewApp(); the updater is built on startup
 	// once we know the value.
@@ -46,6 +54,14 @@ func (a *App) startup(ctx context.Context) {
 	if a.version == "" {
 		a.version = "dev"
 	}
+	// A file passed on the command line (Windows file-association launch:
+	// `chipper.exe "C:\path\file.md"`) is buffered here and flushed once the
+	// frontend calls FrontendReady. macOS delivers via Mac.OnFileOpen instead.
+	a.deliverOpenPaths(existingFiles(os.Args[1:]))
+	// If the user previously associated file types and later moved the portable
+	// exe, repoint the registered "open" command at the current path. No-op on
+	// non-Windows and when nothing was ever registered.
+	a.syncFileAssociationsOnLaunch()
 	home, _ := os.UserHomeDir()
 	cfgDir := filepath.Join(home, ".chipper")
 	if home != "" {
@@ -86,6 +102,93 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 		_ = a.writeSession(data)
 	}
 	return false
+}
+
+// --- file-open delivery (double-click an associated file) -----------------
+
+// AssocType is one associable file type shown in the Windows "파일 연결 관리"
+// panel. The list below is the single source of truth for both the Windows
+// registry code and the (stubbed) non-Windows binding.
+type AssocType struct {
+	Ext   string `json:"ext"`   // includes the leading dot, e.g. ".md"
+	Label string `json:"label"` // human label for the checkbox
+}
+
+var chipperAssocTypes = []AssocType{
+	{".md", "Markdown (.md)"},
+	{".markdown", "Markdown (.markdown)"},
+	{".txt", "텍스트 (.txt)"},
+	{".text", "텍스트 (.text)"},
+	{".log", "로그 (.log)"},
+	{".html", "HTML (.html)"},
+	{".htm", "HTML (.htm)"},
+}
+
+// existingFiles keeps only argv entries that name an existing (non-directory)
+// file, absolutized. Association launches always pass an absolute, quoted %1,
+// but we stay defensive against relative paths and stray flags.
+func existingFiles(args []string) []string {
+	out := make([]string, 0, len(args))
+	for _, p := range args {
+		if p == "" {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			continue
+		}
+		if st, e := os.Stat(abs); e == nil && !st.IsDir() {
+			out = append(out, abs)
+		}
+	}
+	return out
+}
+
+// deliverOpenPaths hands file paths to the frontend. If the frontend has not
+// subscribed yet (cold start, before React mounts its EventsOn listener) the
+// paths are buffered and later drained by FrontendReady — Wails events have no
+// server-side replay, so an emit fired too early would be silently dropped.
+func (a *App) deliverOpenPaths(paths []string) {
+	if len(paths) == 0 {
+		return
+	}
+	a.openMu.Lock()
+	if a.ctx == nil || !a.frontendReady {
+		a.pendingOpen = append(a.pendingOpen, paths...)
+		a.openMu.Unlock()
+		return
+	}
+	a.openMu.Unlock()
+	wruntime.EventsEmit(a.ctx, "chipper:open-files", paths)
+}
+
+// FrontendReady is called once by React on mount, AFTER it has registered the
+// "chipper:open-files" listener. It marks the frontend ready and returns any
+// paths buffered during cold start so the very first double-clicked file is
+// not lost.
+func (a *App) FrontendReady() []string {
+	a.openMu.Lock()
+	defer a.openMu.Unlock()
+	a.frontendReady = true
+	p := a.pendingOpen
+	a.pendingOpen = nil
+	return p
+}
+
+// onSecondInstanceLaunch runs (on a background goroutine) when a second
+// chipper process is started while one is already running — typically the user
+// double-clicked another associated file. data.Args is that process's
+// os.Args[1:]. We raise the existing window and open the file(s) as tabs.
+func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
+	paths := existingFiles(data.Args)
+	if len(paths) == 0 {
+		return
+	}
+	if a.ctx != nil {
+		wruntime.WindowUnminimise(a.ctx)
+		wruntime.WindowShow(a.ctx)
+	}
+	a.deliverOpenPaths(paths)
 }
 
 func (a *App) sessionPath() string {

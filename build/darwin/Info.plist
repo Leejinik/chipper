@@ -23,25 +23,93 @@
         <string>true</string>
         <key>NSHumanReadableCopyright</key>
         <string>{{.Info.Copyright}}</string>
-        {{if .Info.FileAssociations}}
         <key>CFBundleDocumentTypes</key>
         <array>
-          {{range .Info.FileAssociations}}
           <dict>
+            <key>CFBundleTypeName</key>
+            <string>Plain Text</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+              <string>public.plain-text</string>
+              <string>public.text</string>
+            </array>
             <key>CFBundleTypeExtensions</key>
             <array>
-              <string>{{.Ext}}</string>
+              <string>txt</string>
+              <string>text</string>
+              <string>log</string>
             </array>
-            <key>CFBundleTypeName</key>
-            <string>{{.Name}}</string>
-            <key>CFBundleTypeRole</key>
-            <string>{{.Role}}</string>
             <key>CFBundleTypeIconFile</key>
-            <string>{{.IconName}}</string>
+            <string>iconfile</string>
           </dict>
-          {{end}}
+          <dict>
+            <key>CFBundleTypeName</key>
+            <string>HTML Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+              <string>public.html</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+              <string>html</string>
+              <string>htm</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>iconfile</string>
+          </dict>
+          <dict>
+            <key>CFBundleTypeName</key>
+            <string>Markdown Document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+              <string>net.daringfireball.markdown</string>
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+              <string>md</string>
+              <string>markdown</string>
+            </array>
+            <key>CFBundleTypeIconFile</key>
+            <string>iconfile</string>
+          </dict>
         </array>
-        {{end}}
+        <key>UTImportedTypeDeclarations</key>
+        <array>
+          <dict>
+            <key>UTTypeIdentifier</key>
+            <string>net.daringfireball.markdown</string>
+            <key>UTTypeDescription</key>
+            <string>Markdown Document</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+              <string>public.plain-text</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+              <key>public.filename-extension</key>
+              <array>
+                <string>md</string>
+                <string>markdown</string>
+              </array>
+              <key>public.mime-type</key>
+              <array>
+                <string>text/markdown</string>
+              </array>
+            </dict>
+          </dict>
+        </array>
         {{if .Info.Protocols}}
         <key>CFBundleURLTypes</key>
         <array>

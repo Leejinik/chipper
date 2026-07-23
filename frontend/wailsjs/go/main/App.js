@@ -6,6 +6,10 @@ export function ApplyUpdate(arg1) {
   return window['go']['main']['App']['ApplyUpdate'](arg1);
 }
 
+export function AssociationStatus() {
+  return window['go']['main']['App']['AssociationStatus']();
+}
+
 export function AutoUpdate() {
   return window['go']['main']['App']['AutoUpdate']();
 }
@@ -16,6 +20,14 @@ export function CancelChips() {
 
 export function CheckForUpdate() {
   return window['go']['main']['App']['CheckForUpdate']();
+}
+
+export function FileAssociationSupported() {
+  return window['go']['main']['App']['FileAssociationSupported']();
+}
+
+export function FrontendReady() {
+  return window['go']['main']['App']['FrontendReady']();
 }
 
 export function GetCurrentVersion() {
@@ -34,6 +46,10 @@ export function MarkReleaseNotesSeen() {
   return window['go']['main']['App']['MarkReleaseNotesSeen']();
 }
 
+export function OpenDefaultAppsSettings() {
+  return window['go']['main']['App']['OpenDefaultAppsSettings']();
+}
+
 export function OpenFileDialog() {
   return window['go']['main']['App']['OpenFileDialog']();
 }
@@ -44,6 +60,10 @@ export function ReadFile(arg1) {
 
 export function ReadFileAs(arg1, arg2) {
   return window['go']['main']['App']['ReadFileAs'](arg1, arg2);
+}
+
+export function RegisterFileTypes(arg1) {
+  return window['go']['main']['App']['RegisterFileTypes'](arg1);
 }
 
 export function SaveFile(arg1, arg2, arg3) {
@@ -70,6 +90,14 @@ export function StatFile(arg1) {
   return window['go']['main']['App']['StatFile'](arg1);
 }
 
+export function SupportedFileTypes() {
+  return window['go']['main']['App']['SupportedFileTypes']();
+}
+
 export function TypeChips(arg1, arg2, arg3) {
   return window['go']['main']['App']['TypeChips'](arg1, arg2, arg3);
+}
+
+export function UnregisterFileTypes(arg1) {
+  return window['go']['main']['App']['UnregisterFileTypes'](arg1);
 }

@@ -30,6 +30,13 @@ import {
   GetPendingReleaseNotes,
   MarkReleaseNotesSeen,
   ShowUpdateModeNoticeOnce,
+  FrontendReady,
+  FileAssociationSupported,
+  SupportedFileTypes,
+  AssociationStatus,
+  RegisterFileTypes,
+  UnregisterFileTypes,
+  OpenDefaultAppsSettings,
 } from "../wailsjs/go/main/App";
 import type { updater } from "../wailsjs/go/models";
 import {
@@ -395,6 +402,12 @@ function App() {
   const [keysOpen, setKeysOpen] = useState<boolean>(false); // keybinding settings modal
   const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
   const [keyError, setKeyError] = useState<string>("");
+  // --- file-association ("파일 연결") modal state ---------------------------
+  const [assocOpen, setAssocOpen] = useState<boolean>(false);
+  const [assocSupported, setAssocSupported] = useState<boolean>(false); // Windows-only registry panel
+  const [assocTypes, setAssocTypes] = useState<{ ext: string; label: string }[]>([]);
+  const [assocChecked, setAssocChecked] = useState<Record<string, boolean>>({});
+  const [assocMsg, setAssocMsg] = useState<string>("");
   const [loaded, setLoaded] = useState<boolean>(false);
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [findOpen, setFindOpen] = useState<boolean>(false);
@@ -434,6 +447,7 @@ function App() {
   const keysOpenRef = useRef(keysOpen);
   const capturingRef = useRef(capturing);
   const loadedRef = useRef(loaded);
+  const assocOpenRef = useRef(assocOpen);
   tabsRef.current = tabs;
   activeIdRef.current = activeId;
   ratioRef.current = splitRatio;
@@ -442,6 +456,7 @@ function App() {
   keysOpenRef.current = keysOpen;
   capturingRef.current = capturing;
   loadedRef.current = loaded;
+  assocOpenRef.current = assocOpen;
 
   const active = tabs.find((t) => t.id === activeId);
 
@@ -646,6 +661,57 @@ function App() {
       alert("파일을 열지 못했습니다:\n" + String(e));
     }
   }, []);
+
+  // --- file association ("파일 연결") handlers ------------------------------
+  // Opens the modal, loading platform support + per-extension current status.
+  const openAssoc = useCallback(async () => {
+    setAssocMsg("");
+    try {
+      const supported = await FileAssociationSupported();
+      setAssocSupported(supported);
+      const types = await SupportedFileTypes();
+      const list = (types || []).map((t) => ({ ext: t.ext, label: t.label }));
+      setAssocTypes(list);
+      if (supported) {
+        const status = await AssociationStatus();
+        setAssocChecked(Object.fromEntries(list.map((t) => [t.ext, !!status?.[t.ext]])));
+      }
+    } catch (e) {
+      console.error("파일 연결 상태 조회 실패", e);
+    }
+    setAssocOpen(true);
+  }, []);
+
+  // Applies the checkbox selection as a diff against the CURRENT registration
+  // (fetched fresh so we never act on stale state): registers newly-checked
+  // types, unregisters newly-unchecked ones.
+  const doApplyAssoc = useCallback(async () => {
+    try {
+      const current = await AssociationStatus();
+      const toRegister = assocTypes
+        .filter((t) => assocChecked[t.ext] && !current?.[t.ext])
+        .map((t) => t.ext);
+      const toUnregister = assocTypes
+        .filter((t) => !assocChecked[t.ext] && current?.[t.ext])
+        .map((t) => t.ext);
+      if (!toRegister.length && !toUnregister.length) {
+        setAssocMsg("변경할 내용이 없습니다.");
+        return;
+      }
+      if (toRegister.length) await RegisterFileTypes(toRegister);
+      if (toUnregister.length) await UnregisterFileTypes(toUnregister);
+      const status = await AssociationStatus();
+      setAssocChecked(Object.fromEntries(assocTypes.map((t) => [t.ext, !!status?.[t.ext]])));
+      const parts: string[] = [];
+      if (toRegister.length) parts.push(`${toRegister.length}개 형식 연결`);
+      if (toUnregister.length) parts.push(`${toUnregister.length}개 형식 해제`);
+      setAssocMsg(
+        `${parts.join(", ")} 완료. 기본 앱으로 지정하려면 아래 '기본 앱 설정 열기'에서 Chipper를 선택하세요.`
+      );
+    } catch (e) {
+      setAssocMsg("적용 실패: " + String(e));
+    }
+  }, [assocTypes, assocChecked]);
 
   // Open one or more files by absolute path (used by drag & drop). Dedupes
   // against already-open tabs and within the batch, skips binaries, and focuses
@@ -1077,7 +1143,7 @@ function App() {
   // --- keyboard shortcuts (user-remappable) ---------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (keysOpenRef.current) return; // the settings modal owns the keyboard
+      if (keysOpenRef.current || assocOpenRef.current) return; // a settings modal owns the keyboard
       const isMod = e.ctrlKey || e.metaKey;
       // Ctrl+Tab / Ctrl+Shift+Tab: fixed tab navigation (not remappable).
       if (isMod && e.key.toLowerCase() === "tab") {
@@ -1154,6 +1220,19 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [keysOpen]);
 
+  // Esc closes the file-association modal.
+  useEffect(() => {
+    if (!assocOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setAssocOpen(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [assocOpen]);
+
   // --- Ctrl+wheel: zoom the editor AND preview together ---------------------
   // The WebView's built-in Ctrl+wheel zooms the whole page (toolbar, tabs,
   // buttons and all). We swallow that everywhere so the chrome never scales,
@@ -1184,6 +1263,38 @@ function App() {
       }
     };
   }, [openPaths]);
+
+  // --- file-association: open a double-clicked / associated file ------------
+  // The running app receives pushes on "chipper:open-files" (2nd launch on
+  // Windows, or macOS openFile while running). The very first cold-start file
+  // is delivered by the PULL below: FrontendReady() marks us subscribed and
+  // returns any path the Go side buffered before this listener existed.
+  //
+  // Gated on `loaded` so it runs strictly AFTER session restore has applied its
+  // tabs. Otherwise the two mount effects race: restore does setTabs(restored)
+  // (a full replace) while this one appends the opened file — and if restore's
+  // (often larger) round-trip lands last, it clobbers the just-opened tab. The
+  // Go side keeps the path buffered (frontendReady=false) until we finally call
+  // FrontendReady() here, so deferring loses nothing; EventsOn is subscribed
+  // before that call, so no live push can slip through unheard either.
+  useEffect(() => {
+    if (!loaded) return;
+    const off = EventsOn("chipper:open-files", (paths: string[]) => {
+      if (paths && paths.length) openPaths(paths);
+    });
+    FrontendReady()
+      .then((paths) => {
+        if (paths && paths.length) openPaths(paths);
+      })
+      .catch(() => {});
+    return () => {
+      try {
+        off();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [openPaths, loaded]);
 
   // visual "drop here" overlay, driven by DOM drag events for file drags
   useEffect(() => {
@@ -1456,6 +1567,13 @@ function App() {
           </div>
         )}
         <div className="tb-right">
+          <button
+            className="tb-btn"
+            onClick={openAssoc}
+            title="파일 연결 — .md/.txt 등을 Chipper로 여는 기본 앱 설정"
+          >
+            🔗 파일 연결
+          </button>
           <button
             className="tb-btn"
             onClick={() => {
@@ -1900,6 +2018,81 @@ function App() {
                 닫기
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {assocOpen && (
+        <div className="chips-overlay" onMouseDown={() => setAssocOpen(false)}>
+          <div className="keys-dialog" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="chips-title">🔗 파일 연결</div>
+            {assocSupported ? (
+              <>
+                <div className="chips-sub">
+                  선택한 형식을 Windows의 ‘다른 앱으로 열기’ 목록에 Chipper로 추가합니다.
+                  앱이 기본값을 강제로 바꿀 수는 없어, 마지막에 ‘기본 앱 설정 열기’에서 Chipper를
+                  기본 앱으로 지정하세요.
+                </div>
+                <div className="keys-list">
+                  {assocTypes.map((t) => (
+                    <label className="keys-row" key={t.ext} style={{ cursor: "pointer" }}>
+                      <span className="keys-label">{t.label}</span>
+                      <input
+                        type="checkbox"
+                        checked={!!assocChecked[t.ext]}
+                        onChange={(e) =>
+                          setAssocChecked((prev) => ({ ...prev, [t.ext]: e.target.checked }))
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+                <div className={assocMsg ? "keys-error on" : "keys-error"}>{assocMsg || " "}</div>
+                <div className="chips-actions">
+                  <button
+                    className="tb-btn"
+                    onClick={() => OpenDefaultAppsSettings().catch(() => {})}
+                    title="Windows 설정 › 기본 앱 에서 형식별 기본 앱을 Chipper로 지정"
+                  >
+                    기본 앱 설정 열기…
+                  </button>
+                  <button className="tb-btn primary" onClick={doApplyAssoc}>
+                    적용
+                  </button>
+                  <button className="tb-btn" onClick={() => setAssocOpen(false)}>
+                    닫기
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="chips-sub">macOS에서 Chipper를 기본 앱으로 지정하는 방법</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, padding: "4px 2px 12px" }}>
+                  macOS에는 확장자별 기본 앱을 바꾸는 설정 화면이 없어 Finder에서 직접 지정합니다.
+                  <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                    <li>Finder에서 원하는 파일(예: <code>.md</code>)을 하나 선택합니다.</li>
+                    <li>
+                      <b>⌘I</b>를 눌러 ‘정보 가져오기’를 엽니다.
+                    </li>
+                    <li>
+                      ‘다음으로 열기’ 항목에서 <b>Chipper</b>를 선택합니다.
+                    </li>
+                    <li>
+                      바로 아래 <b>‘모두 변경…’</b>을 누르고 ‘계속’을 클릭합니다.
+                    </li>
+                  </ol>
+                  <div style={{ marginTop: 8, opacity: 0.8 }}>
+                    확장자 종류(텍스트 / HTML / Markdown)마다 한 번씩 반복하면 됩니다. 한 번만 열려면
+                    파일 우클릭 → ‘다음으로 열기’ → Chipper.
+                  </div>
+                </div>
+                <div className="chips-actions">
+                  <button className="tb-btn primary" onClick={() => setAssocOpen(false)}>
+                    닫기
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

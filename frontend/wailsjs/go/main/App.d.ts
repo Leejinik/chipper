@@ -5,11 +5,17 @@ import {main} from '../models';
 
 export function ApplyUpdate(arg1:updater.UpdateInfo):Promise<void>;
 
+export function AssociationStatus():Promise<Record<string, boolean>>;
+
 export function AutoUpdate():Promise<updater.AutoUpdateResult>;
 
 export function CancelChips():Promise<void>;
 
 export function CheckForUpdate():Promise<updater.UpdateInfo>;
+
+export function FileAssociationSupported():Promise<boolean>;
+
+export function FrontendReady():Promise<Array<string>>;
 
 export function GetCurrentVersion():Promise<string>;
 
@@ -19,11 +25,15 @@ export function LoadSession():Promise<string>;
 
 export function MarkReleaseNotesSeen():Promise<void>;
 
+export function OpenDefaultAppsSettings():Promise<void>;
+
 export function OpenFileDialog():Promise<main.FileDoc>;
 
 export function ReadFile(arg1:string):Promise<main.FileDoc>;
 
 export function ReadFileAs(arg1:string,arg2:string):Promise<main.FileDoc>;
+
+export function RegisterFileTypes(arg1:Array<string>):Promise<void>;
 
 export function SaveFile(arg1:string,arg2:string,arg3:string):Promise<main.FileDoc>;
 
@@ -37,4 +47,8 @@ export function StashSession(arg1:string):Promise<void>;
 
 export function StatFile(arg1:string):Promise<main.FileStat>;
 
+export function SupportedFileTypes():Promise<Array<main.AssocType>>;
+
 export function TypeChips(arg1:Array<string>,arg2:string,arg3:number):Promise<main.ChipsResult>;
+
+export function UnregisterFileTypes(arg1:Array<string>):Promise<void>;

@@ -1,5 +1,19 @@
 export namespace main {
 	
+	export class AssocType {
+	    ext: string;
+	    label: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AssocType(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ext = source["ext"];
+	        this.label = source["label"];
+	    }
+	}
 	export class ChipsResult {
 	    typed: number;
 	    total: number;
