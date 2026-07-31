@@ -206,8 +206,13 @@
   /* font-size is driven by a CodeMirror theme compartment (Ctrl+wheel zoom) */
 }
 .cm-host .cm-scroller {
+  /* This is the editing surface, so the Hangul fallback matters more than
+     elsewhere: none of the Windows/macOS families exist on Linux, and generic
+     `monospace` resolves to DejaVu Sans Mono, which has no Hangul at all.
+     "Noto Sans Mono CJK KR" (fonts-noto-cjk) keeps Korean text monospaced
+     instead of letting fontconfig drop in a proportional substitute. */
   font-family: "Cascadia Code", "D2Coding", "Consolas", "Menlo", "Courier New",
-    monospace;
+    "Noto Sans Mono CJK KR", "Ubuntu Mono", "DejaVu Sans Mono", monospace;
   line-height: 1.65;
 }
 .cm-host .cm-editor.cm-focused {

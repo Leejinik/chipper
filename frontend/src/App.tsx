@@ -32,6 +32,7 @@ import {
   ShowUpdateModeNoticeOnce,
   FrontendReady,
   FileAssociationSupported,
+  GetPlatform,
   SupportedFileTypes,
   AssociationStatus,
   RegisterFileTypes,
@@ -405,6 +406,11 @@ function App() {
   // --- file-association ("파일 연결") modal state ---------------------------
   const [assocOpen, setAssocOpen] = useState<boolean>(false);
   const [assocSupported, setAssocSupported] = useState<boolean>(false); // Windows-only registry panel
+  // GOOS of this build. "windows" until the binding answers, so the Windows path
+  // (the overwhelmingly common one) never flickers through another platform's UI.
+  // Drives the file-association guidance and whether chips auto-typing is offered.
+  const [platform, setPlatform] = useState<string>("windows");
+  const autotypeSupported = platform !== "linux"; // Win32 SendInput / osascript only
   const [assocTypes, setAssocTypes] = useState<{ ext: string; label: string }[]>([]);
   const [assocChecked, setAssocChecked] = useState<Record<string, boolean>>({});
   const [assocMsg, setAssocMsg] = useState<string>("");
@@ -534,8 +540,12 @@ function App() {
     autoApplyFired = true;
     (async () => {
       // One-time notice: auto-update changed to notify-only due to the corporate
-      // EDR policy. Fire-and-forget (native dialog, self-guarded to show once).
+      // EDR policy. Fire-and-forget (native dialog, self-guarded to show once,
+      // and a no-op off Windows where the policy never applied).
       ShowUpdateModeNoticeOnce().catch(() => {});
+      // Learn the platform here rather than in openAssoc: the toolbar's chips
+      // auto-typing button is gated on it and renders long before that modal.
+      try { setPlatform(await GetPlatform()); } catch { /* keep the default */ }
       try {
         const notes = await GetPendingReleaseNotes();
         if (notes?.version) {
@@ -669,6 +679,7 @@ function App() {
     try {
       const supported = await FileAssociationSupported();
       setAssocSupported(supported);
+      try { setPlatform(await GetPlatform()); } catch { /* keep the default */ }
       const types = await SupportedFileTypes();
       const list = (types || []).map((t) => ({ ext: t.ext, label: t.label }));
       setAssocTypes(list);
@@ -1535,11 +1546,13 @@ function App() {
             className="tb-btn"
             onClick={openChips}
             title={
-              canInClause
-                ? `선택한 ID 목록을 외부 chips 입력창에 한 개씩 자동 입력 (${keyHint("chips")})`
-                : `줄바꿈/공백으로 구분된 ID 목록을 블록 선택하면 활성화됩니다 (${keyHint("chips")})`
+              !autotypeSupported
+                ? "chips 자동입력은 Windows·macOS 전용입니다 (리눅스에는 키 입력 합성 경로가 없습니다). 대신 ‘IN절 변환’으로 복사해 붙여넣으세요."
+                : canInClause
+                  ? `선택한 ID 목록을 외부 chips 입력창에 한 개씩 자동 입력 (${keyHint("chips")})`
+                  : `줄바꿈/공백으로 구분된 ID 목록을 블록 선택하면 활성화됩니다 (${keyHint("chips")})`
             }
-            disabled={!active || !canInClause}
+            disabled={!active || !canInClause || !autotypeSupported}
           >
             ⌨ chips 자동입력
           </button>
@@ -1945,7 +1958,8 @@ function App() {
           </button>
           <button
             className="menu-item"
-            disabled={!ctxMenu.inOk}
+            disabled={!ctxMenu.inOk || !autotypeSupported}
+            title={autotypeSupported ? undefined : "chips 자동입력은 Windows·macOS 전용입니다"}
             onClick={() => {
               setCtxMenu(null);
               openChips();
@@ -2060,6 +2074,37 @@ function App() {
                     적용
                   </button>
                   <button className="tb-btn" onClick={() => setAssocOpen(false)}>
+                    닫기
+                  </button>
+                </div>
+              </>
+            ) : platform === "linux" ? (
+              <>
+                <div className="chips-sub">리눅스에서 Chipper를 기본 앱으로 지정하는 방법</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, padding: "4px 2px 12px" }}>
+                  리눅스에는 앱이 건드릴 수 있는 per-user 레지스트리가 없어, 데스크톱 환경의 파일
+                  관리자에서 직접 지정합니다.
+                  <ol style={{ margin: "8px 0 0", paddingLeft: 20 }}>
+                    <li>파일 관리자에서 원하는 파일(예: <code>.md</code>)을 우클릭합니다.</li>
+                    <li>
+                      <b>‘다른 프로그램으로 열기’</b>(GNOME: ‘다른 응용 프로그램으로 열기’)를 선택합니다.
+                    </li>
+                    <li>
+                      목록에서 <b>Chipper</b>를 고르고 <b>‘기본으로 설정’</b>을 체크한 뒤 엽니다.
+                    </li>
+                  </ol>
+                  <div style={{ marginTop: 8, opacity: 0.8 }}>
+                    목록에 Chipper가 안 보이면 <code>~/.local/share/applications/chipper.desktop</code>을
+                    만들어 주세요 —{" "}
+                    <code>Exec=/경로/chipper %f</code>,{" "}
+                    <code>MimeType=text/markdown;text/plain;text/html;</code> 두 줄이 핵심이고,
+                    저장 후 <code>update-desktop-database ~/.local/share/applications</code>를 한 번
+                    실행합니다. 터미널에서 <code>xdg-mime default chipper.desktop text/markdown</code>로
+                    바로 지정할 수도 있습니다.
+                  </div>
+                </div>
+                <div className="chips-actions">
+                  <button className="tb-btn primary" onClick={() => setAssocOpen(false)}>
                     닫기
                   </button>
                 </div>

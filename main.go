@@ -40,6 +40,7 @@ func main() {
 		Mac: &mac.Options{
 			OnFileOpen: func(filePath string) { app.deliverOpenPaths(existingFiles([]string{filePath})) },
 		},
+		Linux: linuxOptions(),
 		// Windows/Linux: keep chipper single-window. A second launch (e.g. the user
 		// double-clicks another associated file) forwards its argv to the running
 		// instance and exits, instead of spawning a second window that would fight

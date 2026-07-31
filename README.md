@@ -59,7 +59,37 @@ wails dev     # 개발 모드 (핫 리로드)
 wails build   # 배포용 실행 파일 → build\bin\chipper.exe
 ```
 
-Wails 특성상 **Windows 바이너리는 Windows에서, macOS 바이너리(.app)는 macOS에서** 빌드해야 합니다.
+### 리눅스 (Ubuntu 24.04 / 26.04)
+
+```bash
+sudo apt install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+wails build -tags webkit2_41    # → build/bin/chipper
+wails dev   -tags webkit2_41
+```
+
+`-tags webkit2_41`은 **필수**입니다. Ubuntu가 24.04에서 `webkit2gtk-4.0`을 제거했는데 Wails v2는
+아직 pkg-config를 4.0으로 가리키고 있어, 태그 없이는 `webkit2gtk-4.0.pc not found`로 실패합니다.
+
+실행 측에는 `libwebkit2gtk-4.1-0`, `libgtk-3-0t64`, `libsoup-3.0-0`이 필요하며 Ubuntu 24.04+
+데스크톱에는 이미 있습니다(서버/최소설치라면 `sudo apt install libwebkit2gtk-4.1-0`). 한글
+편집이 주 용도이므로 `fonts-noto-cjk`도 함께 설치하세요. 툴바 라벨이 이모지를 쓰므로
+`fonts-noto-color-emoji`가 없으면 ▯로 보입니다(데스크톱 설치에는 기본 포함).
+
+릴리즈 리눅스 바이너리(`chipper-linux-amd64`)는 CI가 **ubuntu-24.04**에서 빌드합니다. 실행
+범위를 정하는 관문이 둘이고 더 빡빡한 쪽이 이깁니다 — glibc 2.34(→22.04+)와
+`libwebkit2gtk-4.1.so.0`(24.04는 기본, **22.04는 별도 설치 필요**). 22.04에도 SRU 백포트로
+`libwebkit2gtk-4.1-0`(2.50.x)이 있어 실행은 되지만 기본은 4.0 계열이고 GTK 패키지명도
+`libgtk-3-0`입니다.
+
+**리눅스에서 빠지는 기능이 두 가지 있습니다.** ① **파일 연결/기본 앱 지정**은 Windows 레지스트리
+(HKCU) 기반이라 리눅스 빌드에서는 `🔗 파일 연결` 패널 자체가 숨겨집니다 — 대신 데스크톱 환경의
+"다른 프로그램으로 열기 → 기본으로 사용"을 쓰세요. ② **ID 자동 입력(autotype)**은 Win32 키 입력
+합성에 의존하므로 리눅스에서는 "이 플랫폼에서는 자동 입력이 지원되지 않습니다"를 반환합니다.
+편집기·파워툴 등 나머지 기능은 모두 동일하게 동작합니다.
+
+Wails 특성상 **각 플랫폼 바이너리는 그 플랫폼에서** 빌드해야 합니다 (Windows는 Windows에서,
+리눅스는 리눅스에서, macOS `.app`은 macOS에서). 리눅스/macOS 백엔드가 cgo로 시스템 웹뷰를
+링크하기 때문입니다.
 
 ## 기술 스택
 

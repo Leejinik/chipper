@@ -21,6 +21,8 @@ export function GetCurrentVersion():Promise<string>;
 
 export function GetPendingReleaseNotes():Promise<updater.PendingNotes>;
 
+export function GetPlatform():Promise<string>;
+
 export function LoadSession():Promise<string>;
 
 export function MarkReleaseNotesSeen():Promise<void>;

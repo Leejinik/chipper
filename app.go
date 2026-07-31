@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"unicode/utf8"
@@ -82,12 +84,34 @@ func (a *App) startup(ctx context.Context) {
 	a.updater = updater.New(updater.Config{
 		Owner:          "Leejinik",
 		Repo:           "chipper",
-		AssetName:      "chipper.exe",
+		AssetName:      releaseAssetName(),
 		CurrentVersion: a.version,
 		ConfigDir:      cfgDir,
 	})
 	if exe, err := os.Executable(); err == nil {
 		a.updater.CleanupLeftovers(exe)
+	}
+}
+
+// GetPlatform returns the GOOS this build runs on. The frontend needs it because
+// FileAssociationSupported() alone collapses Linux and macOS into one "false"
+// branch, and the two need completely different guidance — and because chips
+// auto-typing exists on Windows and macOS but not Linux, so the button has to
+// explain itself rather than just fail when pressed.
+func (a *App) GetPlatform() string { return runtime.GOOS }
+
+// releaseAssetName is the GitHub Release asset this build should look for. It
+// must match the filenames produced by .github/workflows/release.yml character
+// for character: when the GitHub API is rate-limited the updater falls back to
+// assembling the download URL from this name (see internal/updater/updater.go).
+func releaseAssetName() string {
+	switch runtime.GOOS {
+	case "linux":
+		// e.g. chipper-linux-amd64. GOARCH keeps this honest if an arm64 job is
+		// ever added to the workflow.
+		return "chipper-linux-" + runtime.GOARCH
+	default:
+		return "chipper.exe"
 	}
 }
 
@@ -234,12 +258,48 @@ type FileStat struct {
 }
 
 // fileFilters are the filters shown in the open/save native dialogs.
-var fileFilters = []wruntime.FileFilter{
-	{DisplayName: "문서 (Markdown/텍스트/HTML)", Pattern: "*.md;*.markdown;*.txt;*.text;*.log;*.html;*.htm"},
-	{DisplayName: "Markdown (*.md;*.markdown)", Pattern: "*.md;*.markdown"},
-	{DisplayName: "HTML (*.html;*.htm)", Pattern: "*.html;*.htm"},
-	{DisplayName: "텍스트 (*.txt;*.log)", Pattern: "*.txt;*.log;*.text"},
-	{DisplayName: "모든 파일 (*.*)", Pattern: "*.*"},
+var fileFilters = buildFileFilters()
+
+func buildFileFilters() []wruntime.FileFilter {
+	specs := []struct{ name, pattern string }{
+		{"문서 (Markdown/텍스트/HTML)", "*.md;*.markdown;*.txt;*.text;*.log;*.html;*.htm"},
+		{"Markdown (*.md;*.markdown)", "*.md;*.markdown"},
+		{"HTML (*.html;*.htm)", "*.html;*.htm"},
+		{"텍스트 (*.txt;*.log)", "*.txt;*.log;*.text"},
+	}
+	out := make([]wruntime.FileFilter, 0, len(specs)+1)
+	for _, s := range specs {
+		out = append(out, wruntime.FileFilter{DisplayName: s.name, Pattern: dialogPattern(s.pattern)})
+	}
+	if runtime.GOOS == "windows" {
+		out = append(out, wruntime.FileFilter{DisplayName: "모든 파일 (*.*)", Pattern: "*.*"})
+	} else {
+		// GTK reads "*.*" literally as "a name containing a dot", which hides
+		// every extensionless file — README, Makefile, dotfiles: precisely what
+		// a text editor gets opened for on Linux. "*" is the real escape hatch.
+		out = append(out, wruntime.FileFilter{DisplayName: "모든 파일 (*)", Pattern: "*"})
+	}
+	return out
+}
+
+// dialogPattern adapts a Windows-style filter pattern to the platform's native
+// dialog. Windows matches these case-insensitively; GTK's
+// gtk_file_filter_add_pattern is a case-SENSITIVE glob, so on Linux "*.md" hides
+// README.MD. Adding an upper-case twin per extension covers the shouty-extension
+// convention people actually use, without enumerating every mixed case.
+func dialogPattern(p string) string {
+	if runtime.GOOS == "windows" {
+		return p
+	}
+	parts := strings.Split(p, ";")
+	out := make([]string, 0, len(parts)*2)
+	for _, e := range parts {
+		out = append(out, e)
+		if u := strings.ToUpper(e); u != e {
+			out = append(out, u)
+		}
+	}
+	return strings.Join(out, ";")
 }
 
 // OpenFileDialog shows a native open dialog and returns the chosen file's
@@ -443,6 +503,14 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
+	// Keep an existing file's own mode rather than stamping perm over it. On
+	// Windows os.Chmod only toggles the read-only bit, so this never mattered;
+	// on Linux forcing 0644 on every save silently strips the executable bit off
+	// a script and widens a 0600 file to world-readable. perm stays the mode for
+	// files we are creating for the first time.
+	if info, serr := os.Stat(path); serr == nil && info.Mode().IsRegular() {
+		perm = info.Mode().Perm()
+	}
 	_ = os.Chmod(tmp, perm)
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
@@ -628,6 +696,13 @@ func (a *App) AutoUpdate() updater.AutoUpdateResult {
 // replacing executables (in the field it left the app with no runnable binary).
 // It fires at most once per install, guarded by a marker file in the config dir.
 func (a *App) ShowUpdateModeNoticeOnce() {
+	// Windows-only: the notice explains why the self-replacing updater was
+	// dropped, and the corporate EDR product it refers to only runs on Windows.
+	// Other platforms never had a self-replacing updater in the first place (see
+	// internal/updater/apply_other.go), so there is nothing to explain.
+	if runtime.GOOS != "windows" {
+		return
+	}
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".chipper")
 	marker := filepath.Join(dir, "update-mode-notice.seen")

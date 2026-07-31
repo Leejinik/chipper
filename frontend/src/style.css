@@ -24,8 +24,13 @@ body {
 body {
   background-color: var(--bg);
   color: var(--text);
+  /* "Noto Sans CJK KR" / NanumGothic are the family names actually installed on
+     Linux (fonts-noto-cjk, fonts-nanum). "Noto Sans KR" is the webfont name and
+     matches neither, so without them every named family misses on Ubuntu and
+     Hangul lands wherever fontconfig substitutes it. */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Malgun Gothic",
-    "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", Roboto, sans-serif;
+    "맑은 고딕", "Apple SD Gothic Neo", "Noto Sans KR", "Noto Sans CJK KR",
+    "NanumGothic", Roboto, sans-serif;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
 }

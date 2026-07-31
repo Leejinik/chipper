@@ -38,6 +38,10 @@ export function GetPendingReleaseNotes() {
   return window['go']['main']['App']['GetPendingReleaseNotes']();
 }
 
+export function GetPlatform() {
+  return window['go']['main']['App']['GetPlatform']();
+}
+
 export function LoadSession() {
   return window['go']['main']['App']['LoadSession']();
 }
