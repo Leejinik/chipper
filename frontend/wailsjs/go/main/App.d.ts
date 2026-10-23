@@ -13,6 +13,8 @@ export function CancelChips():Promise<void>;
 
 export function CheckForUpdate():Promise<updater.UpdateInfo>;
 
+export function CloseWithSession(arg1:string):Promise<void>;
+
 export function FileAssociationSupported():Promise<boolean>;
 
 export function FrontendReady():Promise<Array<string>>;
@@ -31,6 +33,10 @@ export function OpenDefaultAppsSettings():Promise<void>;
 
 export function OpenFileDialog():Promise<main.FileDoc>;
 
+export function OpenFilesDialog():Promise<Array<string>>;
+
+export function OpenFolderDialog():Promise<string>;
+
 export function ReadFile(arg1:string):Promise<main.FileDoc>;
 
 export function ReadFileAs(arg1:string,arg2:string):Promise<main.FileDoc>;
@@ -43,9 +49,9 @@ export function SaveFileDialog(arg1:string,arg2:string,arg3:string):Promise<main
 
 export function SaveSession(arg1:string):Promise<void>;
 
-export function ShowUpdateModeNoticeOnce():Promise<void>;
+export function ScanBundle(arg1:string):Promise<main.Bundle>;
 
-export function StashSession(arg1:string):Promise<void>;
+export function ShowUpdateModeNoticeOnce():Promise<void>;
 
 export function StatFile(arg1:string):Promise<main.FileStat>;
 

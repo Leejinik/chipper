@@ -10,17 +10,29 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { EditorView } from "@codemirror/view";
 import { undo, redo, selectAll } from "@codemirror/commands";
-import CodeEditor from "./CodeEditor";
-import FindReplace from "./FindReplace";
+import CodeEditor, { type PaneMode } from "./CodeEditor";
+import FindReplace, { type FindTarget } from "./FindReplace";
+import { runSyncedNav, syncedNavCommand } from "./syncNav";
+import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
+import {
+  DEFAULT_LOG_RULES,
+  looksLikeLog,
+  ruleProblem,
+  normalizeLogRules,
+  type LogRule,
+} from "./logHighlight";
 import "./App.css";
 import {
   OpenFileDialog,
+  OpenFilesDialog,
+  OpenFolderDialog,
+  ScanBundle,
   ReadFile,
   ReadFileAs,
   SaveFileDialog,
   SaveFile,
   SaveSession,
-  StashSession,
+  CloseWithSession,
   LoadSession,
   StatFile,
   TypeChips,
@@ -39,7 +51,7 @@ import {
   UnregisterFileTypes,
   OpenDefaultAppsSettings,
 } from "../wailsjs/go/main/App";
-import type { updater } from "../wailsjs/go/models";
+import type { main, updater } from "../wailsjs/go/models";
 import {
   WindowSetTitle,
   BrowserOpenURL,
@@ -69,6 +81,15 @@ interface Tab {
   mtime: number; // disk mtime (unix ms) captured at open/last save; 0 when unsaved
   encoding: string; // text encoding used to read/write the file
   reloadSeq: number; // bumped to force the editor to remount with replaced content
+  // Clean tabs are persisted as path only (a few big logs used to make the
+  // session tens of MB, re-serialized on every keystroke). Such a tab comes
+  // back with needsLoad set and is read from disk when first shown.
+  needsLoad: boolean;
+  loadError: string; // why the deferred read failed ("" = none)
+  // Shown instead of the title where set: files opened from a log bundle all
+  // share names ("messages" ×3), so they read "server1 · messages".
+  label: string;
+  logColors: "" | "on" | "off"; // log colouring override; "" = auto (log-like plain text)
 }
 
 const ENCODINGS: { id: string; label: string }[] = [
@@ -83,6 +104,126 @@ function encLabel(id: string): string {
   return ENCODINGS.find((e) => e.id === id)?.label ?? "UTF-8";
 }
 
+// Multi view: up to MAX_PANES editors side by side. Slots keep their tab and
+// mode even while hidden by a smaller pane count, so 4 → 2 → 4 restores them.
+interface Slot {
+  tabId: string; // "" = empty pane
+  mode: PaneMode;
+  server: string; // log-bundle server folder this pane follows ("" = none)
+  note: string; // why the pane is empty after a bundle switch ("" = none)
+}
+// A log bundle: a folder with one sub-folder per server. Picking a log in one
+// pane opens the same log of each pane's server.
+interface BundleInfo {
+  root: string;
+  servers: string[];
+}
+interface MultiState {
+  on: boolean;
+  count: number; // panes shown (1..MAX_PANES)
+  slots: Slot[]; // always MAX_PANES long
+  bundle: BundleInfo | null;
+}
+const MAX_PANES = 6;
+const DEFAULT_PANE_MODE: PaneMode = "read"; // logs are for reading; editing is opt-in
+const emptySlots = (): Slot[] =>
+  Array.from({ length: MAX_PANES }, () => ({ tabId: "", mode: DEFAULT_PANE_MODE, server: "", note: "" }));
+const DEFAULT_MULTI: MultiState = { on: false, count: 2, slots: emptySlots(), bundle: null };
+
+function normalizeMulti(raw: any, tabIds: Set<string>): MultiState {
+  if (!raw || typeof raw !== "object") return DEFAULT_MULTI;
+  const count = Number.isInteger(raw.count) ? Math.min(MAX_PANES, Math.max(1, raw.count)) : 2;
+  const seen = new Set<string>();
+  const slots = emptySlots().map((d, i) => {
+    const r = Array.isArray(raw.slots) ? raw.slots[i] : null;
+    const mode: PaneMode = r && (r.mode === "edit" || r.mode === "read" || r.mode === "lock") ? r.mode : d.mode;
+    let tabId = r && typeof r.tabId === "string" && tabIds.has(r.tabId) ? r.tabId : "";
+    if (tabId && seen.has(tabId)) tabId = ""; // one pane per tab
+    if (tabId) seen.add(tabId);
+    const server = r && typeof r.server === "string" ? r.server : "";
+    return { tabId, mode, server, note: "" };
+  });
+  const bundle =
+    raw.bundle && typeof raw.bundle.root === "string" && Array.isArray(raw.bundle.servers)
+      ? { root: raw.bundle.root, servers: raw.bundle.servers.filter((x: any) => typeof x === "string") }
+      : null;
+  return { on: !!raw.on, count, slots, bundle };
+}
+
+// Path of `rel` inside a bundle server folder, with the root's separator.
+function bundlePath(root: string, server: string, rel: string): string {
+  const sep = root.includes("\\") ? "\\" : "/";
+  return [root.replace(/[\\/]+$/, ""), server, ...rel.split("/")].join(sep);
+}
+
+// Windows paths are case-insensitive and take either slash.
+const isWinPath = (p: string) => /^[A-Za-z]:[\\/]|^\\\\/.test(p);
+function normPath(p: string): string {
+  return isWinPath(p) ? p.replace(/\//g, "\\").toLowerCase() : p;
+}
+function samePath(a: string, b: string): boolean {
+  return normPath(a) === normPath(b);
+}
+// Is `p` inside folder `root` (with or without a trailing separator)?
+function underRoot(p: string, root: string): boolean {
+  const r = normPath(root).replace(/[\\/]+$/, "");
+  const n = normPath(p);
+  return n.length > r.length && n.startsWith(r) && (n[r.length] === "\\" || n[r.length] === "/");
+}
+
+// The file in `server` that matches `rel`: the same relative path (rtaskmgr
+// layout), else the only file with the same name (flat "dump everything" layout).
+// Names compare case-insensitively: bundles come from Windows copies as often
+// as from Linux servers.
+function resolveInServer(scan: main.Bundle, server: string, rel: string): main.BundleFile | null {
+  const srv = scan.servers.find((x) => x.name === server);
+  if (!srv) return null;
+  const exact = srv.files.find((f) => f.rel === rel);
+  if (exact) return exact;
+  const lower = rel.toLowerCase();
+  const folded = srv.files.find((f) => f.rel.toLowerCase() === lower);
+  if (folded) return folded;
+  const base = lower.split("/").pop();
+  const same = srv.files.filter((f) => f.rel.toLowerCase().split("/").pop() === base);
+  return same.length === 1 ? same[0] : null;
+}
+
+// Rotated logs ("controller.log.2026-10-21-06", "messages-20261011",
+// "app.log.3") share a series key so the picker can fold them into one row.
+function rotationKey(rel: string): string {
+  return rel
+    .replace(/([._-])\d{4}-?\d{2}-?\d{2}([-_T.]?\d{1,2}){0,3}(_\d+)?$/, "$1*")
+    .replace(/\.\d{1,3}$/, ".*");
+}
+
+function fmtSize(n: number): string {
+  if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + "GB";
+  if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + "MB";
+  if (n >= 1 << 10) return Math.round(n / (1 << 10)) + "KB";
+  return n + "B";
+}
+const BIG_FILE = 100 << 20; // warn before opening a log this large
+
+// Columns of the 6-wide grid each pane spans: 1–3 panes sit in one row; 4 is
+// 2×2; 5 is 3 over 2; 6 is 3×2.
+const PANE_MODES: { id: PaneMode; icon: string; tip: string }[] = [
+  { id: "edit", icon: "✏️", tip: "편집 — 고칠 수 있음, 같이 움직임" },
+  { id: "read", icon: "📖", tip: "읽기 전용 — 키보드로 이동·복사는 됨, 고치기는 막힘, 같이 움직임" },
+  { id: "lock", icon: "🔒", tip: "잠금 — 키보드가 전부 막힘(복사만 됨), 마우스로만 이동, 같이 움직이기에서 빠짐" },
+];
+
+const noop = () => {};
+
+// Shortcuts that act on the focused document, ignored while it is 🔒 locked
+// (find, new, open, zoom and Ctrl+Tab still work; the toolbar mouse still does).
+const LOCK_BLOCKED_CMDS = new Set<CmdId>(["save", "saveAs", "close", "replace", "inClause", "chips"]);
+
+function paneSpan(i: number, count: number): number {
+  if (count <= 3) return 6 / count;
+  const top = Math.ceil(count / 2);
+  return i < top ? 6 / top : 6 / (count - top);
+}
+
 interface Session {
   version: number;
   tabs: Tab[];
@@ -90,10 +231,14 @@ interface Session {
   splitRatio: number;
   fontSize?: number; // editor font size (px); optional so older sessions still load
   keybindings?: Record<string, string>; // per-command combo overrides
+  logRules?: LogRule[];
+  multi?: MultiState;
 }
 
-const SESSION_VERSION = 2;
-const AUTOSAVE_MS = 150;
+// v3: clean tabs carry no content (needsLoad). Older builds reject v3 instead of
+// restoring those tabs as empty files that a save would then write back.
+const SESSION_VERSION = 3;
+const AUTOSAVE_MS = 400;
 const PREVIEW_MS = 120;
 
 // Editor font size (Ctrl+wheel to zoom, Ctrl+0 to reset). Bounds keep it usable.
@@ -296,6 +441,10 @@ function makeTab(p: Partial<Tab>): Tab {
     mtime: p.mtime ?? 0,
     encoding: p.encoding && ENC_IDS.includes(p.encoding) ? p.encoding : "utf-8",
     reloadSeq: p.reloadSeq ?? 0,
+    needsLoad: p.needsLoad ?? false,
+    loadError: "",
+    label: p.label ?? "",
+    logColors: p.logColors ?? "",
   };
 }
 
@@ -323,6 +472,9 @@ function normalizeTab(raw: any): Tab | null {
     mtime: typeof raw.mtime === "number" ? raw.mtime : 0,
     encoding: typeof raw.encoding === "string" ? raw.encoding : "utf-8",
     reloadSeq: typeof raw.reloadSeq === "number" ? raw.reloadSeq : 0,
+    needsLoad: !!raw.needsLoad && typeof raw.path === "string" && raw.path !== "",
+    label: typeof raw.label === "string" ? raw.label : "",
+    logColors: raw.logColors === "on" || raw.logColors === "off" ? raw.logColors : "",
   });
 }
 
@@ -364,15 +516,6 @@ function parseInClause(sel: string): { ok: boolean; result: string } {
   return { ok: true, result: "(" + items.join(multiline ? ",\n" : ", ") + ")" };
 }
 
-function useDebounced<T>(value: T, ms: number): T {
-  const [v, setV] = useState(value);
-  useEffect(() => {
-    const h = setTimeout(() => setV(value), ms);
-    return () => clearTimeout(h);
-  }, [value, ms]);
-  return v;
-}
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -401,6 +544,12 @@ function App() {
   const [fontSize, setFontSize] = useState<number>(DEFAULT_FONT_SIZE);
   const [keybinds, setKeybinds] = useState<Record<CmdId, string>>(DEFAULT_KEYBINDS);
   const [keysOpen, setKeysOpen] = useState<boolean>(false); // keybinding settings modal
+  const [logRules, setLogRules] = useState<LogRule[]>(DEFAULT_LOG_RULES);
+  const logRulesRef = useRef(logRules);
+  logRulesRef.current = logRules;
+  const [rulesOpen, setRulesOpen] = useState<boolean>(false); // log colour rules dialog
+  const [treeOpen, setTreeOpen] = useState<boolean>(true); // log bundle tree beside the panes
+  const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
   const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
   const [keyError, setKeyError] = useState<string>("");
   // --- file-association ("파일 연결") modal state ---------------------------
@@ -418,10 +567,34 @@ function App() {
   const [dragOver, setDragOver] = useState<boolean>(false);
   const [findOpen, setFindOpen] = useState<boolean>(false);
   const [findReplace, setFindReplace] = useState<boolean>(false);
-  const editorViewRef = useRef<EditorView | null>(null);
-  const onEditorView = useCallback((v: EditorView | null) => {
-    editorViewRef.current = v;
+  const [multi, setMulti] = useState<MultiState>(DEFAULT_MULTI);
+  const [focusSlot, setFocusSlot] = useState<number>(0);
+  const multiRef = useRef(multi);
+  multiRef.current = multi;
+  const focusSlotRef = useRef(focusSlot);
+  focusSlotRef.current = focusSlot;
+  const [paneCounts, setPaneCounts] = useState<Record<string, number>>({});
+  const [bundleScan, setBundleScan] = useState<main.Bundle | null>(null);
+  const bundleScanRef = useRef(bundleScan);
+  bundleScanRef.current = bundleScan;
+  // --- live editors ---------------------------------------------------------
+  // One EditorView per tab on screen. While mounted, a tab's text lives in its
+  // view; tab.content is refreshed only when the editor goes away (onFlush) or a
+  // save writes it, so typing never copies the whole document.
+  const viewsRef = useRef(new Map<string, EditorView>());
+  const setView = useCallback((id: string, v: EditorView | null) => {
+    if (v) viewsRef.current.set(id, v);
+    else viewsRef.current.delete(id);
   }, []);
+  // The editor commands act on: the active tab's view (the focused pane).
+  const getFocusedView = useCallback(
+    (): EditorView | null => viewsRef.current.get(activeIdRef.current) ?? null,
+    []
+  );
+  const liveContent = useCallback(
+    (t: Tab): string => viewsRef.current.get(t.id)?.state.doc.toString() ?? t.content,
+    []
+  );
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSel: boolean; inOk: boolean } | null>(null);
   const [encMenu, setEncMenu] = useState<boolean>(false);
   const [canInClause, setCanInClause] = useState<boolean>(false);
@@ -470,14 +643,20 @@ function App() {
   const snapshot = useCallback((): string => {
     const s: Session = {
       version: SESSION_VERSION,
-      tabs: tabsRef.current,
+      tabs: tabsRef.current.map((t) =>
+        t.path && !t.dirty
+          ? { ...t, content: "", needsLoad: true, loadError: "" }
+          : { ...t, content: liveContent(t) }
+      ),
       activeId: activeIdRef.current,
       splitRatio: ratioRef.current,
       fontSize: fontSizeRef.current,
       keybindings: keybindsRef.current,
+      logRules: logRulesRef.current,
+      multi: multiRef.current,
     };
     return JSON.stringify(s);
-  }, []);
+  }, [liveContent]);
 
   // --- initial load (once) --------------------------------------------------
   const didInit = useRef(false);
@@ -510,6 +689,8 @@ function App() {
               setFontSize(clampFont(s.fontSize));
             }
             setKeybinds(normalizeKeybinds(s.keybindings));
+            setLogRules(normalizeLogRules(s.logRules));
+            setMulti(normalizeMulti(s.multi, new Set(restored.map((t) => t.id))));
             setLoaded(true);
             return;
           }
@@ -568,27 +749,45 @@ function App() {
     })();
   }, []);
 
-  // --- autosave: stash to Go every change + debounced disk write ------------
+  // --- autosave: debounced, skipped when nothing changed -------------------
+  // Serializing every tab on every keystroke is what made big files sluggish,
+  // so we only write once typing pauses. A window close still keeps the final
+  // keystrokes: Go holds the close and asks for one last snapshot (below).
+  const lastSavedSnap = useRef("");
+  const saveSessionNow = useCallback(() => {
+    if (!loadedRef.current) return;
+    const snap = snapshot();
+    if (snap === lastSavedSnap.current) return;
+    lastSavedSnap.current = snap;
+    SaveSession(snap).catch((e) => {
+      lastSavedSnap.current = ""; // retry on the next change
+      console.error("자동저장 실패", e);
+    });
+  }, [snapshot]);
+
+  // Keystrokes don't change React state (see viewsRef), so they arm the same
+  // timer through markEdited instead of through this effect.
+  const autosaveTimer = useRef<number | undefined>(undefined);
+  const scheduleAutosave = useCallback(() => {
+    window.clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = window.setTimeout(saveSessionNow, AUTOSAVE_MS);
+  }, [saveSessionNow]);
+
   useEffect(() => {
     if (!loaded) return;
-    const snap = snapshot();
-    // Keep the backend's in-memory copy current so OnBeforeClose can flush the
-    // final keystrokes synchronously even on an abrupt window close.
-    StashSession(snap).catch(() => {});
-    const h = setTimeout(() => {
-      SaveSession(snap).catch((e) => console.error("자동저장 실패", e));
-    }, AUTOSAVE_MS);
-    return () => clearTimeout(h);
-  }, [tabs, activeId, splitRatio, fontSize, keybinds, loaded, snapshot]);
+    scheduleAutosave();
+  }, [tabs, activeId, splitRatio, fontSize, keybinds, multi, logRules, loaded, scheduleAutosave]);
+
+  useEffect(() => {
+    const off = EventsOn("chipper:flush-before-close", () => {
+      CloseWithSession(loadedRef.current ? snapshot() : "").catch(() => {});
+    });
+    return off;
+  }, [snapshot]);
 
   // --- flush on focus loss / hide (extra insurance) -------------------------
   useEffect(() => {
-    const flush = () => {
-      if (!loadedRef.current) return;
-      const snap = snapshot();
-      StashSession(snap).catch(() => {});
-      SaveSession(snap).catch(() => {});
-    };
+    const flush = saveSessionNow;
     window.addEventListener("blur", flush);
     window.addEventListener("pagehide", flush);
     window.addEventListener("beforeunload", flush);
@@ -599,7 +798,7 @@ function App() {
       window.removeEventListener("beforeunload", flush);
       document.removeEventListener("visibilitychange", flush);
     };
-  }, [snapshot]);
+  }, [saveSessionNow]);
 
   // --- window title ---------------------------------------------------------
   useEffect(() => {
@@ -727,15 +926,19 @@ function App() {
   // Open one or more files by absolute path (used by drag & drop). Dedupes
   // against already-open tabs and within the batch, skips binaries, and focuses
   // the last one opened.
-  const openPaths = useCallback(async (paths: string[]) => {
+  // Returns the ids of the tabs (opened or already open) in path order; pass
+  // activate=false when the caller places them itself (multi-view panes).
+  const openPaths = useCallback(async (paths: string[], activate = true): Promise<string[]> => {
     const seen = new Set(tabsRef.current.filter((t) => t.path).map((t) => t.path));
     const skipped: string[] = [];
+    const ids: string[] = [];
     let lastId = "";
     for (const path of paths) {
       if (!path) continue;
       const existing = tabsRef.current.find((t) => t.path === path);
       if (existing) {
         lastId = existing.id;
+        ids.push(existing.id);
         continue;
       }
       if (seen.has(path)) continue; // duplicate within this drop batch
@@ -760,21 +963,23 @@ function App() {
         seen.add(path);
         setTabs((prev) => (prev.some((t) => t.path === tab.path) ? prev : [...prev, tab]));
         lastId = tab.id;
+        ids.push(tab.id);
       } catch (e) {
         skipped.push((path.split(/[\\/]/).pop() || path) + " (열기 실패)");
         console.error("드롭 파일 열기 실패", path, e);
       }
     }
-    if (lastId) setActiveId(lastId);
+    if (activate && lastId) setActiveId(lastId);
     if (skipped.length) {
       alert("다음 파일은 열 수 없습니다 (텍스트 문서가 아니거나 읽기 실패):\n- " + skipped.join("\n- "));
     }
+    return ids;
   }, []);
 
   const doSaveAs = useCallback(async () => {
     const t = getActive();
-    if (!t) return;
-    const savedContent = t.content; // exactly what we hand to disk
+    if (!t || t.needsLoad) return; // content not read yet — never write ""
+    const savedContent = liveContent(t); // exactly what we hand to disk
     try {
       const res = await SaveFileDialog(suggestName(t), savedContent, t.encoding);
       if (!res || res.canceled) return;
@@ -788,8 +993,9 @@ function App() {
                 title: res.name,
                 lang,
                 mtime: res.modTime,
+                content: savedContent,
                 // stay dirty if the user typed while the dialog was open
-                dirty: x.content !== savedContent,
+                dirty: liveContent(x) !== savedContent,
                 view: lang === "plaintext" && x.view === "split" ? "editor" : x.view,
               }
             : x
@@ -803,30 +1009,30 @@ function App() {
     } catch (e) {
       alert("저장하지 못했습니다:\n" + String(e));
     }
-  }, [getActive]);
+  }, [getActive, liveContent]);
 
   const doSave = useCallback(async () => {
     const t = getActive();
-    if (!t) return;
+    if (!t || t.needsLoad) return; // content not read yet — never write ""
     if (!t.path) {
       await doSaveAs();
       return;
     }
-    const savedContent = t.content;
+    const savedContent = liveContent(t);
     if (!(await confirmOverwriteIfChanged(t))) return;
     try {
       const doc = await SaveFile(t.path, savedContent, t.encoding);
       setTabs((prev) =>
         prev.map((x) =>
           x.id === t.id
-            ? { ...x, dirty: x.content !== savedContent, mtime: doc.modTime }
+            ? { ...x, content: savedContent, dirty: liveContent(x) !== savedContent, mtime: doc.modTime }
             : x
         )
       );
     } catch (e) {
       alert("저장하지 못했습니다:\n" + String(e));
     }
-  }, [getActive, doSaveAs, confirmOverwriteIfChanged]);
+  }, [getActive, doSaveAs, confirmOverwriteIfChanged, liveContent]);
 
   const doCloseTab = useCallback((id: string) => {
     const prev = tabsRef.current;
@@ -847,8 +1053,386 @@ function App() {
     }
   }, []);
 
-  const updateContent = useCallback((id: string, content: string) => {
-    setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, content, dirty: true } : x)));
+  // --- deferred read of tabs restored without content ------------------------
+  // Only the tab being looked at is read, so a session full of big logs starts
+  // fast and holds in memory just what has actually been opened.
+  const loadingIds = useRef(new Set<string>());
+  const loadTabFromDisk = useCallback(async (t: Tab) => {
+    if (loadingIds.current.has(t.id)) return;
+    loadingIds.current.add(t.id);
+    let res: Awaited<ReturnType<typeof ReadFile>> | null = null;
+    let err = "";
+    try {
+      // Keep the encoding the tab was using; fall back to auto-detection.
+      res = await ReadFileAs(t.path, t.encoding).catch(() => ReadFile(t.path));
+      if (res?.binary) {
+        res = null;
+        err = "텍스트 파일이 아닙니다.";
+      }
+    } catch (e) {
+      err = String(e);
+    }
+    loadingIds.current.delete(t.id);
+    setTabs((prev) =>
+      prev.map((x) =>
+        x.id !== t.id || !x.needsLoad
+          ? x
+          : res
+            ? {
+                ...x,
+                content: res.content,
+                encoding: res.encoding || x.encoding,
+                mtime: res.modTime,
+                needsLoad: false,
+                loadError: "",
+                reloadSeq: x.reloadSeq + 1,
+              }
+            : { ...x, loadError: err || "파일을 읽지 못했습니다." }
+      )
+    );
+  }, []);
+
+  useEffect(() => {
+    if (active && active.needsLoad && !active.loadError) loadTabFromDisk(active);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active?.id, active?.needsLoad, active?.loadError, loadTabFromDisk]);
+
+  // --- multi view -----------------------------------------------------------
+  // The focused pane's tab is the active tab, so the status bar, save, close and
+  // every editor command keep meaning "the editor I am in".
+  const focusPane = useCallback((i: number) => {
+    const id = multiRef.current.slots[i]?.tabId ?? "";
+    setFocusSlot(i);
+    activeIdRef.current = id; // a context menu may read it before the re-render
+    setActiveId(id);
+    const v = id ? viewsRef.current.get(id) : undefined;
+    const r = v?.state.selection.main;
+    setCanInClause(!!v && !!r && r.to - r.from <= 2_000_000 && tokenizeList(v.state.sliceDoc(r.from, r.to)).ok);
+  }, []);
+
+  // Put tabs into panes: the first at `start`, the rest into the next empty
+  // visible panes (extras just stay open as tabs). A tab lives in one pane only.
+  const placeTabs = useCallback((ids: string[], start: number) => {
+    if (!ids.length) return;
+    setMulti((m) => {
+      const slots = m.slots.map((x) => ({ ...x }));
+      const put = (i: number, id: string) => {
+        slots.forEach((x) => {
+          if (x.tabId === id) x.tabId = "";
+        });
+        slots[i].tabId = id;
+      };
+      put(start, ids[0]);
+      let k = 1;
+      for (let n = 1; n < m.count && k < ids.length; n++) {
+        const j = (start + n) % m.count;
+        if (!slots[j].tabId) put(j, ids[k++]);
+      }
+      return { ...m, slots };
+    });
+    setFocusSlot(start);
+    activeIdRef.current = ids[0];
+    setActiveId(ids[0]);
+  }, []);
+
+  const openIntoPanes = useCallback(
+    async (paths: string[], start: number) => {
+      const ids = await openPaths(paths, false);
+      placeTabs(ids, start);
+    },
+    [openPaths, placeTabs]
+  );
+
+  const openFilesIntoPane = useCallback(
+    async (i: number) => {
+      try {
+        const paths = await OpenFilesDialog();
+        if (paths && paths.length) await openIntoPanes(paths, i);
+      } catch (e) {
+        alert("파일을 열지 못했습니다:\n" + String(e));
+      }
+    },
+    [openIntoPanes]
+  );
+
+  // --- log bundle ----------------------------------------------------------------
+  // Open one file as a tab (or find it already open); null if not text.
+  const openOne = useCallback(async (path: string, label: string): Promise<string | null> => {
+    const existing = tabsRef.current.find((t) => samePath(t.path, path));
+    if (existing) {
+      if (!existing.label) {
+        setTabs((prev) => prev.map((t) => (t.id === existing.id ? { ...t, label } : t)));
+      }
+      return existing.id;
+    }
+    const res = await ReadFile(path);
+    if (!res || res.binary) return null;
+    const lang = langFromPath(res.path);
+    const tab = makeTab({
+      title: res.name,
+      path: res.path,
+      content: res.content,
+      lang,
+      view: defaultView(lang),
+      mtime: res.modTime,
+      encoding: res.encoding,
+      label,
+    });
+    setTabs((prev) => (prev.some((t) => samePath(t.path, tab.path)) ? prev : [...prev, tab]));
+    return tab.id;
+  }, []);
+
+  const scanBundle = useCallback(async (root: string): Promise<main.Bundle | null> => {
+    try {
+      const b = await ScanBundle(root);
+      setBundleScan(b);
+      return b;
+    } catch (e) {
+      alert("로그 묶음 폴더를 읽지 못했습니다:\n" + String(e));
+      return null;
+    }
+  }, []);
+
+  // Bumped by every bundle switch / new bundle: a switch still awaiting file
+  // reads when a newer one starts drops its result instead of overwriting.
+  const bundleGen = useRef(0);
+
+  // Choose a bundle folder: one pane per server (up to MAX_PANES), then pick a log.
+  const openBundle = useCallback(async () => {
+    let root = "";
+    try {
+      root = await OpenFolderDialog();
+    } catch (e) {
+      alert("폴더를 고르지 못했습니다:\n" + String(e));
+      return;
+    }
+    if (!root) return;
+    const b = await scanBundle(root);
+    if (!b) return;
+    bundleGen.current++;
+    const servers = b.servers.map((x) => x.name);
+    const old = multiRef.current.bundle;
+    setFindOpen(false);
+    setMulti((m) => ({
+      on: true,
+      count: Math.min(servers.length, MAX_PANES),
+      bundle: { root, servers },
+      slots: m.slots.map((x, i) => ({ ...x, tabId: "", server: servers[i] ?? "", note: "" })),
+    }));
+    // Unedited tabs the previous bundle opened go with it.
+    if (old) {
+      setTabs((prev) => prev.filter((t) => !(t.label && !t.dirty && underRoot(t.path, old.root))));
+    }
+    setFocusSlot(0);
+    activeIdRef.current = "";
+    setActiveId("");
+    setTreeOpen(true); // pick logs from the tree
+    if (servers.length > MAX_PANES) {
+      alert(
+        `서버 폴더가 ${servers.length}개라 앞의 ${MAX_PANES}개만 칸에 넣었습니다.\n칸 아래 서버 이름을 눌러 다른 서버로 바꿀 수 있습니다.`
+      );
+    }
+  }, [scanBundle]);
+
+  // Show `rel` in the given panes, each from its own server folder (`serverFor`
+  // overrides a pane's server, used when the pane's server is being changed).
+  // Panes whose server lacks the file say so; two panes never get the same tab.
+  // Tabs the switch pushed out of every pane are closed unless edited, so the
+  // tab bar doesn't pile up.
+  const switchBundleLog = useCallback(
+    async (rel: string, only: number | null, serverFor?: { slot: number; server: string }) => {
+      const m = multiRef.current;
+      if (!m.bundle) return;
+      const gen = ++bundleGen.current;
+      const root = m.bundle.root;
+      // After a restart the file lists aren't loaded yet: read the folder now.
+      const scan = bundleScanRef.current?.root === root ? bundleScanRef.current : await scanBundle(root);
+      if (!scan || gen !== bundleGen.current) return;
+      const serverOf = (i: number) => (serverFor && serverFor.slot === i ? serverFor.server : m.slots[i]?.server ?? "");
+      const targets = (only != null ? [only] : Array.from({ length: m.count }, (_, i) => i)).filter((i) => serverOf(i));
+      const picks = targets.map((i) => ({ i, server: serverOf(i), file: resolveInServer(scan, serverOf(i), rel) }));
+      const big = picks.filter((x) => x.file && !x.file.compressed && x.file.size >= BIG_FILE);
+      if (
+        big.length &&
+        !window.confirm(
+          `큰 파일이 있습니다 (${big.map((x) => `${x.server} ${fmtSize(x.file!.size)}`).join(", ")}).\n` +
+            "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?"
+        )
+      ) {
+        return;
+      }
+      const base = rel.split("/").pop() || rel;
+      const result = new Map<number, { tabId: string; note: string; server: string }>();
+      // tab id → visible pane showing it. Panes outside this switch keep theirs;
+      // a target that would duplicate one gets a note instead.
+      const taken = new Map<string, number>();
+      m.slots.slice(0, m.count).forEach((x, i) => {
+        if (x.tabId && !targets.includes(i)) taken.set(x.tabId, i);
+      });
+      for (const x of picks) {
+        let r = { tabId: "", note: "", server: x.server };
+        if (!x.file) r.note = `${x.server}에는 ${base} 가 없습니다`;
+        else if (x.file.compressed) r.note = `${x.file.rel} 은 압축 파일이라 열 수 없습니다 (풀어서 여세요)`;
+        else {
+          let id: string | null = null;
+          try {
+            id = await openOne(bundlePath(root, x.server, x.file.rel), `${x.server} · ${x.file.rel.split("/").pop()}`);
+          } catch {
+            id = null;
+          }
+          if (!id) r.note = `${x.file.rel} 을 열 수 없습니다 (텍스트가 아니거나 읽기 실패)`;
+          else if (taken.has(id)) r.note = `같은 파일이 ${taken.get(id)! + 1}번 칸에 열려 있습니다`;
+          else {
+            taken.set(id, x.i);
+            r.tabId = id;
+          }
+        }
+        result.set(x.i, r);
+      }
+      // A newer switch or another bundle took over while files were read.
+      if (gen !== bundleGen.current || multiRef.current.bundle?.root !== root) return;
+      const before = multiRef.current;
+      // While files were read the user may have shrunk the grid or re-pointed a
+      // pane: such panes keep what they have now.
+      for (const [i, r] of [...result]) {
+        if (i >= before.count || (!(serverFor && serverFor.slot === i) && before.slots[i]?.server !== r.server)) {
+          result.delete(i);
+        }
+      }
+      const placed = new Set([...result.values()].map((r) => r.tabId).filter(Boolean));
+      const slots = before.slots.map((x, i) => {
+        const r = result.get(i);
+        if (r) return { ...x, tabId: r.tabId, note: r.note, server: r.server };
+        // one pane per tab: a hidden pane (beyond the count) gives up a tab just placed
+        return i >= before.count && x.tabId && placed.has(x.tabId) ? { ...x, tabId: "", note: "" } : x;
+      });
+      const pushedOut = new Set(
+        before.slots.map((x) => x.tabId).filter((id) => id && !slots.some((x) => x.tabId === id))
+      );
+      setMulti({ ...before, slots });
+      setTabs((prev) => prev.filter((t) => !(pushedOut.has(t.id) && !t.dirty && t.label)));
+      const focusId = slots[focusSlotRef.current]?.tabId ?? "";
+      activeIdRef.current = focusId;
+      setActiveId(focusId);
+    },
+    [openOne, scanBundle]
+  );
+
+  // Point a pane at another server of the bundle, keeping the log it shows.
+  const setPaneServer = useCallback(
+    (i: number, server: string) => {
+      const m = multiRef.current;
+      const cur = tabsRef.current.find((t) => t.id === m.slots[i]?.tabId);
+      const prefix = m.bundle && m.slots[i].server ? bundlePath(m.bundle.root, m.slots[i].server, "") : "";
+      const rel = cur && prefix && underRoot(cur.path, prefix) ? cur.path.slice(prefix.length).replace(/\\/g, "/") : "";
+      if (rel) {
+        switchBundleLog(rel, i, { slot: i, server }); // sets the server along with the file
+      } else {
+        setMulti((mm) => ({ ...mm, slots: mm.slots.map((x, k) => (k === i ? { ...x, server, note: "" } : x)) }));
+      }
+    },
+    [switchBundleLog]
+  );
+
+  // Tree: a file goes to the pane following its server — the focused pane if it
+  // does, else the first such pane, else the focused pane switches server.
+  const openFromTree = useCallback(
+    (server: string, rel: string) => {
+      const m = multiRef.current;
+      const vis = m.slots.slice(0, m.count);
+      const f = focusSlotRef.current;
+      const idx = vis[f]?.server === server ? f : vis.findIndex((x) => x.server === server);
+      const target = idx >= 0 ? idx : Math.min(f, m.count - 1);
+      setFocusSlot(target);
+      switchBundleLog(rel, target, { slot: target, server });
+    },
+    [switchBundleLog]
+  );
+
+  // After a restart the bundle's file list is read again for the tree.
+  useEffect(() => {
+    if (loaded && multi.on && multi.bundle && bundleScanRef.current?.root !== multi.bundle.root) {
+      scanBundle(multi.bundle.root);
+    }
+  }, [loaded, multi.on, multi.bundle, scanBundle]);
+
+  const clearPane = useCallback((i: number) => {
+    setMulti((m) => ({ ...m, slots: m.slots.map((x, k) => (k === i ? { ...x, tabId: "" } : x)) }));
+    if (i === focusSlotRef.current) {
+      activeIdRef.current = "";
+      setActiveId("");
+    }
+  }, []);
+
+  const setPaneMode = useCallback((i: number, mode: PaneMode) => {
+    setMulti((m) => ({ ...m, slots: m.slots.map((x, k) => (k === i ? { ...x, mode } : x)) }));
+  }, []);
+
+  const setPaneCount = useCallback(
+    (n: number) => {
+      setMulti((m) => ({ ...m, count: n }));
+      if (focusSlotRef.current >= n) focusPane(0);
+    },
+    [focusPane]
+  );
+
+  const toggleMulti = useCallback(() => {
+    setFindOpen(false);
+    setMulti((m) => ({ ...m, on: !m.on }));
+  }, []);
+
+  // A tab activated from outside the panes (tab bar, Ctrl+O, a dropped or
+  // associated file, a new file) goes into the first empty pane, otherwise
+  // replaces the focused one. Already shown → just focus its pane.
+  useEffect(() => {
+    if (!multi.on || !activeId) return;
+    const vis = multi.slots.slice(0, multi.count);
+    const at = vis.findIndex((x) => x.tabId === activeId);
+    if (at >= 0) {
+      if (at !== focusSlot) {
+        setFocusSlot(at);
+        viewsRef.current.get(activeId)?.focus(); // keys must go where the status bar points
+      }
+      return;
+    }
+    let target = vis.findIndex((x) => !x.tabId);
+    if (target < 0) target = Math.min(focusSlot, multi.count - 1);
+    setMulti((m) => ({
+      ...m,
+      slots: m.slots.map((x, k) =>
+        k === target ? { ...x, tabId: activeId } : x.tabId === activeId ? { ...x, tabId: "" } : x
+      ),
+    }));
+    setFocusSlot(target);
+  }, [activeId, multi, focusSlot]);
+
+  // Closed tabs leave their pane empty.
+  useEffect(() => {
+    const ids = new Set(tabs.map((t) => t.id));
+    setMulti((m) =>
+      m.slots.some((x) => x.tabId && !ids.has(x.tabId))
+        ? { ...m, slots: m.slots.map((x) => (x.tabId && !ids.has(x.tabId) ? { ...x, tabId: "" } : x)) }
+        : m
+    );
+  }, [tabs]);
+
+  // Leaving multi view with an empty pane focused: show some tab again.
+  useEffect(() => {
+    if (!multi.on && !activeId && tabs.length) setActiveId(tabs[0].id);
+  }, [multi.on, activeId, tabs]);
+
+  // Every visible pane reads its file when it first appears (not just the
+  // active tab, as in single view).
+  useEffect(() => {
+    if (!multi.on) return;
+    for (const x of multi.slots.slice(0, multi.count)) {
+      const t = tabs.find((y) => y.id === x.tabId);
+      if (t && t.needsLoad && !t.loadError) loadTabFromDisk(t);
+    }
+  }, [multi, tabs, loadTabFromDisk]);
+
+  const retryLoad = useCallback((id: string) => {
+    setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, loadError: "" } : x)));
   }, []);
 
   const setViewFor = useCallback((id: string, view: ViewMode) => {
@@ -857,6 +1441,11 @@ function App() {
 
   const openFind = useCallback(
     (replace: boolean) => {
+      if (multiRef.current.on) {
+        setFindReplace(replace);
+        setFindOpen(true);
+        return;
+      }
       const a = getActive();
       if (!a) return;
       if (a.view === "preview") setViewFor(a.id, "split"); // ensure the editor is visible
@@ -870,7 +1459,7 @@ function App() {
   const saveWithEncoding = useCallback(
     async (enc: string) => {
       const t = getActive();
-      if (!t) return;
+      if (!t || t.needsLoad) return; // content not read yet — never write ""
       if (!t.path) {
         // No file yet — just record the intended encoding for the next "다른 이름으로 저장".
         setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, encoding: enc } : x)));
@@ -880,11 +1469,12 @@ function App() {
       try {
         // Commit the encoding ONLY after the write succeeds, so a failed re-encode
         // (e.g. CP949 with unsupported chars) leaves the tab on its working encoding.
-        const doc = await SaveFile(t.path, t.content, enc);
+        const text = liveContent(t);
+        const doc = await SaveFile(t.path, text, enc);
         setTabs((prev) =>
           prev.map((x) =>
             x.id === t.id
-              ? { ...x, encoding: enc, dirty: x.content !== t.content, mtime: doc.modTime }
+              ? { ...x, content: text, encoding: enc, dirty: liveContent(x) !== text, mtime: doc.modTime }
               : x
           )
         );
@@ -892,7 +1482,7 @@ function App() {
         alert("저장하지 못했습니다:\n" + String(e));
       }
     },
-    [getActive, confirmOverwriteIfChanged]
+    [getActive, confirmOverwriteIfChanged, liveContent]
   );
 
   // Re-read the file from disk decoding it with a different encoding.
@@ -903,11 +1493,21 @@ function App() {
       if (t.dirty && !window.confirm("저장하지 않은 변경사항이 사라집니다.\n다른 인코딩으로 다시 열까요?")) {
         return;
       }
+      const before = liveContent(t);
       try {
         const res = await ReadFileAs(t.path, enc);
         if (!res) return;
         if (res.binary) {
           alert("선택한 인코딩으로는 이 파일을 텍스트로 읽을 수 없습니다.\n다시 열기를 취소했습니다.");
+          return;
+        }
+        // Typed while the file was being read? Don't silently drop it.
+        const now = tabsRef.current.find((x) => x.id === t.id);
+        if (!now) return;
+        if (
+          liveContent(now) !== before &&
+          !window.confirm("다시 여는 동안 고친 내용이 있습니다.\n그 내용을 버리고 다른 인코딩으로 다시 열까요?")
+        ) {
           return;
         }
         setTabs((prev) =>
@@ -919,6 +1519,8 @@ function App() {
                   encoding: res.encoding,
                   dirty: false,
                   mtime: res.modTime,
+                  needsLoad: false,
+                  loadError: "",
                   reloadSeq: x.reloadSeq + 1, // force the editor to remount with new content
                 }
               : x
@@ -928,7 +1530,7 @@ function App() {
         alert("다시 열지 못했습니다:\n" + String(e));
       }
     },
-    [getActive]
+    [getActive, liveContent]
   );
 
   // --- editor right-click context menu --------------------------------------
@@ -936,7 +1538,7 @@ function App() {
     // Let the find/replace inputs use the browser's native text menu.
     if ((e.target as HTMLElement).closest(".find-panel")) return;
     e.preventDefault();
-    const v = editorViewRef.current;
+    const v = getFocusedView();
     const hasSel = v ? v.state.selection.ranges.some((r) => !r.empty) : false;
     let inOk = false;
     if (v) {
@@ -949,11 +1551,11 @@ function App() {
     const y = Math.min(e.clientY, window.innerHeight - MH);
     setEncMenu(false);
     setCtxMenu({ x, y, hasSel, inOk });
-  }, []);
+  }, [getFocusedView]);
 
   const runCtx = useCallback(async (action: string) => {
     setCtxMenu(null);
-    const v = editorViewRef.current;
+    const v = getFocusedView();
     if (!v) return;
     v.focus();
     try {
@@ -971,20 +1573,22 @@ function App() {
           return;
         }
         // only remove the selection once it is safely on the clipboard
-        if (action === "cut") v.dispatch(v.state.replaceSelection(""));
+        // (direct dispatches bypass readOnly, so check it ourselves)
+        if (action === "cut" && !v.state.readOnly) v.dispatch(v.state.replaceSelection(""));
       } else if (action === "paste") {
+        if (v.state.readOnly) return;
         const text = await ClipboardGetText();
         if (text) v.dispatch(v.state.replaceSelection(text));
       }
     } catch (err) {
       console.error("컨텍스트 메뉴 동작 실패", action, err);
     }
-  }, []);
+  }, [getFocusedView]);
 
   // Convert the selected ID list into an SQL IN-clause, replacing the selection.
   const doInClause = useCallback(() => {
-    const v = editorViewRef.current;
-    if (!v) return;
+    const v = getFocusedView();
+    if (!v || v.state.readOnly) return;
     const r = v.state.selection.main;
     const parsed = parseInClause(v.state.sliceDoc(r.from, r.to));
     if (!parsed.ok) return;
@@ -993,11 +1597,11 @@ function App() {
       selection: { anchor: r.from + parsed.result.length }, // collapse after the result
     });
     v.focus();
-  }, []);
+  }, [getFocusedView]);
 
   // --- chips 자동입력 -------------------------------------------------------
   const openChips = useCallback(() => {
-    const v = editorViewRef.current;
+    const v = getFocusedView();
     if (!v) return;
     const r = v.state.selection.main;
     const { ok, items } = tokenizeList(v.state.sliceDoc(r.from, r.to));
@@ -1015,7 +1619,7 @@ function App() {
       total: items.length,
       message: "",
     });
-  }, []);
+  }, [getFocusedView]);
 
   // countdown tick
   useEffect(() => {
@@ -1159,6 +1763,21 @@ function App() {
       // Ctrl+Tab / Ctrl+Shift+Tab: fixed tab navigation (not remappable).
       if (isMod && e.key.toLowerCase() === "tab") {
         e.preventDefault();
+        const m = multiRef.current;
+        if (m.on) {
+          const filled = m.slots
+            .slice(0, m.count)
+            .map((x, i) => (x.tabId ? i : -1))
+            .filter((i) => i >= 0);
+          if (filled.length < 2) return;
+          const at = filled.indexOf(focusSlotRef.current);
+          const next = e.shiftKey
+            ? filled[(at - 1 + filled.length) % filled.length]
+            : filled[(at + 1) % filled.length];
+          focusPane(next);
+          viewsRef.current.get(m.slots[next].tabId)?.focus();
+          return;
+        }
         const ts = tabsRef.current;
         if (ts.length < 2) return;
         const i = ts.findIndex((t) => t.id === activeIdRef.current);
@@ -1173,11 +1792,13 @@ function App() {
       const id = CMD_IDS.find((k) => binds[k] === combo);
       if (!id) return;
       e.preventDefault();
+      const m = multiRef.current;
+      if (m.on && m.slots[focusSlotRef.current]?.mode === "lock" && LOCK_BLOCKED_CMDS.has(id)) return;
       runCommand(id);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [runCommand]);
+  }, [runCommand, focusPane]);
 
   // --- keybinding capture ---------------------------------------------------
   // While a settings row is "listening", the next key combo (re)binds it.
@@ -1261,10 +1882,26 @@ function App() {
     return () => window.removeEventListener("wheel", onWheel, true);
   }, []);
 
+  // A tree drag cancelled or dropped outside a pane must not leave a pane outlined.
+  useEffect(() => {
+    const clear = () => setDropSlot(null);
+    window.addEventListener("dragend", clear);
+    window.addEventListener("drop", clear);
+    return () => {
+      window.removeEventListener("dragend", clear);
+      window.removeEventListener("drop", clear);
+    };
+  }, []);
+
   // --- drag & drop: open files dropped onto the window ----------------------
   useEffect(() => {
-    OnFileDrop((_x, _y, paths) => {
-      if (paths && paths.length) openPaths(paths);
+    OnFileDrop((x, y, paths) => {
+      if (!paths || !paths.length) return;
+      const pane = multiRef.current.on
+        ? document.elementFromPoint(x, y)?.closest("[data-slot]")?.getAttribute("data-slot")
+        : null;
+      if (pane != null) openIntoPanes(paths, Number(pane));
+      else openPaths(paths);
     }, false); // false = the whole window is a drop zone
     return () => {
       try {
@@ -1273,7 +1910,7 @@ function App() {
         /* ignore */
       }
     };
-  }, [openPaths]);
+  }, [openPaths, openIntoPanes]);
 
   // --- file-association: open a double-clicked / associated file ------------
   // The running app receives pushes on "chipper:open-files" (2nd launch on
@@ -1334,15 +1971,86 @@ function App() {
   }, []);
 
   // --- preview (debounced so large docs stay responsive) --------------------
-  const previewSource = useDebounced(active && active.lang !== "html" ? active.content : "", PREVIEW_MS);
+  // Only feed the preview while it is on screen: escaping a 10MB log on every
+  // edit for a hidden pane was a large part of the lag on big files.
+  // Keystrokes don't re-render the app, so the preview and the status-bar
+  // character count re-read the live document a moment after typing pauses.
+  const [previewSrc, setPreviewSrc] = useState("");
+  const [, setDocTick] = useState(0);
+  const refreshTimer = useRef<number | undefined>(undefined);
+  const refreshActive = useCallback(() => {
+    window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => {
+      const t = tabsRef.current.find((x) => x.id === activeIdRef.current);
+      const on = !!t && t.view !== "editor" && !t.needsLoad && !multiRef.current.on;
+      setPreviewSrc(t && on ? liveContent(t) : "");
+      setDocTick((n) => n + 1);
+    }, PREVIEW_MS);
+  }, [liveContent]);
+  useEffect(refreshActive, [
+    activeId,
+    active?.view,
+    active?.needsLoad,
+    active?.reloadSeq,
+    active?.content,
+    refreshActive,
+  ]);
+
   const previewHtml = useMemo(() => {
     if (!active) return "";
     if (active.lang === "html") return ""; // handled by the sandboxed iframe
-    if (active.lang === "markdown") return renderMarkdown(previewSource);
-    return `<pre class="plain">${escapeHtml(previewSource)}</pre>`;
-  }, [previewSource, active?.lang]);
+    if (active.lang === "markdown") return renderMarkdown(previewSrc);
+    return `<pre class="plain">${escapeHtml(previewSrc)}</pre>`;
+  }, [previewSrc, active?.lang]);
 
-  const htmlPreview = useDebounced(active && active.lang === "html" ? active.content : "", PREVIEW_MS);
+  const htmlPreview = active?.lang === "html" ? previewSrc : "";
+
+  // A keystroke in tab `id`'s editor: flag it dirty once, arm the autosave, and
+  // refresh the preview/counters when it is the tab on screen.
+  const markEdited = useCallback(
+    (id: string) => {
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (t && !t.dirty) setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, dirty: true } : x)));
+      scheduleAutosave();
+      if (id === activeIdRef.current) refreshActive();
+    },
+    [scheduleAutosave, refreshActive]
+  );
+  // An edited editor is going away: keep its final text in the tab. A stale
+  // editor (the tab was reloaded with new content since) is ignored.
+  // The text is also parked in flushedRef because the tab's next editor may
+  // mount in the very same commit (pane moved, multi view toggled) — before the
+  // state update lands — and must start from it, not from the old content.
+  const flushedRef = useRef(new Map<string, { seq: number; text: string }>());
+  const flushContent = useCallback((id: string, seq: number, text: string) => {
+    flushedRef.current.set(id, { seq, text });
+    setTabs((prev) =>
+      prev.map((x) => (x.id === id && x.reloadSeq === seq ? { ...x, content: text } : x))
+    );
+  }, []);
+  useEffect(() => {
+    flushedRef.current.clear(); // the state now carries every parked text
+  }, [tabs]);
+  const initialDocFor = useCallback((id: string, seq: number) => {
+    const parked = flushedRef.current.get(id);
+    if (parked && parked.seq === seq) return parked.text;
+    return tabsRef.current.find((x) => x.id === id)?.content ?? "";
+  }, []);
+
+  const findTargets = useCallback((): FindTarget[] => {
+    const m = multiRef.current;
+    if (m.on) {
+      const out: FindTarget[] = [];
+      for (const x of m.slots.slice(0, m.count)) {
+        const v = x.tabId && x.mode !== "lock" ? viewsRef.current.get(x.tabId) : undefined;
+        if (v) out.push({ key: x.tabId, view: v });
+      }
+      return out; // all locked → nothing to search
+    }
+    const id = activeIdRef.current;
+    const v = viewsRef.current.get(id);
+    return v ? [{ key: id, view: v }] : [];
+  }, []);
 
   // preview scroll: preserve within a tab, reset to top when switching tabs —
   // one layout effect so no stale offset is ever painted.
@@ -1366,7 +2074,7 @@ function App() {
   // the parent cannot read, so sync applies to Markdown/plaintext previews.)
   useEffect(() => {
     if (!active || active.view !== "split" || active.lang === "html") return;
-    const view = editorViewRef.current;
+    const view = viewsRef.current.get(active.id);
     const ed = view ? view.scrollDOM : null;
     const pv = previewRef.current;
     if (!ed || !pv) return;
@@ -1423,6 +2131,68 @@ function App() {
     }
   };
 
+  // --- tab strip scrolling ---------------------------------------------------
+  // With many tabs open the strip overflows and its scrollbar is hidden, so:
+  // ‹ › buttons (shown only while overflowing), the mouse wheel scrolls it
+  // sideways, and the active tab is always kept in view.
+  const tabBarRef = useRef<HTMLDivElement | null>(null);
+  const tabStripRef = useRef<HTMLDivElement | null>(null);
+  const [tabScroll, setTabScroll] = useState({ left: false, right: false });
+
+  const updateTabScroll = useCallback(() => {
+    const el = tabStripRef.current;
+    if (!el) return;
+    const max = el.scrollWidth - el.clientWidth;
+    const left = el.scrollLeft > 1;
+    const right = el.scrollLeft < max - 1;
+    setTabScroll((p) => (p.left === left && p.right === right ? p : { left, right }));
+  }, []);
+
+  useEffect(() => {
+    const bar = tabBarRef.current;
+    const el = tabStripRef.current;
+    if (!bar || !el) return;
+    // Listen on the whole bar so the wheel also works over the ‹ › buttons.
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) return; // Ctrl+wheel belongs to the global zoom handler
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!d || el.scrollWidth <= el.clientWidth) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaMode === 1 ? d * 40 : d; // line mode → px
+    };
+    bar.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("scroll", updateTabScroll, { passive: true });
+    const ro = new ResizeObserver(updateTabScroll); // window resize
+    ro.observe(el);
+    return () => {
+      bar.removeEventListener("wheel", onWheel);
+      el.removeEventListener("scroll", updateTabScroll);
+      ro.disconnect();
+    };
+  }, [updateTabScroll]);
+
+  // Tabs added/closed/renamed change scrollWidth without resizing the strip.
+  useLayoutEffect(updateTabScroll, [tabs, updateTabScroll]);
+
+  // Bring the active tab into view (Ctrl+Tab, newly opened file, etc.).
+  useLayoutEffect(() => {
+    const el = tabStripRef.current;
+    const t = el?.querySelector<HTMLElement>(".tab.active");
+    if (!el || !t) return;
+    if (t.offsetLeft < el.scrollLeft) {
+      el.scrollLeft = t.offsetLeft;
+    } else if (t.offsetLeft + t.offsetWidth > el.scrollLeft + el.clientWidth) {
+      el.scrollLeft = t.offsetLeft + t.offsetWidth - el.clientWidth;
+    }
+  }, [activeId, tabs.length]);
+
+  const scrollTabs = (dir: -1 | 1) => {
+    const el = tabStripRef.current;
+    if (!el) return;
+    el.scrollBy({ left: dir * Math.max(120, el.clientWidth * 0.8), behavior: "smooth" });
+  };
+  const tabsOverflow = tabScroll.left || tabScroll.right;
+
   // --- split resizer --------------------------------------------------------
   const wsRef = useRef<HTMLDivElement | null>(null);
   const startDrag = (e: React.MouseEvent) => {
@@ -1461,6 +2231,248 @@ function App() {
   const previewFontPx = Math.round(15 * previewZoom); // 15px is the 1× base
   const htmlDoc =
     previewZoom === 1 ? htmlPreview : `<style>html{zoom:${previewZoom}}</style>` + htmlPreview;
+
+  // Log colouring: on for log-looking plain text unless the tab says otherwise.
+  const logOn = (t: Tab) =>
+    t.logColors === "on" || (t.logColors === "" && t.lang === "plaintext" && looksLikeLog(t.title));
+  const toggleLogColors = (t: Tab) =>
+    setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
+
+  // --- multi-view panes ------------------------------------------------------
+  const visibleSlots = multi.slots.slice(0, multi.count);
+  const renderPane = (slot: Slot, i: number) => {
+    const t = slot.tabId ? tabs.find((x) => x.id === slot.tabId) : undefined;
+    const focused = i === focusSlot;
+    const shownIn = (id: string) => visibleSlots.findIndex((x, k) => k !== i && x.tabId === id);
+    const n = t ? paneCounts[t.id] : undefined;
+    return (
+      <div
+        key={i}
+        data-slot={i}
+        className={`mpane mode-${slot.mode}${focused ? " focused" : ""}${dropSlot === i ? " drop-target" : ""}`}
+        style={{ gridColumn: `span ${paneSpan(i, multi.count)}` }}
+        onMouseDownCapture={() => {
+          if (focusSlotRef.current !== i || activeIdRef.current !== slot.tabId) focusPane(i);
+        }}
+        onContextMenu={t && !t.needsLoad ? openCtxMenu : undefined}
+        // A file dragged from the bundle tree opens here, taking this pane to
+        // the file's server. Capture phase, so CodeMirror never treats it as
+        // text being dropped into the document.
+        onDragOverCapture={(e) => {
+          if (!e.dataTransfer.types.includes(TREE_DRAG_TYPE)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "copy";
+          if (dropSlot !== i) setDropSlot(i);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropSlot((d) => (d === i ? null : d));
+        }}
+        onDropCapture={(e) => {
+          const raw = e.dataTransfer.getData(TREE_DRAG_TYPE);
+          if (!raw) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setDropSlot(null);
+          try {
+            const { server, rel } = JSON.parse(raw);
+            if (typeof server === "string" && typeof rel === "string") {
+              setFocusSlot(i);
+              switchBundleLog(rel, i, { slot: i, server });
+            }
+          } catch {
+            /* not ours */
+          }
+        }}
+      >
+        <div className="mpane-body">
+          {!t ? (
+            <div className="empty">
+              <div className="empty-title">{slot.server ? slot.server : "빈 칸"}</div>
+              {slot.note && <div className="empty-sub">{slot.note}</div>}
+              <div className="empty-sub">
+                {multi.bundle && slot.server
+                  ? "왼쪽 트리에서 이 서버의 파일을 누르세요."
+                  : "아래 「탭 고르기」에서 고르거나, 파일을 열거나, 이 칸에 파일을 끌어다 놓으세요."}
+              </div>
+              <div className="empty-actions">
+                {multi.bundle && slot.server && !treeOpen && (
+                  <button className="tb-btn" onClick={() => setTreeOpen(true)}>
+                    ▶ 트리 펼치기
+                  </button>
+                )}
+                <button className="tb-btn" onClick={() => openFilesIntoPane(i)}>
+                  📂 파일 열기
+                </button>
+              </div>
+            </div>
+          ) : t.needsLoad ? (
+            <div className="empty">
+              {t.loadError ? (
+                <>
+                  <div className="empty-title">파일을 열 수 없습니다</div>
+                  <div className="empty-sub">{t.path}</div>
+                  <div className="empty-sub">{t.loadError}</div>
+                  <div className="empty-actions">
+                    <button className="tb-btn" onClick={() => retryLoad(t.id)}>
+                      ↻ 다시 시도
+                    </button>
+                    <button className="tb-btn" onClick={() => doCloseTab(t.id)}>
+                      × 탭 닫기
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="empty-title">불러오는 중…</div>
+              )}
+            </div>
+          ) : (
+            <CodeEditor
+              key={t.id + "#" + t.reloadSeq}
+              initialDoc={() => initialDocFor(t.id, t.reloadSeq)}
+              lang={t.lang}
+              fontSize={fontSize}
+              mode={slot.mode}
+              autoFocus={focused}
+              logRules={logOn(t) ? logRules : null}
+              onDocChanged={() => markEdited(t.id)}
+              onFlush={(text) => flushContent(t.id, t.reloadSeq, text)}
+              onView={(v) => setView(t.id, v)}
+              onSelectionChange={focused ? onSelectionChange : noop}
+            />
+          )}
+        </div>
+        <div className="mpane-foot">
+          <span className="mp-num">{i + 1}</span>
+          {t?.dirty && (
+            <span className="dot" title="저장하지 않은 변경사항">
+              ●
+            </span>
+          )}
+          {multi.bundle && (
+            <select
+              className="mp-server"
+              value={slot.server}
+              title="이 칸이 따라가는 서버 (로그 묶음)"
+              onChange={(e) => setPaneServer(i, e.target.value)}
+            >
+              {!slot.server && <option value="">서버 —</option>}
+              {multi.bundle.servers.map((sv) => (
+                <option key={sv} value={sv}>
+                  {sv}
+                </option>
+              ))}
+            </select>
+          )}
+          <span className="mp-title" title={t ? t.path || t.title : ""}>
+            {t ? (multi.bundle && slot.server && t.label ? t.title : t.label || t.title) : "빈 칸"}
+          </span>
+          {findOpen && t && (
+            <span className="mp-count" title={slot.mode === "lock" ? "잠긴 칸은 찾지 않습니다" : "이 칸에서 찾은 개수"}>
+              🔍 {slot.mode === "lock" ? "—" : n === undefined ? "…" : n > 2000 ? "2000+" : n}
+            </span>
+          )}
+          <span className="mp-modes" role="group" aria-label="칸 모드">
+            {PANE_MODES.map((m) => (
+              <button
+                key={m.id}
+                className={slot.mode === m.id ? "mp-mode on" : "mp-mode"}
+                title={m.tip}
+                onClick={() => setPaneMode(i, m.id)}
+              >
+                {m.icon}
+              </button>
+            ))}
+          </span>
+          <select
+            className="mp-pick"
+            value=""
+            title="이 칸에 띄울 탭 고르기"
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__open__") openFilesIntoPane(i);
+              else if (v) placeTabs([v], i);
+            }}
+          >
+            <option value="">탭 고르기 ▾</option>
+            {tabs.map((x) => {
+              const o = shownIn(x.id);
+              return (
+                <option key={x.id} value={x.id}>
+                  {x.label || x.title}
+                  {x.id === slot.tabId ? "  (이 칸)" : o >= 0 ? `  (${o + 1}번 칸에서 옮김)` : ""}
+                </option>
+              );
+            })}
+            <option value="__open__">📂 파일 열기…</option>
+          </select>
+          {t && (
+            <button className="mp-x" title="이 칸 비우기 (탭은 열린 채로 둠)" onClick={() => clearPane(i)}>
+              ×
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
+  const findKey = visibleSlots
+    .map((x) => {
+      const t = tabs.find((y) => y.id === x.tabId);
+      return `${x.tabId}:${x.mode}:${t ? t.reloadSeq : ""}:${t?.needsLoad ? 1 : 0}`;
+    })
+    .join("|");
+  // Navigation keys pressed in a pane move every pane that is not locked. A
+  // locked focused pane swallows keys itself (CodeEditor), so nothing moves.
+  const onGridKeyDown = (e: React.KeyboardEvent) => {
+    if (!(e.target as HTMLElement).closest(".cm-editor")) return; // footer, find panel…
+    const cmd = syncedNavCommand(e.nativeEvent);
+    if (!cmd) return;
+    const m = multiRef.current;
+    if (m.slots[focusSlotRef.current]?.mode === "lock") return;
+    const views = m.slots
+      .slice(0, m.count)
+      .filter((x) => x.tabId && x.mode !== "lock")
+      .map((x) => viewsRef.current.get(x.tabId))
+      .filter((v): v is EditorView => !!v);
+    if (views.length < 2) return; // nothing to sync: plain CodeMirror behavior
+    e.preventDefault();
+    e.stopPropagation();
+    runSyncedNav(views, cmd);
+  };
+  // For the tree: which pane shows which bundle file, and which panes follow a server.
+  const treeShown = new Map<string, number[]>();
+  const paneOfServer = new Map<string, number[]>();
+  if (multi.bundle) {
+    visibleSlots.forEach((x, i) => {
+      if (!x.server) return;
+      paneOfServer.set(x.server, [...(paneOfServer.get(x.server) ?? []), i]);
+      const t = x.tabId ? tabs.find((y) => y.id === x.tabId) : undefined;
+      const prefix = bundlePath(multi.bundle!.root, x.server, "");
+      if (t && underRoot(t.path, prefix)) {
+        const k = x.server + "\u0000" + t.path.slice(prefix.length).replace(/\\/g, "/");
+        treeShown.set(k, [...(treeShown.get(k) ?? []), i]);
+      }
+    });
+  }
+  const multiGrid = (
+    <div
+      className="multi-grid"
+      style={{ gridTemplateRows: multi.count <= 3 ? "1fr" : "1fr 1fr" }}
+      onKeyDownCapture={onGridKeyDown}
+    >
+      {visibleSlots.map(renderPane)}
+      {findOpen && (
+        <FindReplace
+          targets={findTargets}
+          targetsKey={findKey}
+          focusKey={activeId}
+          startInReplace={findReplace}
+          onClose={() => setFindOpen(false)}
+          onCounts={setPaneCounts}
+        />
+      )}
+    </div>
+  );
 
   // Current display string for a command's shortcut (reflects remaps live).
   const keyHint = (id: CmdId) => formatCombo(keybinds[id]);
@@ -1557,7 +2569,37 @@ function App() {
             ⌨ chips 자동입력
           </button>
         </div>
-        {active && (
+        <div className="multi-ctl">
+          <button
+            className={multi.on ? "tb-btn on" : "tb-btn"}
+            onClick={toggleMulti}
+            title="여러 파일을 나란히 보기 (최대 6칸) — PageDown·방향키·찾기가 모든 칸에서 같이 동작"
+          >
+            ▦ 멀티 뷰
+          </button>
+          <button
+            className="tb-btn"
+            onClick={openBundle}
+            title="로그 묶음 열기 — server1, server2… 폴더가 들어 있는 상위 폴더를 고르면 서버마다 한 칸씩 띄우고 왼쪽에 트리를 보여 줍니다. 트리에서 파일을 누르면 그 서버 칸에, ⇉ 는 모든 서버 칸에 열립니다"
+          >
+            📦 로그 묶음
+          </button>
+          {multi.on && (
+            <div className="seg" role="group" aria-label="칸 수">
+              {Array.from({ length: MAX_PANES }, (_, k) => k + 1).map((n) => (
+                <button
+                  key={n}
+                  className={multi.count === n ? "seg-btn on" : "seg-btn"}
+                  onClick={() => setPaneCount(n)}
+                  title={`${n}칸`}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        {active && !multi.on && (
           <div className="seg" role="group" aria-label="보기 모드">
             <button
               className={view === "editor" ? "seg-btn on" : "seg-btn"}
@@ -1602,7 +2644,18 @@ function App() {
         </div>
       </div>
 
-      <div className="tabbar">
+      <div className="tabbar" ref={tabBarRef}>
+        {tabsOverflow && (
+          <button
+            className="tab-scroll"
+            onClick={() => scrollTabs(-1)}
+            disabled={!tabScroll.left}
+            title="왼쪽 탭 보기 (탭 위에서 휠로도 이동)"
+          >
+            ‹
+          </button>
+        )}
+        <div className="tabs-scroll" ref={tabStripRef}>
         {tabs.map((t) => (
           <div
             key={t.id}
@@ -1621,7 +2674,7 @@ function App() {
                 ●
               </span>
             )}
-            <span className="tab-title">{t.title}</span>
+            <span className="tab-title">{t.label || t.title}</span>
             <span
               className="tab-close"
               onClick={(e) => {
@@ -1634,13 +2687,46 @@ function App() {
             </span>
           </div>
         ))}
+        </div>
+        {tabsOverflow && (
+          <button
+            className="tab-scroll"
+            onClick={() => scrollTabs(1)}
+            disabled={!tabScroll.right}
+            title="오른쪽 탭 보기 (탭 위에서 휠로도 이동)"
+          >
+            ›
+          </button>
+        )}
         <button className="tab-new" onClick={doNew} title="새 파일 (Ctrl+N)">
           ＋
         </button>
       </div>
 
       <div className="workspace" ref={wsRef}>
-        {!active ? (
+        {multi.on ? (
+          <>
+            {multi.bundle && bundleScan && bundleScan.root === multi.bundle.root && (treeOpen ? (
+              <BundleTree
+                key={bundleScan.root}
+                scan={bundleScan}
+                shown={treeShown}
+                paneOfServer={paneOfServer}
+                onOpen={openFromTree}
+                onOpenAll={(rel) => switchBundleLog(rel, null)}
+                onHide={() => setTreeOpen(false)}
+                rotationKey={rotationKey}
+                fmtSize={fmtSize}
+                bigFile={BIG_FILE}
+              />
+            ) : (
+              <button className="bt-show" title="로그 묶음 트리 펼치기" onClick={() => setTreeOpen(true)}>
+                ▶
+              </button>
+            ))}
+            {multiGrid}
+          </>
+        ) : !active ? (
           <div className="empty">
             <div className="empty-title">열린 문서가 없습니다</div>
             <div className="empty-actions">
@@ -1651,6 +2737,26 @@ function App() {
                 📂 파일 열기
               </button>
             </div>
+          </div>
+        ) : active.needsLoad ? (
+          <div className="empty">
+            {active.loadError ? (
+              <>
+                <div className="empty-title">파일을 열 수 없습니다</div>
+                <div className="empty-sub">{active.path}</div>
+                <div className="empty-sub">{active.loadError}</div>
+                <div className="empty-actions">
+                  <button className="tb-btn" onClick={() => retryLoad(active.id)}>
+                    ↻ 다시 시도
+                  </button>
+                  <button className="tb-btn" onClick={() => doCloseTab(active.id)}>
+                    × 탭 닫기
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="empty-title">불러오는 중…</div>
+            )}
           </div>
         ) : (
           <>
@@ -1666,18 +2772,20 @@ function App() {
                 </div>
                 <CodeEditor
                   key={active.id + "#" + active.reloadSeq}
-                  initialDoc={active.content}
+                  initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
                   lang={active.lang}
                   fontSize={fontSize}
-                  onChange={(text) => updateContent(active.id, text)}
-                  onView={onEditorView}
+                  logRules={logOn(active) ? logRules : null}
+                  onDocChanged={() => markEdited(active.id)}
+                  onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
+                  onView={(v) => setView(active.id, v)}
                   onSelectionChange={onSelectionChange}
                 />
                 {findOpen && (
                   <FindReplace
-                    getView={() => editorViewRef.current}
-                    viewKey={active.id}
-                    docText={active.content}
+                    targets={findTargets}
+                    targetsKey={active.id + "#" + active.reloadSeq}
+                    focusKey={active.id}
                     startInReplace={findReplace}
                     onClose={() => setFindOpen(false)}
                   />
@@ -1730,6 +2838,28 @@ function App() {
               >
                 {fontSize}px
               </button>
+              <span className="st-logwrap">
+                <button
+                  className={logOn(active) ? "st-log on" : "st-log"}
+                  title="로그 색 (ERROR·WARN·INFO·시각 등 하이라이트) 켜기/끄기 — 로그 파일은 자동으로 켜짐"
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    toggleLogColors(active);
+                  }}
+                >
+                  🎨 {logOn(active) ? "로그 색" : "로그 색 꺼짐"}
+                </button>
+                <button
+                  className="st-log"
+                  title="로그 색 규칙 고치기"
+                  onMouseDown={(e) => {
+                    e.stopPropagation();
+                    setRulesOpen(true);
+                  }}
+                >
+                  ⚙
+                </button>
+              </span>
               <span className="st-lang">{langLabel(active.lang)}</span>
               <span className="st-enc-wrap">
                 <button
@@ -1777,7 +2907,9 @@ function App() {
                   </div>
                 )}
               </span>
-              <span className="st-chars">{active.content.length.toLocaleString()}자</span>
+              <span className="st-chars">
+                {(viewsRef.current.get(active.id)?.state.doc.length ?? active.content.length).toLocaleString()}자
+              </span>
               <span className={active.dirty ? "st-dirty on" : "st-dirty"}>
                 {active.dirty ? "● 변경됨" : "저장됨"}
               </span>
@@ -1976,6 +3108,127 @@ function App() {
           >
             찾기<span className="menu-key">{keyHint("find")}</span>
           </button>
+        </div>
+      )}
+
+
+      {rulesOpen && (
+        <div className="chips-overlay" onMouseDown={() => setRulesOpen(false)}>
+          <div
+            className="keys-dialog rules-dialog"
+            onMouseDown={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setRulesOpen(false);
+            }}
+          >
+            <div className="chips-title">🎨 로그 색 규칙</div>
+            <div className="chips-sub">
+              위에서부터 차례로 칠합니다. 「단어」는 그 글자가 단어로 따로 있을 때만, 「정규식」은 JavaScript 정규식입니다.
+              바꾸면 열린 모든 로그에 바로 적용되고, 세션에 저장됩니다.
+            </div>
+            <div className="rules-list">
+              {logRules.map((r, i) => {
+                const problem = ruleProblem(r);
+                const bad = !!problem;
+                const upd = (patch: Partial<LogRule>) =>
+                  setLogRules((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
+                return (
+                  <div className={r.on ? "rule-row" : "rule-row off"} key={r.id}>
+                    <input type="checkbox" checked={r.on} title="이 규칙 켜기" onChange={(e) => upd({ on: e.target.checked })} />
+                    <input
+                      className="rule-label"
+                      value={r.label}
+                      placeholder="이름"
+                      onChange={(e) => upd({ label: e.target.value })}
+                    />
+                    <input
+                      className={bad ? "rule-pattern bad" : "rule-pattern"}
+                      value={r.pattern}
+                      placeholder={r.regex ? "정규식 (예: \\bTIMEOUT\\b)" : "단어 (예: timeout)"}
+                      title={
+                        problem === "slow"
+                          ? "반복 안에 반복이 겹친 정규식(예: (a+)+)은 화면을 멈출 수 있어 쓰지 않습니다"
+                          : problem === "invalid"
+                            ? "정규식이 잘못됐거나 빈 문자열에 맞습니다 — 이 규칙은 쓰이지 않습니다"
+                            : r.pattern
+                      }
+                      style={{ color: r.color }}
+                      onChange={(e) => upd({ pattern: e.target.value })}
+                    />
+                    <select value={r.regex ? "re" : "word"} onChange={(e) => upd({ regex: e.target.value === "re" })}>
+                      <option value="word">단어</option>
+                      <option value="re">정규식</option>
+                    </select>
+                    <label title="대소문자 구분">
+                      <input type="checkbox" checked={r.caseSensitive} onChange={(e) => upd({ caseSensitive: e.target.checked })} />
+                      Aa
+                    </label>
+                    <input type="color" value={r.color} title="글자색" onChange={(e) => upd({ color: e.target.value })} />
+                    <label title="줄 전체에 옅은 배경색">
+                      <input type="checkbox" checked={r.line} onChange={(e) => upd({ line: e.target.checked })} />
+                      줄
+                    </label>
+                    <button
+                      className="mp-x"
+                      title="위로"
+                      disabled={i === 0}
+                      onClick={() =>
+                        setLogRules((prev) => {
+                          const n = [...prev];
+                          [n[i - 1], n[i]] = [n[i], n[i - 1]];
+                          return n;
+                        })
+                      }
+                    >
+                      ↑
+                    </button>
+                    <button
+                      className="mp-x"
+                      title="이 규칙 지우기"
+                      onClick={() => setLogRules((prev) => prev.filter((x) => x.id !== r.id))}
+                    >
+                      🗑
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="chips-actions">
+              <button
+                className="tb-btn"
+                onClick={() =>
+                  setLogRules((prev) => [
+                    ...prev,
+                    {
+                      id: newId(),
+                      on: true,
+                      label: "",
+                      pattern: "",
+                      regex: false,
+                      caseSensitive: false,
+                      color: "#c678dd",
+                      line: false,
+                    },
+                  ])
+                }
+              >
+                ＋ 규칙 추가
+              </button>
+              <button
+                className="tb-btn"
+                onClick={() => {
+                  if (window.confirm("로그 색 규칙을 기본값으로 되돌릴까요? 추가하거나 고친 규칙은 사라집니다.")) {
+                    setLogRules(DEFAULT_LOG_RULES);
+                  }
+                }}
+              >
+                기본값으로
+              </button>
+              <button className="tb-btn primary" onClick={() => setRulesOpen(false)}>
+                닫기
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -22,6 +22,10 @@ export function CheckForUpdate() {
   return window['go']['main']['App']['CheckForUpdate']();
 }
 
+export function CloseWithSession(arg1) {
+  return window['go']['main']['App']['CloseWithSession'](arg1);
+}
+
 export function FileAssociationSupported() {
   return window['go']['main']['App']['FileAssociationSupported']();
 }
@@ -58,6 +62,14 @@ export function OpenFileDialog() {
   return window['go']['main']['App']['OpenFileDialog']();
 }
 
+export function OpenFilesDialog() {
+  return window['go']['main']['App']['OpenFilesDialog']();
+}
+
+export function OpenFolderDialog() {
+  return window['go']['main']['App']['OpenFolderDialog']();
+}
+
 export function ReadFile(arg1) {
   return window['go']['main']['App']['ReadFile'](arg1);
 }
@@ -82,12 +94,12 @@ export function SaveSession(arg1) {
   return window['go']['main']['App']['SaveSession'](arg1);
 }
 
-export function ShowUpdateModeNoticeOnce() {
-  return window['go']['main']['App']['ShowUpdateModeNoticeOnce']();
+export function ScanBundle(arg1) {
+  return window['go']['main']['App']['ScanBundle'](arg1);
 }
 
-export function StashSession(arg1) {
-  return window['go']['main']['App']['StashSession'](arg1);
+export function ShowUpdateModeNoticeOnce() {
+  return window['go']['main']['App']['ShowUpdateModeNoticeOnce']();
 }
 
 export function StatFile(arg1) {

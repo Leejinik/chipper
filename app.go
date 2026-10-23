@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/korean"
@@ -30,6 +31,7 @@ type App struct {
 	saveMu      sync.Mutex  // serializes session writes to the on-disk file
 	pendingMu   sync.Mutex  // guards pending
 	pending     string      // latest session snapshot, flushed synchronously on close
+	closing     atomic.Bool // close requested; the frontend is flushing its final snapshot
 	chipsCancel atomic.Bool // set by CancelChips to stop an in-flight TypeChips run
 
 	// File-open delivery (double-click an associated file). openMu guards both
@@ -115,10 +117,25 @@ func releaseAssetName() string {
 	}
 }
 
-// beforeClose runs synchronously on the main thread before the window is torn
-// down, flushing the latest session snapshot so the final keystrokes made right
-// before a plain window close are never lost. Returning false allows the close.
+// beforeClose runs on the main thread before the window is torn down. The
+// frontend autosaves on a debounce (serializing big documents on every keystroke
+// made typing sluggish), so the newest edits may not have reached us yet. The
+// first close is therefore held back and the frontend asked to flush; it answers
+// with CloseWithSession, whose Quit lands here again with closing set. Blocking
+// here instead would deadlock: the binding call is delivered on this thread.
+// If the frontend never answers, the fallback quits with the last autosave.
 func (a *App) beforeClose(ctx context.Context) (prevent bool) {
+	a.openMu.Lock()
+	ready := a.frontendReady
+	a.openMu.Unlock()
+	if ready && a.closing.CompareAndSwap(false, true) {
+		wruntime.EventsEmit(ctx, "chipper:flush-before-close")
+		go func() {
+			time.Sleep(3 * time.Second)
+			wruntime.Quit(ctx)
+		}()
+		return true
+	}
 	a.pendingMu.Lock()
 	data := a.pending
 	a.pendingMu.Unlock()
@@ -126,6 +143,17 @@ func (a *App) beforeClose(ctx context.Context) (prevent bool) {
 		_ = a.writeSession(data)
 	}
 	return false
+}
+
+// CloseWithSession is the frontend's answer to "chipper:flush-before-close":
+// persist the final snapshot, then finish the close.
+func (a *App) CloseWithSession(data string) {
+	if data != "" {
+		a.pendingMu.Lock()
+		a.pending = data
+		a.pendingMu.Unlock()
+	}
+	wruntime.Quit(a.ctx)
 }
 
 // --- file-open delivery (double-click an associated file) -----------------
@@ -316,6 +344,15 @@ func (a *App) OpenFileDialog() (FileDoc, error) {
 		return FileDoc{Canceled: true}, nil
 	}
 	return a.readDoc(path)
+}
+
+// OpenFilesDialog lets the user pick several files at once (filling multi-view
+// panes). Returns the chosen paths; empty when canceled.
+func (a *App) OpenFilesDialog() ([]string, error) {
+	return wruntime.OpenMultipleFilesDialog(a.ctx, wruntime.OpenDialogOptions{
+		Title:   "파일 열기 (여러 개 선택 가능)",
+		Filters: fileFilters,
+	})
 }
 
 // ReadFile reads a file by path (used to reload a file from disk).
@@ -563,15 +600,6 @@ func (a *App) SaveFile(path string, content string, enc string) (FileDoc, error)
 	doc := a.docWithStat(path, content)
 	doc.Encoding = enc
 	return doc, nil
-}
-
-// StashSession keeps the backend's in-memory copy of the latest session current
-// (called from the frontend on every change). It is cheap and never touches the
-// disk; beforeClose flushes it synchronously at shutdown.
-func (a *App) StashSession(data string) {
-	a.pendingMu.Lock()
-	a.pending = data
-	a.pendingMu.Unlock()
 }
 
 // SaveSession persists the session blob to disk (debounced autosave) and also

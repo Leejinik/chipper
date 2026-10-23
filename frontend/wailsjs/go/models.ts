@@ -14,6 +14,92 @@ export namespace main {
 	        this.label = source["label"];
 	    }
 	}
+	export class BundleFile {
+	    rel: string;
+	    size: number;
+	    compressed: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new BundleFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rel = source["rel"];
+	        this.size = source["size"];
+	        this.compressed = source["compressed"];
+	    }
+	}
+	export class BundleServer {
+	    name: string;
+	    files: BundleFile[];
+	    truncated: boolean;
+	    unreadable: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new BundleServer(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.files = this.convertValues(source["files"], BundleFile);
+	        this.truncated = source["truncated"];
+	        this.unreadable = source["unreadable"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class Bundle {
+	    root: string;
+	    servers: BundleServer[];
+	
+	    static createFrom(source: any = {}) {
+	        return new Bundle(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.root = source["root"];
+	        this.servers = this.convertValues(source["servers"], BundleServer);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
 	export class ChipsResult {
 	    typed: number;
 	    total: number;
