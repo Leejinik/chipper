@@ -221,6 +221,8 @@ export default function LinesView(p: LinesViewProps) {
         if (job !== jobRef.current) return;
         if (applyPage(pg, ep)) {
           if (!pg.rows.length) emptyAt.current.set(k, countRef.current);
+          else if (rootRef.current && !rootRef.current.dataset.rowsMs)
+            rootRef.current.dataset.rowsMs = String(Math.round(performance.now() - timing.current.t0));
           st.put(from, pg.rows as FRow[]);
           bump();
         }
@@ -416,6 +418,8 @@ export default function LinesView(p: LinesViewProps) {
     if (rootRef.current) {
       delete rootRef.current.dataset.firstMs;
       delete rootRef.current.dataset.doneMs;
+      delete rootRef.current.dataset.startMs;
+      delete rootRef.current.dataset.rowsMs;
     }
     const cur = pr.current;
     const req = linefilter.Request.createFrom({
@@ -431,6 +435,7 @@ export default function LinesView(p: LinesViewProps) {
         }
         mine = res.jobId;
         jobRef.current = mine;
+        if (rootRef.current) rootRef.current.dataset.startMs = String(Math.round(performance.now() - timing.current.t0));
         verRef.current = res.progress.version;
         tailRef.current = res.progress.tailLine;
         setIssues(res.issues ?? []);
@@ -568,7 +573,8 @@ export default function LinesView(p: LinesViewProps) {
     followRef.current = doneRef.current && countRef.current > vis && el.scrollTop >= geo.height - el.clientHeight - rowH;
   };
 
-  // --- timing (read by the .18 measurements: data-first-ms, data-done-ms, data-redraw-ms) -----------
+  // --- timing (read by the .18 measurements: data-start-ms / -rows-ms / -first-ms / -done-ms from the
+  // start, data-redraw-ms from a context change to the rows painted) ----------------------------------
   const allShown = (() => {
     if (!jobRef.current) return false;
     const end = Math.min(count, first + vis - 1);
