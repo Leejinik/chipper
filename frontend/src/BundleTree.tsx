@@ -20,6 +20,10 @@ export const TREE_DRAG_TYPE = "application/x-chipper-bundle-file";
 const ROW_H = 21;
 const WINDOW_FROM = 400;
 const OVERSCAN = 40;
+// every pane. Rotated logs (3+ files differing only by date/number) fold into
+// one node. Files lying in the bundle root itself come first under
+// 「(묶음 루트)」 (server ""), and a server folder with no files says so — every
+// file of the bundle is somewhere in the tree.
 
 interface Node {
   key: string;
@@ -38,6 +42,7 @@ interface Props {
   shown: Map<string, number[]>; // "server\u0000rel" → panes (0-based) showing it
   paneOfServer: Map<string, number[]>; // server → panes following it
   onOpen: (server: string, rel: string) => void;
+  onOpenRoot: (rel: string) => void; // a file in the bundle root
   onOpenAll: (rel: string) => void;
   onHide: () => void;
   rotationKey: (rel: string) => string;
@@ -63,7 +68,9 @@ function buildServer(srv: main.BundleServer, rotationKey: (rel: string) => strin
     dirs.set(path, n);
     return n;
   };
-  for (const f of srv.files) {
+  // An empty server folder came as files: null before v1.2.1 and blanked the
+  // whole window ("t.files is not iterable").
+  for (const f of srv.files ?? []) {
     if (q && !f.rel.toLowerCase().includes(q)) continue;
     const cut = f.rel.lastIndexOf("/");
     dirOf(cut < 0 ? "" : f.rel.slice(0, cut)).children!.push({
@@ -132,6 +139,7 @@ interface RowCtx {
   onFocusRow: (key: string) => void;
   onMenu: (e: React.MouseEvent, row: Row) => void;
   onOpen: (server: string, rel: string) => void;
+  onOpenRoot: (rel: string) => void;
   onOpenAll: (rel: string) => void;
   toggle: (key: string) => void;
   fmtSize: (n: number) => string;
@@ -233,7 +241,7 @@ const TreeRow = memo(function TreeRow({ row, isCur, panes, tags, bigFile, ctx }:
           e.dataTransfer.setData(TREE_DRAG_TYPE, JSON.stringify({ server: n.server, rel: n.rel }));
           e.dataTransfer.effectAllowed = "copy";
         }}
-        onClick={() => !n.compressed && ctx.current.onOpen(n.server, n.rel!)}
+        onClick={() => (n.server ? ctx.current.onOpen(n.server, n.rel!) : ctx.current.onOpenRoot(n.rel!))}
       >
         <span className="bt-name">{n.name}</span>
         {chips}
@@ -284,7 +292,7 @@ const TreeRow = memo(function TreeRow({ row, isCur, panes, tags, bigFile, ctx }:
 
 export default function BundleTree(p: Props) {
   const [filter, setFilter] = useState("");
-  const [open, setOpen] = useState<Set<string>>(() => new Set(p.scan.servers.map((s) => "s:" + s.name)));
+  const [open, setOpen] = useState<Set<string>>(() => new Set(["root:", ...(p.scan.servers ?? []).map((s) => "s:" + s.name)]));
   const [cursor, setCursor] = useState<string>("");
   const [menu, setMenu] = useState<Menu | null>(null);
   const [view, setView] = useState({ top: 0, height: 600 }); // scroll window of .bt-body
@@ -295,10 +303,26 @@ export default function BundleTree(p: Props) {
   const menuRef = useRef<HTMLDivElement>(null);
   const filterRef = useRef<HTMLInputElement>(null);
   const q = filter.trim().toLowerCase();
-  const tree = useMemo(
-    () => p.scan.servers.map((s) => buildServer(s, p.rotationKey, q)),
-    [p.scan, p.rotationKey, q]
-  );
+  const tree = useMemo(() => {
+    const out = (p.scan.servers ?? []).map((s) => buildServer(s, p.rotationKey, q));
+    const rootFiles = (p.scan.rootFiles ?? []).filter((f) => !q || f.rel.toLowerCase().includes(q));
+    if ((p.scan.rootFiles ?? []).length) {
+      out.unshift({
+        key: "root:",
+        name: "(묶음 루트)",
+        server: "",
+        children: rootFiles.map((f) => ({
+          key: "f:/" + f.rel,
+          name: f.rel,
+          server: "",
+          rel: f.rel,
+          size: f.size,
+          compressed: f.compressed,
+        })),
+      });
+    }
+    return out;
+  }, [p.scan, p.rotationKey, q]);
   const toggle = (k: string) =>
     setOpen((prev) => {
       const n = new Set(prev);
@@ -414,7 +438,7 @@ export default function BundleTree(p: Props) {
   const activate = (row: Row) => {
     const n = row.node;
     if (row.folder) toggle(n.key);
-    else if (!n.compressed) p.onOpen(n.server, n.rel!);
+    else (n.server ? p.onOpen(n.server, n.rel!) : p.onOpenRoot(n.rel!));
   };
 
   const onRowKey = (e: React.KeyboardEvent, row: Row) => {
@@ -484,6 +508,7 @@ export default function BundleTree(p: Props) {
     onFocusRow: (key) => setCursor(key),
     onMenu: onRowMenu,
     onOpen: p.onOpen,
+    onOpenRoot: p.onOpenRoot,
     onOpenAll: p.onOpenAll,
     toggle,
     fmtSize: p.fmtSize,
@@ -548,15 +573,15 @@ export default function BundleTree(p: Props) {
           ⚠ {p.saveProblem}
         </div>
       )}
-      {p.scan.servers.some((x) => x.truncated || x.unreadable > 0) && (
+      {(p.scan.servers ?? []).some((x) => x.truncated || x.unreadable > 0) && (
         <div className="bt-warn">
-          {p.scan.servers
+          {(p.scan.servers ?? [])
             .filter((x) => x.truncated || x.unreadable > 0)
             .map(
               (x) =>
                 `${x.name}: ` +
                 [
-                  x.truncated ? `파일이 너무 많아 앞의 ${x.files.length.toLocaleString()}개만 보입니다` : "",
+                  x.truncated ? `파일이 너무 많아 앞의 ${(x.files ?? []).length.toLocaleString()}개만 보입니다` : "",
                   x.unreadable > 0 ? `읽을 수 없는 항목 ${x.unreadable}개(권한 등)는 빠졌습니다` : "",
                 ]
                   .filter(Boolean)
@@ -631,7 +656,8 @@ export default function BundleTree(p: Props) {
                 role="menuitem"
                 onClick={() => {
                   setMenu(null);
-                  p.onOpen(mn.server, mn.rel!);
+                  if (mn.server) p.onOpen(mn.server, mn.rel!);
+                  else p.onOpenRoot(mn.rel!);
                 }}
               >
                 {mn.server} 칸에 열기<span className="menu-key">Enter</span>

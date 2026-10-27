@@ -70,7 +70,7 @@ function backend() {
   while (slots.length < 6) slots.push({ tabId: "", mode: "read", server: "" });
   st.session = JSON.stringify({ version: 3, tabs: [tab("t0", P("s1", "modules/d0/f0.log"))], activeId: "t0", splitRatio: 0.5, fontSize: 14, multi: { on: true, count: 3, slots, bundle: { root: R, servers } } });
   const impl = {
-    LoadSession: () => st.session,
+    LoadSession: () => ({ data: st.session, notice: "", detail: "", blocked: false }),
     SaveSession: () => {},
     CloseWithSession: () => {},
     LoadTags: () => ({ data: st.tags, exists: true, restored: false, broken: "", problem: "", newer: false }),

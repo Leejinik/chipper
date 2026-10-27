@@ -1768,5 +1768,139 @@
 .tags-restore-info {
   flex: 1 1 auto;
   min-width: 0;
+}
+/* v1.2.1 — session notice, render-error boundary, line-break label */
+.notice-bar {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #3a2f14;
+  border-bottom: 1px solid #806a2c;
+  color: #f3e2b3;
+  font-size: 12px;
+}
+.notice-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.render-error {
+  margin: auto;
+  max-width: 520px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.render-error-title {
+  color: var(--danger);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.render-error-msg {
+  font-family: Consolas, monospace;
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+.render-error-sub {
+  margin-bottom: 12px;
+}
+.st-eol.mixed {
+  color: #f3c969;
+}
+
+/* v1.2.1 rework — notice actions, stored sessions, big edited tabs, status flash */
+.notice-bar .tb-btn {
+  flex: none;
+}
+.notice-detail {
+  display: block;
+  margin-top: 4px;
+  font-family: Consolas, monospace;
+  color: #d8c58f;
+}
+button.autosave {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+button.autosave:hover {
+  border-color: var(--border);
+}
+.autosave.off {
+  color: #f3c969;
+}
+.restore-menu {
+  width: min(640px, 92vw);
+}
+.restore-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.restore-name {
+  flex: 1;
+}
+.restore-sub {
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.restore-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.unkept,
+.st-unkept {
+  color: #f3c969;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.st-flash {
+  color: #f3c969;
+  margin-left: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* v1.2.1 final — error screen: edited tabs the session did not get */
+.render-error-sub {
+  white-space: pre-line;
+}
+.render-error-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+  text-align: left;
+}
+.render-error-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.render-error-item .rei-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.render-error-item .rei-done {
+  color: #7fc98b;
+}
+.render-error-item .rei-fail {
+  color: var(--danger);
   word-break: break-all;
 }

@@ -114,7 +114,7 @@ async function main() {
     tags: JSON.stringify({ version: 1, tags: [{ name: "common", rules, updated: "" }], assign: { dir: {}, file: {}, name: {} } }),
   };
   const impl = {
-    LoadSession: () => st.session,
+    LoadSession: () => ({ data: st.session, notice: "", detail: "", blocked: false }),
     SaveSession: () => {},
     CloseWithSession: () => {},
     LoadTags: () => ({ data: st.tags, exists: true, restored: false, restoredFrom: "", broken: "", problem: "", newer: false }),

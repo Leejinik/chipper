@@ -36,6 +36,9 @@ type BundleServer struct {
 type Bundle struct {
 	Root    string         `json:"root"`
 	Servers []BundleServer `json:"servers"`
+	// Files lying directly in the root (all-servers.log, README.txt …): shown in
+	// the tree as 「(묶음 루트)」 so nothing in the bundle is left out.
+	RootFiles []BundleFile `json:"rootFiles"`
 }
 
 const maxBundleFiles = 5000 // per server; keeps a mis-picked huge folder from hanging the scan
@@ -58,12 +61,28 @@ func (a *App) ScanBundle(root string) (Bundle, error) {
 	if err != nil {
 		return Bundle{}, err
 	}
-	b := Bundle{Root: root}
+	b := Bundle{Root: root, RootFiles: []BundleFile{}}
 	for _, e := range entries {
-		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		srv := BundleServer{Name: e.Name()}
+		if !e.IsDir() {
+			p := filepath.Join(root, e.Name())
+			info, ierr := os.Stat(p) // follows a symlink: what opening it would read
+			if ierr != nil || info.IsDir() {
+				continue
+			}
+			b.RootFiles = append(b.RootFiles, BundleFile{
+				Rel:        e.Name(),
+				Size:       info.Size(),
+				Compressed: compressedExts[strings.ToLower(filepath.Ext(p))],
+			})
+			continue
+		}
+		// Files starts as [] so an empty server folder reaches the frontend as an
+		// empty list, not JSON null (null crashed the whole UI: "t.files is not
+		// iterable").
+		srv := BundleServer{Name: e.Name(), Files: []BundleFile{}}
 		base := filepath.Join(root, e.Name())
 		walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {
@@ -118,6 +137,7 @@ func (a *App) ScanBundle(root string) (Bundle, error) {
 		return b, errors.New("이 폴더 안에 서버 폴더가 없습니다. server1, server2… 처럼 서버별 폴더가 들어 있는 상위 폴더를 골라 주세요.")
 	}
 	sort.Slice(b.Servers, func(i, j int) bool { return naturalLess(b.Servers[i].Name, b.Servers[j].Name) })
+	sort.Slice(b.RootFiles, func(i, j int) bool { return b.RootFiles[i].Rel < b.RootFiles[j].Rel })
 	return b, nil
 }
 

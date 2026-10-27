@@ -82,7 +82,7 @@ function makeBackend() {
   };
   let seq = 0;
   const impl = {
-    LoadSession: () => st.session,
+    LoadSession: () => ({ data: st.session, notice: "", detail: "", blocked: false }),
     SaveSession: (d) => {
       st.session = d;
     },

@@ -747,7 +747,10 @@ export default function LinesView(p: LinesViewProps) {
           style={base}
           title={gapTitle(r)}
           data-row={i}
-          onMouseDown={(e) => moveTo(i, e.shiftKey)}
+          onMouseDown={(e) => {
+            moveTo(i, e.shiftKey);
+            scRef.current?.focus();
+          }}
           onDoubleClick={() => jump(i)}
         >
           <span className="lv-no" style={{ width: gutterCh + "ch" }} />
@@ -767,7 +770,10 @@ export default function LinesView(p: LinesViewProps) {
         style={tint ? { ...base, backgroundColor: tint + "1f" } : base}
         data-row={i}
         data-line={r.line}
-        onMouseDown={(e) => moveTo(i, e.shiftKey)}
+        onMouseDown={(e) => {
+          moveTo(i, e.shiftKey);
+          scRef.current?.focus();
+        }}
         onDoubleClick={() => jump(i)}
       >
         <span

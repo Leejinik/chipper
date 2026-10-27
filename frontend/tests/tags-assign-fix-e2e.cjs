@@ -48,7 +48,7 @@ function serve() {
 function makeBackend() {
   const st = { session: "", tags: null, bak: null, calls: [], files: {}, scan: null };
   const impl = {
-    LoadSession: () => st.session,
+    LoadSession: () => ({ data: st.session, notice: "", detail: "", blocked: false }),
     SaveSession: (d) => {
       st.session = d;
     },

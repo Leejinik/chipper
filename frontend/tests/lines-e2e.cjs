@@ -41,6 +41,12 @@ async function until(fn, ms = 8000, step = 40) {
     await sleep(step);
   }
 }
+async function openTagWindow(page) {
+  await page.dispatchEvent(".st-tags", "mousedown");
+  await page.waitForSelector(".tag-menu");
+  await page.click(".tag-menu >> text=태그 창 열기");
+  await page.waitForSelector(".tags-dialog");
+}
 
 // ---- static server for dist ---------------------------------------------------------
 function serve() {
@@ -93,7 +99,7 @@ function makeBackend() {
     throw new Error("no such file " + p);
   };
   const impl = {
-    LoadSession: () => st.session,
+    LoadSession: () => ({ data: st.session, notice: "", detail: "", blocked: false }),
     SaveSession: (d) => {
       st.session = d;
     },
@@ -340,6 +346,7 @@ async function main() {
       ok("다시 「줄만」 → 위 3 아래 5 그대로", JSON.stringify(await waitRows(page, w)) === JSON.stringify(w));
       // Enter on a selected row, click on a line number
       await page.click('.lv-row[data-line="50"] .lv-text');
+      await page.focus(".lv-scroll");
       await page.keyboard.press("Enter");
       await until(async () => (await page.$eval(".cm-activeLineGutter", (e) => e.textContent).catch(() => "")) === "50", 4000);
       ok("Enter → 그 줄(50)", (await page.$eval(".cm-activeLineGutter", (e) => e.textContent).catch(() => "")) === "50");
@@ -480,8 +487,7 @@ async function main() {
       await page.click('.lv-tag:has-text("common") input');
       await waitRows(page, refRows(lines, (l) => /\bERROR\b/.test(l) || /rebalance/i.test(l), 0, 0));
       // add a rule in the tag window
-      await page.dispatchEvent(".st-tags", "mousedown");
-      await page.waitForSelector(".tags-dialog");
+      await openTagWindow(page);
       ok("태그 창이 collector 로 열림", (await page.$eval(".tag-item.sel .tag-name", (e) => e.textContent)) === "collector");
       const n0 = calls(be, "FilterStart").length;
       await page.click(".rule-add");
@@ -500,8 +506,7 @@ async function main() {
       ok("새 규칙에 걸린 줄이 보임", JSON.stringify(await waitRows(page, w)) === JSON.stringify(w), await shownRows(page));
       // colour only: no new scan, colours change at once
       const n1 = calls(be, "FilterStart").length;
-      await page.dispatchEvent(".st-tags", "mousedown");
-      await page.waitForSelector(".tags-dialog");
+      await openTagWindow(page);
       const rows2 = await page.$$(".tags-dialog .rule-row");
       await (await rows2[0].$("input[type=color]")).evaluate((e) => {
         const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
@@ -588,14 +593,14 @@ async function main() {
         ],
         assign: { dir: { "modules/lizcollector": ["collector"] }, file: {}, name: {} },
       });
-      be.st.sizes[big] = 726 << 20; // the scan and StatFile say it is big
+      be.st.sizes[big] = 200 << 20; // the common 100–384MB open gate offers line-only view
       be.st.scan = {
         root,
         servers: [
           {
             name: "server1",
             files: [
-              { rel: "modules/lizcollector/collector.log", size: 726 << 20, compressed: false },
+              { rel: "modules/lizcollector/collector.log", size: 200 << 20, compressed: false },
               { rel: "modules/lizcollector/collector.log.1.gz", size: 1000, compressed: true },
             ],
             truncated: false,
@@ -613,7 +618,7 @@ async function main() {
       const btns = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
       ok("확인 창: 태그 줄만 / 전체 / 취소", JSON.stringify(btns) === '["🏷 태그 줄만 열기","전체 열기","취소"]', btns);
       const title = await page.$eval(".big-ask h3", (e) => e.textContent);
-      ok("확인 창에 크기", title.includes("726.0MB"), title);
+      ok("확인 창에 크기", title.includes("200.0MB"), title);
       await shot(page, "lines-big-ask.png");
       await page.click('.big-ask button:has-text("태그 줄만")');
       await page.waitForSelector(".lines-view");
@@ -646,12 +651,15 @@ async function main() {
       ok("「전체 열기」 → 읽어서 편집기", calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 1);
       // .gz through 「📂 파일 열기」 of an empty pane (multi view)
       await page.click(".mp-x"); // empty the pane
+      const readsBeforeGz = calls(be, "ReadFile").length + calls(be, "ReadFileAs").length;
       be.st.openFiles = [gz];
       await page.click('.mpane .empty-actions button:has-text("파일 열기")');
       await page.waitForSelector(".lines-view");
       await waitDone(page);
       const sGz = calls(be, "FilterStart").pop();
-      ok(".gz → 줄만 보기 탭(읽지 않음, 인코딩 자동)", sGz.args[0].path === gz && sGz.args[0].encoding === "" && calls(be, "ReadFile").length === 1, sGz.args[0]);
+      const readCalls = [...calls(be, "ReadFile"), ...calls(be, "ReadFileAs")];
+      const gzRead = readCalls.some((x) => x.args[0] === gz);
+      ok(".gz → 줄만 보기 탭(읽지 않음, 인코딩 자동)", sGz.args[0].path === gz && sGz.args[0].encoding === "" && !gzRead, { request: sGz.args[0], readsBeforeGz, readCount: readCalls.length, gzRead, reads: readCalls.map((x) => x.args[0]) });
       w = refRows(blines, (l) => /\bERROR\b/.test(l), 0, 3); // common only: outside the folder tag? no — same folder
       const shownGz = (await until(async () => {
         const r = await shownRows(page);

@@ -14,6 +14,8 @@ export function BackupTagsBefore(arg1:string,arg2:string):Promise<string>;
 
 export function CancelChips():Promise<void>;
 
+export function CancelClose():Promise<void>;
+
 export function CheckForUpdate():Promise<updater.UpdateInfo>;
 
 export function CloseWithSession(arg1:string):Promise<void>;
@@ -44,13 +46,15 @@ export function GetPendingReleaseNotes():Promise<updater.PendingNotes>;
 
 export function GetPlatform():Promise<string>;
 
+export function HoldClose():Promise<void>;
+
 export function ImportTagsDialog():Promise<Array<main.TagsImportFile>>;
 
 export function ImportTagsFiles(arg1:Array<string>):Promise<Array<main.TagsImportFile>>;
 
 export function ListTagsBackups():Promise<Array<main.TagsBackupInfo>>;
 
-export function LoadSession():Promise<string>;
+export function LoadSession():Promise<main.SessionLoad>;
 
 export function LoadTags():Promise<main.TagsLoad>;
 
@@ -58,7 +62,7 @@ export function MarkReleaseNotesSeen():Promise<void>;
 
 export function OpenDefaultAppsSettings():Promise<void>;
 
-export function OpenFileDialog():Promise<main.FileDoc>;
+export function OpenFileDialog():Promise<string>;
 
 export function OpenFilesDialog():Promise<Array<string>>;
 
@@ -68,19 +72,25 @@ export function ReadFile(arg1:string):Promise<main.FileDoc>;
 
 export function ReadFileAs(arg1:string,arg2:string):Promise<main.FileDoc>;
 
+export function ReadSessionBackup(arg1:string):Promise<string>;
+
 export function ReadTagsBackup(arg1:string):Promise<string>;
 
 export function RegisterFileTypes(arg1:Array<string>):Promise<void>;
 
-export function SaveFile(arg1:string,arg2:string,arg3:string):Promise<main.FileDoc>;
+export function SaveFile(arg1:string,arg2:string,arg3:main.SaveOptions):Promise<main.FileDoc>;
 
-export function SaveFileDialog(arg1:string,arg2:string,arg3:string):Promise<main.FileDoc>;
+export function SaveFileAs(arg1:string,arg2:string,arg3:main.SaveOptions):Promise<main.FileDoc>;
+
+export function SaveFileDialog(arg1:string,arg2:string,arg3:main.SaveOptions):Promise<main.FileDoc>;
 
 export function SaveSession(arg1:string):Promise<void>;
 
 export function SaveTags(arg1:string):Promise<void>;
 
 export function ScanBundle(arg1:string):Promise<main.Bundle>;
+
+export function SessionBackups():Promise<Array<main.SessionBackup>>;
 
 export function ShowUpdateModeNoticeOnce():Promise<void>;
 

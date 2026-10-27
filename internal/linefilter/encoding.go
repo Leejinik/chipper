@@ -108,7 +108,7 @@ func detectEncoding(head []byte, size int64, extra func() [][]byte) string {
 		}
 	}
 	v, inv := utf8Score(head)
-	if v == 0 && extra != nil {
+	if v < 16 && extra != nil {
 		for _, s := range extra() {
 			a, b := utf8Score(s)
 			v += a

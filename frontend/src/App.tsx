@@ -9,12 +9,15 @@ import {
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { EditorView } from "@codemirror/view";
+import type { Text } from "@codemirror/state";
 import { undo, redo, selectAll } from "@codemirror/commands";
 import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
 import { runSyncedNav, syncedNavCommand } from "./syncNav";
 import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
 import { looksLikeLog, ruleProblem, type LogRule, type RuleLayers } from "./logHighlight";
+import ErrorBoundary from "./ErrorBoundary";
+import { setRescue, setRescueItems, type RescueItem } from "./rescue";
 import {
   COMMON,
   layersFor,
@@ -55,12 +58,17 @@ import {
   ReadFile,
   ReadFileAs,
   SaveFileDialog,
+  SaveFileAs,
   SaveFile,
   SaveSession,
   CloseWithSession,
+  HoldClose,
+  CancelClose,
   LoadSession,
   LoadTags,
   SaveTags,
+  SessionBackups,
+  ReadSessionBackup,
   StatFile,
   TypeChips,
   CancelChips,
@@ -124,6 +132,22 @@ interface Tab {
   // The encoding was never decided by reading the file (a tab opened straight
   // into 「태그 줄만」): the filter detects it, the first read auto-detects.
   encAuto: boolean;
+  // The editor turns every line break into LF; the file's own kind and BOM are
+  // remembered from the read and written back on save (Go SaveOptions).
+  eol: "" | "lf" | "crlf" | "cr"; // "" = unknown / no line break (Go then follows the file on disk)
+  eolMixed: boolean; // the file mixes line-break kinds (saving makes them all `eol`)
+  noBom: boolean; // UTF-16 read without a BOM: write it back without one
+  // Deferred read paused: the file is big (bytes) and waits for 「열기」. Not persisted.
+  bigSize: number;
+}
+
+type FileFormat = Pick<Tab, "eol" | "eolMixed" | "noBom">;
+function formatOf(doc: { eol?: string; eolMixed?: boolean; bom?: boolean }): FileFormat {
+  const eol = doc.eol === "lf" || doc.eol === "crlf" || doc.eol === "cr" ? doc.eol : "";
+  return { eol, eolMixed: !!doc.eolMixed, noBom: !doc.bom };
+}
+function eolName(eol: string): string {
+  return eol === "crlf" ? "CRLF" : eol === "cr" ? "CR" : "LF";
 }
 
 const ENCODINGS: { id: string; label: string }[] = [
@@ -210,15 +234,16 @@ function underRoot(p: string, root: string): boolean {
 // Names compare case-insensitively: bundles come from Windows copies as often
 // as from Linux servers.
 function resolveInServer(scan: main.Bundle, server: string, rel: string): main.BundleFile | null {
-  const srv = scan.servers.find((x) => x.name === server);
+  const srv = (scan.servers ?? []).find((x) => x.name === server);
   if (!srv) return null;
-  const exact = srv.files.find((f) => f.rel === rel);
+  const files = srv.files ?? []; // an empty folder came as null before v1.2.1
+  const exact = files.find((f) => f.rel === rel);
   if (exact) return exact;
   const lower = rel.toLowerCase();
-  const folded = srv.files.find((f) => f.rel.toLowerCase() === lower);
+  const folded = files.find((f) => f.rel.toLowerCase() === lower);
   if (folded) return folded;
   const base = lower.split("/").pop();
-  const same = srv.files.filter((f) => f.rel.toLowerCase().split("/").pop() === base);
+  const same = files.filter((f) => f.rel.toLowerCase().split("/").pop() === base);
   return same.length === 1 ? same[0] : null;
 }
 
@@ -237,6 +262,83 @@ const BIG_TEXT =
   "「태그 줄만」은 파일을 열지 않고, 태그 규칙에 걸린 줄과 그 위·아래 줄만 바로 보여 줍니다.";
 // .gz cannot be read into the editor, but the line filter reads it.
 const isGz = (p: string) => /\.(gz|tgz)$/i.test(p);
+// Never read a file larger than this (Go readDoc refuses it too): 500MB+ crashed
+// the WebView in the v1.2.0 tests. 384MB = 402,653,184 bytes.
+const TOO_BIG_FILE = 384 << 20;
+const fmtBytes = (n: number) => n.toLocaleString("en-US");
+// The limit in bytes too: a file one byte over it must not read as
+// "(384.0MB) — up to 384.0MB".
+const LIMIT_TEXT = `384MB(${fmtBytes(TOO_BIG_FILE)} 바이트)`;
+const sizeText = (n: number) => `${fmtBytes(n)} 바이트 = ${fmtSize(n)}`;
+const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
+function tooBigText(files: { name: string; size: number }[]): string {
+  return (
+    (files.length === 1
+      ? `"${files[0].name}" 은(는) 너무 커서 열 수 없습니다 (${sizeText(files[0].size)}).`
+      : "다음 파일은 너무 커서 열 수 없습니다:\n" + files.map((f) => `- ${f.name} (${sizeText(f.size)})`).join("\n")) +
+    `\n${LIMIT_TEXT} 까지만 열 수 있습니다. 다음 버전의 『태그 줄만 보기』로 걸린 줄만 볼 수 있습니다.`
+  );
+}
+const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?";
+// Over this, the open confirm also says what editing costs: on the test PC
+// (.18) saving an edited 384MB log took WebView 3.2GB + Go 4.5GB.
+const EDIT_MEM_FILE = 128 << 20;
+const EDIT_MEM_NOTE = "고치면 메모리를 많이 씁니다(384MB 저장 때 앱 전체 약 8GB).";
+// Go refuses (without writing) a save whose result is over the open limit
+// until the user agreed: the file could not be opened in Chipper again.
+const TOO_BIG_SAVE = "CHIPPER_TOO_BIG_AFTER_SAVE:";
+const tooBigSaveText = (title: string, bytes: number) =>
+  `"${title}" 을(를) 저장하면 ${sizeText(bytes)} 이 되어 ${LIMIT_TEXT} 를 넘습니다.\n` +
+  "저장은 할 수 있지만, 다음부터는 Chipper 로 이 파일을 열 수 없습니다. 저장할까요?";
+
+// The session keeps the text of edited tabs only up to these sizes, counted
+// in the bytes that cross to Go (sessionTextBytes), not in characters. Measured
+// on the test PC (.18): typing one letter in a 200MB log put 210,779,937
+// characters into the autosave; serializing took 0.97s and sending it to Go
+// killed the WebView renderer (흰 창) while the editor alone held 200MB fine.
+// A bare 64M-byte (ASCII) IPC takes ~2.9s, 32M ~1.5s. Korean text is 3 bytes a
+// character and escaped characters more, so a character count let a tab four
+// to seven times over through. Bigger edited tabs keep only their path in the
+// session (their edits must be saved to the file) and the close asks first.
+const SESSION_TAB_MAX = 32 << 20;
+const SESSION_TOTAL_MAX = 64 << 20;
+// The session JSON is a string argument of SaveSession, so the binding call
+// JSON-encodes it again: a line break goes `\n` → `\\n` (3 bytes), a quote or
+// backslash 4, other control characters `\\u00XX` (7); then UTF-8.
+function sessionTextBytes(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) {
+      if (c >= 0x20) n += c === 0x22 || c === 0x5c ? 4 : 1;
+      else n += c === 10 || c === 13 || c === 9 || c === 8 || c === 12 ? 3 : 7;
+    } else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdfff) n += 2; // a surrogate pair = 4
+    else n += 3;
+  }
+  return n;
+}
+const SESSION_BREAK_BYTES = 3; // "\n" between lines, escaped twice
+// Per CodeMirror text node (immutable, shared between versions of a document):
+// after an edit only the nodes on the changed path are counted again.
+const docBytesCache = new WeakMap<Text, number>();
+function docSessionBytes(doc: Text): number {
+  const hit = docBytesCache.get(doc);
+  if (hit !== undefined) return hit;
+  let n: number;
+  const kids = doc.children;
+  if (kids) {
+    n = SESSION_BREAK_BYTES * (kids.length - 1); // implied breaks between children
+    for (const k of kids) n += docSessionBytes(k);
+  } else {
+    n = sessionTextBytes(doc.sliceString(0));
+  }
+  docBytesCache.set(doc, n);
+  return n;
+}
+const SESSION_TAB_OVERHEAD = 512; // the tab's other fields (title, path, …)
+const UNKEPT_TIP =
+  "큰 파일이라 고친 내용을 자동 저장(세션)에 담지 않습니다 — 창을 닫거나 앱이 꺼지면 사라지니 💾 저장(Ctrl+S)하세요. 닫을 때 한 번 더 묻습니다.";
 
 // Columns of the 6-wide grid each pane spans: 1–3 panes sit in one row; 4 is
 // 2×2; 5 is 3 over 2; 6 is 3×2.
@@ -250,7 +352,9 @@ const noop = () => {};
 
 // Shortcuts that act on the focused document, ignored while it is 🔒 locked
 // (find, new, open, zoom and Ctrl+Tab still work; the toolbar mouse still does).
-const LOCK_BLOCKED_CMDS = new Set<CmdId>(["save", "saveAs", "close", "replace", "inClause", "chips"]);
+// 「다른 이름으로」(Ctrl+Shift+S) stays allowed: it never touches the file shown,
+// and it is what the 🔒 save tooltip tells the user to do.
+const LOCK_BLOCKED_CMDS = new Set<CmdId>(["save", "close", "replace", "inClause", "chips"]);
 
 function paneSpan(i: number, count: number): number {
   if (count <= 3) return 6 / count;
@@ -489,6 +593,10 @@ function makeTab(p: Partial<Tab>): Tab {
     logColors: p.logColors ?? "",
     lines: p.lines ?? null,
     encAuto: p.encAuto ?? false,
+    eol: p.eol ?? "",
+    eolMixed: p.eolMixed ?? false,
+    noBom: p.noBom ?? false,
+    bigSize: 0,
   };
 }
 
@@ -521,7 +629,147 @@ function normalizeTab(raw: any): Tab | null {
     logColors: raw.logColors === "on" || raw.logColors === "off" ? raw.logColors : "",
     lines: normalizeLines(raw.lines),
     encAuto: raw.encAuto === true && !!raw.needsLoad,
+    ...formatOf({ eol: raw.eol, eolMixed: raw.eolMixed, bom: !raw.noBom }),
   });
+}
+
+// Which tabs the session cannot keep the text of (see SESSION_TAB_MAX): edited
+// or never-saved tabs over the per-tab size, or past the total once the smaller
+// ones are in (smallest first, so as many tabs as possible are kept). bytesOf:
+// the tab's size in the session (sessionBytes in App).
+function sessionDrops(tabs: Tab[], bytesOf: (t: Tab) => number): Set<string> {
+  const drop = new Set<string>();
+  const needText = tabs
+    .filter((t) => !(t.path && !t.dirty) && !t.needsLoad)
+    .map((t) => ({ t, n: bytesOf(t) }))
+    .sort((a, b) => a.n - b.n);
+  let total = 0;
+  for (const { t, n } of needText) {
+    if (n > SESSION_TAB_MAX || total + n > SESSION_TOTAL_MAX) drop.add(t.id);
+    else total += n;
+  }
+  return drop;
+}
+const sameSet = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+
+// Tabs of a stored session (「불러오기」: older Chipper, .bak, a kept broken
+// session) to add next to the open ones. Nothing open is replaced: a tab already
+// open (same id or same file) is skipped, unless the stored one holds edits the
+// open one does not — that comes in as an unsaved copy. Clean file tabs are read
+// fresh from disk (needsLoad).
+function tabsToImport(raw: string, open: Tab[]): Tab[] {
+  const s = JSON.parse(raw);
+  const list = Array.isArray(s?.tabs) ? (s.tabs.map(normalizeTab).filter(Boolean) as Tab[]) : [];
+  const ids = new Set(open.map((t) => t.id));
+  const out: Tab[] = [];
+  for (const t of list) {
+    const samePathTab = t.path ? open.find((o) => o.path && samePath(o.path, t.path)) : undefined;
+    if (!t.dirty && !t.path && !t.content) continue; // an empty untitled tab
+    if (samePathTab) {
+      if (!t.dirty || samePathTab.content === t.content) continue;
+      out.push(makeTab({ ...t, id: newId(), path: "", title: `${t.title} (불러온 판)`, dirty: true, mtime: 0, needsLoad: false }));
+      continue;
+    }
+    if (ids.has(t.id)) {
+      const o = open.find((x) => x.id === t.id)!;
+      if (o.content === t.content && o.path === t.path) continue;
+    }
+    const clean = t.path && !t.dirty;
+    const tab = makeTab({ ...t, id: ids.has(t.id) ? newId() : t.id, ...(clean ? { content: "", needsLoad: true } : {}) });
+    ids.add(tab.id);
+    out.push(tab);
+  }
+  return out;
+}
+
+// --- saving (also used by the error screen: rescued big tabs) ----------------
+
+// Ask before overwriting a file that changed on disk since we opened/saved it.
+async function confirmOverwriteIfChanged(t: Tab): Promise<boolean> {
+  if (!t.path || !t.mtime) return true;
+  try {
+    const st = await StatFile(t.path);
+    if (st.exists && st.modTime && st.modTime !== t.mtime) {
+      return window.confirm(
+        `"${t.title}" 파일이 다른 프로그램에서 변경되었습니다.\n지금 편집 중인 내용으로 덮어쓸까요? (디스크의 외부 변경사항은 사라집니다)`
+      );
+    }
+  } catch {
+    /* stat failed → proceed */
+  }
+  return true;
+}
+
+// How a tab is written back: its encoding, line breaks and BOM (Go SaveOptions).
+function saveOpts(t: Tab, enc: string, force: boolean, allowTooBig = false) {
+  return {
+    encoding: enc,
+    eol: t.eol,
+    eolMixed: t.eolMixed,
+    noBom: enc === t.encoding ? t.noBom : false, // an encoding change writes the usual BOM
+    force,
+    allowTooBig,
+  };
+}
+
+// A save whose result would be over the open limit: ask first (it still
+// saves, but Chipper will not open that file next time). The text length is
+// a lower bound of the bytes, so most such saves are asked before anything is
+// sent; Go refuses the rest (multi-byte text) and they are asked then.
+async function saveChecked(
+  title: string,
+  text: string,
+  enc: string,
+  send: (allowTooBig: boolean) => Promise<main.FileDoc>,
+  retry?: (allowTooBig: boolean, goErr: string) => Promise<main.FileDoc>
+): Promise<main.FileDoc | null> {
+  const lower = text.length * (enc === "utf-16le" || enc === "utf-16be" ? 2 : 1);
+  if (lower > TOO_BIG_FILE) {
+    if (!window.confirm(tooBigSaveText(title, lower))) return null;
+    return send(true);
+  }
+  try {
+    return await send(false);
+  } catch (e) {
+    const s = String(e);
+    const m = s.match(/CHIPPER_TOO_BIG_AFTER_SAVE:(\d+)/);
+    if (!m) throw e;
+    if (!window.confirm(tooBigSaveText(title, Number(m[1])))) return null;
+    return retry ? retry(true, s) : send(true);
+  }
+}
+
+const mixedOk = (t: Tab) =>
+  !t.eolMixed ||
+  window.confirm(
+    `"${t.title}" 은(는) 줄바꿈 종류(CRLF·LF·CR)가 섞여 있습니다.\n` +
+      `저장하면 줄바꿈이 모두 가장 많은 ${eolName(t.eol)} 로 맞춰집니다. 저장할까요?`
+  );
+
+// 「파일로 저장」 on the error screen: the text a tab held when the App went
+// down, written the way Ctrl+S (its own file: encoding, line breaks, BOM, the
+// changed-on-disk and too-big questions) or 「다른 이름으로」 (never saved)
+// would. true = written.
+async function saveRescuedText(t: Tab, text: string): Promise<boolean> {
+  if (t.path) {
+    if (!mixedOk(t)) return false;
+    if (!(await confirmOverwriteIfChanged(t))) return false;
+    const doc = await saveChecked(t.title, text, t.encoding, (allow) =>
+      SaveFile(t.path, text, saveOpts(t, t.encoding, false, allow))
+    );
+    return !!doc;
+  }
+  const res = await saveChecked(
+    t.title,
+    text,
+    t.encoding,
+    (allow) => SaveFileDialog(suggestName(t), text, saveOpts(t, t.encoding, true, allow)),
+    (allow, goErr) => {
+      const path = goErr.split("\n").pop()?.trim() || "";
+      return path ? SaveFileAs(path, text, saveOpts(t, t.encoding, true, allow)) : Promise.reject(goErr);
+    }
+  );
+  return !!res && !res.canceled;
 }
 
 function suggestName(tab: Tab): string {
@@ -577,6 +825,32 @@ interface ChipsState {
   done: number; // items typed so far
   total: number;
   message: string;
+}
+
+// Markdown / plain-text preview. Rendering happens here, inside the preview's
+// error boundary, not in App's render.
+function PreviewBody(p: {
+  src: string;
+  lang: Lang;
+  divRef: React.MutableRefObject<HTMLDivElement | null>;
+  fontPx: number;
+  onScroll: (top: number) => void;
+  onClick: (e: React.MouseEvent) => void;
+}) {
+  const html = useMemo(
+    () => (p.lang === "markdown" ? renderMarkdown(p.src) : `<pre class="plain">${escapeHtml(p.src)}</pre>`),
+    [p.src, p.lang]
+  );
+  return (
+    <div
+      className="preview-md"
+      ref={p.divRef}
+      style={{ fontSize: p.fontPx + "px" }}
+      onScroll={(e) => p.onScroll((e.target as HTMLDivElement).scrollTop)}
+      onClick={p.onClick}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
 }
 
 // Module-level guard: the guarded silent auto-update path must fire at most once
@@ -641,6 +915,33 @@ function App() {
   focusSlotRef.current = focusSlot;
   const [paneCounts, setPaneCounts] = useState<Record<string, number>>({});
   const [bundleScan, setBundleScan] = useState<main.Bundle | null>(null);
+  // Why the stored session could not be restored as it was (shown as a bar),
+  // with what can be loaded from (older Chipper's session.json, the .bak).
+  const [sessionNotice, setSessionNotice] = useState<{
+    text: string;
+    detail: string;
+    legacy: main.SessionBackup | null;
+    backup: main.SessionBackup | null;
+  } | null>(null);
+  const [noticeDetail, setNoticeDetail] = useState<boolean>(false);
+  // This run does not save the session (Go said so): closing with edits asks.
+  const [sessionBlocked, setSessionBlocked] = useState<boolean>(false);
+  const sessionBlockedRef = useRef(sessionBlocked);
+  sessionBlockedRef.current = sessionBlocked;
+  // Edited tabs too big for the session: their edits live only until saved.
+  const [unkept, setUnkept] = useState<Set<string>>(() => new Set());
+  const unkeptRef = useRef(unkept);
+  unkeptRef.current = unkept;
+  // A short message in the status bar (e.g. why Ctrl+S did nothing).
+  const [flashMsg, setFlashMsg] = useState<string>("");
+  const flashTimer = useRef<number | undefined>(undefined);
+  const flash = useCallback((msg: string) => {
+    window.clearTimeout(flashTimer.current);
+    setFlashMsg(msg);
+    flashTimer.current = window.setTimeout(() => setFlashMsg(""), 4000);
+  }, []);
+  // 「⟳ 자동저장」 menu: stored sessions to load tabs from.
+  const [restoreMenu, setRestoreMenu] = useState<main.SessionBackup[] | null>(null);
   const bundleScanRef = useRef(bundleScan);
   bundleScanRef.current = bundleScan;
   // --- live editors ---------------------------------------------------------
@@ -727,13 +1028,40 @@ function App() {
   const active = tabs.find((t) => t.id === activeId);
 
   // --- session snapshot -----------------------------------------------------
+  // Length of a tab's text without copying it out of the editor.
+  const textLength = useCallback(
+    (t: Tab): number => viewsRef.current.get(t.id)?.state.doc.length ?? t.content.length,
+    []
+  );
+  // A tab's text as bytes in the session (see SESSION_TAB_MAX). The character
+  // count is a lower bound, so a tab already over by characters is not scanned.
+  const textBytesCache = useRef(new Map<string, { s: string; n: number }>());
+  const sessionBytes = useCallback((t: Tab): number => {
+    const v = viewsRef.current.get(t.id);
+    const len = v ? v.state.doc.length : t.content.length;
+    if (len > SESSION_TAB_MAX) return len;
+    if (v) return docSessionBytes(v.state.doc) + SESSION_TAB_OVERHEAD;
+    const hit = textBytesCache.current.get(t.id);
+    if (hit && hit.s === t.content) return hit.n;
+    const n = sessionTextBytes(t.content) + SESSION_TAB_OVERHEAD;
+    textBytesCache.current.set(t.id, { s: t.content, n });
+    return n;
+  }, []);
   const snapshot = useCallback((): string => {
+    const drop = sessionDrops(tabsRef.current, sessionBytes);
+    if (!sameSet(drop, unkeptRef.current)) {
+      unkeptRef.current = drop;
+      setUnkept(drop);
+    }
     const s: Session = {
       version: SESSION_VERSION,
-      tabs: tabsRef.current.map((t) =>
-        t.path && !t.dirty
-          ? { ...t, content: "", needsLoad: true, loadError: "" }
-          : { ...t, content: liveContent(t) }
+      tabs: tabsRef.current.flatMap((t) =>
+        (t.path && !t.dirty) || (t.path && drop.has(t.id))
+          ? // clean, or edited but too big to keep: the file is read again next time
+            [{ ...t, content: "", dirty: false, needsLoad: true, loadError: "", bigSize: 0 }]
+          : drop.has(t.id)
+            ? [] // never saved and too big: the close asks before it goes
+            : [{ ...t, content: liveContent(t), bigSize: 0 }]
       ),
       activeId: activeIdRef.current,
       splitRatio: ratioRef.current,
@@ -748,7 +1076,7 @@ function App() {
       bundles: bundleHistory.current,
     };
     return JSON.stringify(s);
-  }, [liveContent]);
+  }, [liveContent, sessionBytes]);
 
   // --- initial load (once) --------------------------------------------------
   const didInit = useRef(false);
@@ -816,7 +1144,19 @@ function App() {
     (async () => {
       let legacy: unknown = undefined;
       try {
-        const raw = await LoadSession();
+        // Go keeps an unreadable session aside (session.broken-<time>.json),
+        // hands over whatever tabs could be recovered and says what happened.
+        const res = await LoadSession();
+        if (res?.notice) {
+          setSessionNotice({
+            text: res.notice,
+            detail: res.detail ?? "",
+            legacy: res.legacy ?? null,
+            backup: res.backup ?? null,
+          });
+        }
+        if (res?.blocked) setSessionBlocked(true);
+        const raw = res?.data ?? "";
         if (raw) {
           const s = JSON.parse(raw);
           legacy = s?.logRules;
@@ -912,8 +1252,12 @@ function App() {
   // so we only write once typing pauses. A window close still keeps the final
   // keystrokes: Go holds the close and asks for one last snapshot (below).
   const lastSavedSnap = useRef("");
+  // Set once this App is gone (a render error the top-level boundary caught):
+  // a timer or listener still pending must not write the session then — the
+  // tab state it would read is the text from before the editors' last flush.
+  const deadRef = useRef(false);
   const saveSessionNow = useCallback(() => {
-    if (!loadedRef.current) return;
+    if (!loadedRef.current || deadRef.current || sessionBlockedRef.current) return;
     const snap = snapshot();
     if (snap === lastSavedSnap.current) return;
     lastSavedSnap.current = snap;
@@ -999,17 +1343,95 @@ function App() {
     tagsTimer.current = window.setTimeout(() => void saveTagsNow(), wait);
   }, [tagStore, tagsReady, saveTagsNow]);
 
+  // The whole App went down (render error → top-level boundary). Save the
+  // session right now, from the editors themselves (they are still there in
+  // this phase), so 「다시 시도」 reopens what was on screen; nothing written
+  // afterwards (deadRef). The boundary tells the user how it went (rescue.ts).
+  // Edited tabs whose text the session does not get (too big — sessionDrops —
+  // or a run that does not save its session) are taken out of the editors too,
+  // for 「파일로 저장」 on the error screen; so are the other edited tabs, in case
+  // the session save fails.
+  useLayoutEffect(() => {
+    deadRef.current = false;
+    return () => {
+      deadRef.current = true;
+      window.clearTimeout(autosaveTimer.current);
+      const items = (keptIds: Set<string> | null): RescueItem[] =>
+        tabsRef.current
+          .filter((t) => t.dirty && !t.needsLoad)
+          .map((t): RescueItem => {
+            const box = { text: liveContent(t) };
+            return {
+              id: t.id,
+              name: t.label || t.title,
+              path: t.path,
+              size: box.text.length,
+              inSession: !!keptIds && keptIds.has(t.id),
+              state: "",
+              error: "",
+              save: async () => {
+                const ok = await saveRescuedText(t, box.text);
+                if (ok) box.text = ""; // written: let the copy go
+                return ok;
+              },
+            };
+          });
+      if (!loadedRef.current || sessionBlockedRef.current) {
+        try {
+          setRescueItems(loadedRef.current ? items(null) : []);
+        } catch (e) {
+          console.error("오류 순간의 내용을 꺼내지 못했습니다", e);
+        }
+        setRescue("skipped");
+        return;
+      }
+      let snap = "";
+      try {
+        const drop = sessionDrops(tabsRef.current, sessionBytes);
+        setRescueItems(items(new Set(tabsRef.current.filter((t) => !drop.has(t.id)).map((t) => t.id))));
+        snap = snapshot();
+      } catch (e) {
+        console.error("오류 순간의 세션을 만들지 못했습니다", e);
+        setRescue("failed");
+        return;
+      }
+      setRescue("saving");
+      SaveSession(snap).then(
+        () => setRescue("saved"),
+        () => setRescue("failed")
+      );
+    };
+  }, [snapshot, liveContent, sessionBytes]);
+
+  // Closing the window: Go waits for one last snapshot. Edits the session will
+  // not hold (a big edited tab, or a run that does not save its session) are
+  // asked about first — they must not vanish without a word.
   useEffect(() => {
-    const off = EventsOn("chipper:flush-before-close", () => {
-      // tags first: once they are on disk the session can drop the old logRules
-      saveTagsNow()
-        .catch(() => {})
-        .finally(() => {
-          CloseWithSession(loadedRef.current ? snapshot() : "").catch(() => {});
-        });
+    const off = EventsOn("chipper:flush-before-close", async () => {
+      await saveTagsNow().catch(() => "");
+      const snap = loadedRef.current ? snapshot() : "";
+      const lost = tabsRef.current.filter(
+        (t) => t.dirty && (sessionBlockedRef.current || unkeptRef.current.has(t.id))
+      );
+      if (lost.length) {
+        await HoldClose().catch(() => {});
+        const why = sessionBlockedRef.current
+          ? "이번 실행은 세션을 저장하지 않으므로(안내 막대 참고)"
+          : `큰 탭(세션에 담으면 한 탭 ${fmtSize(SESSION_TAB_MAX)}, 모두 합쳐 ${fmtSize(SESSION_TOTAL_MAX)} 넘음)은 고친 내용을 세션에 담지 않으므로`;
+        const ok = window.confirm(
+          "저장하지 않은 고친 내용이 있습니다:\n" +
+            lost.map((t) => `- ${t.label || t.title} (${fmtSize(textLength(t))})`).join("\n") +
+            `\n${why} 지금 닫으면 이 내용은 사라집니다.\n\n[확인] 그래도 닫기   [취소] 돌아가서 저장하기`
+        );
+        if (!ok) {
+          CancelClose().catch(() => {});
+          return;
+        }
+      }
+      CloseWithSession(snap).catch(() => {});
     });
     return off;
-  }, [snapshot, saveTagsNow]);
+  }, [snapshot, textLength, saveTagsNow]);
 
   // --- flush on focus loss / hide (extra insurance) -------------------------
   useEffect(() => {
@@ -1047,22 +1469,6 @@ function App() {
     []
   );
 
-  // Ask before overwriting a file that changed on disk since we opened/saved it.
-  const confirmOverwriteIfChanged = useCallback(async (t: Tab): Promise<boolean> => {
-    if (!t.path || !t.mtime) return true;
-    try {
-      const st = await StatFile(t.path);
-      if (st.exists && st.modTime && st.modTime !== t.mtime) {
-        return window.confirm(
-          `"${t.title}" 파일이 다른 프로그램에서 변경되었습니다.\n지금 편집 중인 내용으로 덮어쓸까요? (디스크의 외부 변경사항은 사라집니다)`
-        );
-      }
-    } catch {
-      /* stat failed → proceed */
-    }
-    return true;
-  }, []);
-
   const doNew = useCallback(() => {
     const tab = makeTab({ title: "제목 없음", content: "", lang: "markdown", view: "split" });
     setTabs((prev) => [...prev, tab]);
@@ -1087,7 +1493,14 @@ function App() {
     if (existing) {
       setTabs((prev) =>
         prev.map((t) =>
-          t.id === existing.id ? { ...t, label: t.label || label, lines: { ...(t.lines ?? DEFAULT_LINES), on: true } } : t
+          t.id === existing.id
+            ? {
+                ...t,
+                label: t.label || label,
+                lines: { ...(t.lines ?? DEFAULT_LINES), on: true },
+                encAuto: isGz(path) || t.needsLoad ? true : t.encAuto,
+              }
+            : t
         )
       );
       return existing.id;
@@ -1116,11 +1529,11 @@ function App() {
     async (id: string, line = 0): Promise<boolean> => {
       const t = tabsRef.current.find((x) => x.id === id);
       if (!t) return false;
+      if (t.path && isGz(t.path)) {
+        alert("압축(.gz) 파일은 전체 보기로 열 수 없습니다 — 「태그 줄만」으로만 볼 수 있습니다.\n전체를 보려면 압축을 풀어서 여세요.");
+        return false;
+      }
       if (t.needsLoad && t.path) {
-        if (isGz(t.path)) {
-          alert("압축(.gz) 파일은 전체 보기로 열 수 없습니다 — 「태그 줄만」으로만 볼 수 있습니다.\n전체를 보려면 압축을 풀어서 여세요.");
-          return false;
-        }
         let size = 0;
         try {
           const st = await StatFile(t.path);
@@ -1129,12 +1542,19 @@ function App() {
           /* the read will say */
         }
         if (size >= BIG_FILE) {
+          if (size > TOO_BIG_FILE) {
+            alert(tooBigText([{ name: t.title, size }]));
+            return false;
+          }
           const c = await askBig(
             `큰 파일입니다 (${t.label || t.title} ${fmtSize(size)})`,
             "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n큰 파일의 그 줄 주변만 여는 기능은 아직 없습니다.",
             true
           );
           if (c !== "full") return false;
+          // The deferred loader enforces the same threshold. Remember this
+          // explicit approval so it does not ask again and pause in the pane.
+          bigApproved.current.add(id);
         }
       }
       if (line > 0) pendingJump.current.set(id, line);
@@ -1143,35 +1563,179 @@ function App() {
     },
     [askBig, setLines]
   );
+  // --- size gate -------------------------------------------------------------
+  // The one size check every way of opening a file goes through, right before
+  // the file is read: 📂 열기, the multi-file dialog (탭 고르기 「📂 파일 열기…」,
+  // an empty pane), Explorer drag & drop, a second launch (-Open) / associated
+  // file, the bundle tree (click, ⇉, drag). The deferred read of tabs restored
+  // from the session (loadTabFromDisk) applies the same two limits but asks
+  // inside the pane instead of a dialog. Files over TOO_BIG_FILE are
+  // refused (one message for all of them); files of BIG_FILE or more need one
+  // confirm for the whole batch. `size` may be given (the bundle scan knows it);
+  // otherwise the file is stat'ed. `restat`: stat even so and use the larger of
+  // the two (a bundle's scan size may be old: the log grew since).
+  const gateSizes = useCallback(
+    async (
+      items: { path: string; size?: number; name?: string; restat?: boolean }[]
+    ): Promise<{ allowed: Set<string>; tooBig: Set<string>; lines: Set<string>; declined: boolean; sizes: Map<string, number> }> => {
+      const sized = await Promise.all(
+        items.map(async (x) => {
+          let size = typeof x.size === "number" ? x.size : 0;
+          if (x.restat && typeof x.size === "number") {
+            try {
+              const st = await StatFile(x.path);
+              if (st?.exists) size = Math.max(size, st.size);
+            } catch {
+              /* keep the scan size */
+            }
+          } else if (typeof x.size !== "number") {
+            try {
+              const st = await StatFile(x.path);
+              size = st?.exists ? st.size : 0;
+            } catch {
+              size = 0; // the read itself will report the problem
+            }
+          }
+          return { path: x.path, name: x.name || baseName(x.path), size };
+        })
+      );
+      const tooBig = sized.filter((x) => x.size > TOO_BIG_FILE);
+      const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
+      if (tooBig.length) alert(tooBigText(tooBig));
+      let choice: BigChoice = "full";
+      if (big.length) {
+        choice = await askBig(
+          `큰 파일입니다 (${big.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")})`,
+          (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") + BIG_TEXT
+        );
+      }
+      const declined = choice === "cancel";
+      const lines = new Set(big.filter((x) => choice === "lines").map((x) => x.path));
+      for (const x of sized) if (isGz(x.path)) lines.add(x.path);
+      return {
+        allowed: new Set(sized.filter((x) => x.size <= TOO_BIG_FILE && !(declined && x.size >= BIG_FILE) && !lines.has(x.path)).map((x) => x.path)),
+        tooBig: new Set(tooBig.map((x) => x.path)),
+        lines,
+        declined,
+        sizes: new Map(sized.map((x) => [x.path, x.size])),
+      };
+    },
+    [askBig]
+  );
+
+  // Open one or more files by absolute path (📂 열기, the multi-file dialog,
+  // drag & drop, a second launch). Dedupes against already-open tabs and within
+  // the batch, checks sizes (gateSizes), skips binaries, and focuses the last
+  // one opened.
+  // Returns the ids of the tabs (opened or already open) in path order; pass
+  // activate=false when the caller places them itself (multi-view panes).
+  const openPaths = useCallback(async (paths: string[], activate = true): Promise<string[]> => {
+    const fresh = paths.filter(
+      (p, i) => p && paths.indexOf(p) === i && !tabsRef.current.some((t) => t.path === p)
+    );
+    const gate = fresh.length ? await gateSizes(fresh.map((path) => ({ path }))) : null;
+    const seen = new Set(tabsRef.current.filter((t) => t.path).map((t) => t.path));
+    const skipped: string[] = [];
+    const ids: string[] = [];
+    let lastId = "";
+    for (const path of paths) {
+      if (!path) continue;
+      const existing = tabsRef.current.find((t) => t.path === path);
+      if (existing) {
+        if (isGz(path)) openLinesOnly(path, existing.label);
+        lastId = existing.id;
+        ids.push(existing.id);
+        continue;
+      }
+      if (seen.has(path)) continue; // duplicate within this drop batch
+      // Gzip logs are never read into the editor. Keep this path explicit as
+      // well as represented in gate.lines so every file-open route agrees.
+      if (isGz(path)) {
+        const id = openLinesOnly(path, "");
+        seen.add(path);
+        lastId = id;
+        ids.push(id);
+        continue;
+      }
+      if (gate?.lines.has(path)) {
+        const id = openLinesOnly(path, "");
+        seen.add(path);
+        lastId = id;
+        ids.push(id);
+        continue;
+      }
+      if (gate && !gate.allowed.has(path)) continue; // too big (told) or big and declined
+      try {
+        const res = await ReadFile(path);
+        if (!res) continue;
+        if (res.binary) {
+          skipped.push((res.name || baseName(path)) + " (텍스트 문서가 아님)");
+          continue;
+        }
+        const lang = langFromPath(res.path);
+        const tab = makeTab({
+          title: res.name,
+          path: res.path,
+          content: res.content,
+          lang,
+          dirty: false,
+          view: defaultView(lang),
+          mtime: res.modTime,
+          encoding: res.encoding,
+          ...formatOf(res),
+        });
+        seen.add(path);
+        setTabs((prev) => (prev.some((t) => t.path === tab.path) ? prev : [...prev, tab]));
+        lastId = tab.id;
+        ids.push(tab.id);
+      } catch (e) {
+        skipped.push(baseName(path) + " — " + String(e));
+        console.error("파일 열기 실패", path, e);
+      }
+    }
+    if (activate && lastId) setActiveId(lastId);
+    if (skipped.length) {
+      alert("다음 파일은 열 수 없습니다:\n- " + skipped.join("\n- "));
+    }
+    return ids;
+  }, [gateSizes, openLinesOnly]);
 
   const doOpen = useCallback(async () => {
     try {
-      const res = await OpenFileDialog();
-      if (!res || res.canceled) return;
-      if (res.binary) {
-        alert(`"${res.name}"은(는) 텍스트 문서가 아니어서 열 수 없습니다.`);
-        return;
-      }
-      const existing = tabsRef.current.find((t) => t.path && t.path === res.path);
-      if (existing) {
-        setActiveId(existing.id);
-        return;
-      }
-      const lang = langFromPath(res.path);
-      const tab = makeTab({
-        title: res.name,
-        path: res.path,
-        content: res.content,
-        lang,
-        dirty: false,
-        view: defaultView(lang),
-        mtime: res.modTime,
-        encoding: res.encoding,
-      });
-      setTabs((prev) => [...prev, tab]);
-      setActiveId(tab.id);
+      // The dialog only picks the path; reading goes through openPaths so the
+      // size check applies here too.
+      const path = await OpenFileDialog();
+      if (path) await openPaths([path]);
     } catch (e) {
       alert("파일을 열지 못했습니다:\n" + String(e));
+    }
+  }, [openPaths]);
+
+  // 「불러오기」: add the tabs of a stored session (older Chipper's session.json,
+  // .bak, a kept broken session) next to the open ones — nothing is replaced.
+  const importSession = useCallback(async (name: string) => {
+    try {
+      const raw = await ReadSessionBackup(name);
+      const add = tabsToImport(raw, tabsRef.current);
+      if (!add.length) {
+        alert(`${name} 에서 불러올 새 탭이 없습니다 (이미 모두 열려 있습니다).`);
+        return false;
+      }
+      setTabs((prev) => [...prev, ...add]);
+      setActiveId(add[0].id);
+      flash(`${name} 에서 탭 ${add.length}개를 불러왔습니다`);
+      return true;
+    } catch (e) {
+      alert(`${name} 을(를) 불러오지 못했습니다:\n` + String(e));
+      return false;
+    }
+  }, [flash]);
+
+  const openRestoreMenu = useCallback(async () => {
+    try {
+      setRestoreMenu((await SessionBackups()) ?? []);
+    } catch {
+      setRestoreMenu([]);
     }
   }, []);
 
@@ -1227,96 +1791,31 @@ function App() {
     }
   }, [assocTypes, assocChecked]);
 
-  // Open one or more files by absolute path (used by drag & drop). Dedupes
-  // against already-open tabs and within the batch, skips binaries, and focuses
-  // the last one opened.
-  // Returns the ids of the tabs (opened or already open) in path order; pass
-  // activate=false when the caller places them itself (multi-view panes).
-  const openPaths = useCallback(async (paths: string[], activate = true): Promise<string[]> => {
-    const seen = new Set(tabsRef.current.filter((t) => t.path).map((t) => t.path));
-    const skipped: string[] = [];
-    const ids: string[] = [];
-    let lastId = "";
-    // Too big to read whole (or .gz): ask once for all of them — whole / tag lines only.
-    const linesOnly = new Set<string>();
-    const leaveOut = new Set<string>();
-    const big: { path: string; size: number }[] = [];
-    for (const x of paths) {
-      if (!x || seen.has(x)) continue;
-      if (isGz(x)) {
-        linesOnly.add(x);
-        continue;
-      }
-      try {
-        const st = await StatFile(x);
-        if (st.exists && st.size >= BIG_FILE) big.push({ path: x, size: st.size });
-      } catch {
-        /* ReadFile will say */
-      }
-    }
-    if (big.length) {
-      const c = await askBig(
-        `큰 파일입니다 (${big.map((b) => `${b.path.split(/[\\/]/).pop()} ${fmtSize(b.size)}`).join(", ")})`,
-        BIG_TEXT
-      );
-      for (const b of big) (c === "lines" ? linesOnly : c === "cancel" ? leaveOut : new Set<string>()).add(b.path);
-    }
-    for (const path of paths) {
-      if (!path) continue;
-      const existing = tabsRef.current.find((t) => t.path === path);
-      if (existing) {
-        lastId = existing.id;
-        ids.push(existing.id);
-        continue;
-      }
-      if (seen.has(path) || leaveOut.has(path)) continue; // duplicate within this drop batch / not wanted
-      if (linesOnly.has(path)) {
-        const id = openLinesOnly(path, "");
-        seen.add(path);
-        lastId = id;
-        ids.push(id);
-        continue;
-      }
-      try {
-        const res = await ReadFile(path);
-        if (!res) continue;
-        if (res.binary) {
-          skipped.push(res.name || path);
-          continue;
-        }
-        const lang = langFromPath(res.path);
-        const tab = makeTab({
-          title: res.name,
-          path: res.path,
-          content: res.content,
-          lang,
-          dirty: false,
-          view: defaultView(lang),
-          mtime: res.modTime,
-          encoding: res.encoding,
-        });
-        seen.add(path);
-        setTabs((prev) => (prev.some((t) => t.path === tab.path) ? prev : [...prev, tab]));
-        lastId = tab.id;
-        ids.push(tab.id);
-      } catch (e) {
-        skipped.push((path.split(/[\\/]/).pop() || path) + " (열기 실패)");
-        console.error("드롭 파일 열기 실패", path, e);
-      }
-    }
-    if (activate && lastId) setActiveId(lastId);
-    if (skipped.length) {
-      alert("다음 파일은 열 수 없습니다 (텍스트 문서가 아니거나 읽기 실패):\n- " + skipped.join("\n- "));
-    }
-    return ids;
-  }, [askBig, openLinesOnly]);
+  // 📖 read-only and 🔒 locked panes never write the file they show: 「💾 저장」,
+  // Ctrl+S and 「인코딩하여 저장」 are off there (「다른 이름으로」 still works).
+  const saveLockedMode = useCallback((): PaneMode | null => {
+    const m = multiRef.current;
+    if (!m.on) return null;
+    const mode = m.slots.slice(0, m.count).find((x) => x.tabId === activeIdRef.current)?.mode;
+    return mode === "read" || mode === "lock" ? mode : null;
+  }, []);
 
   const doSaveAs = useCallback(async () => {
     const t = getActive();
     if (!t || t.needsLoad) return; // content not read yet — never write ""
     const savedContent = liveContent(t); // exactly what we hand to disk
     try {
-      const res = await SaveFileDialog(suggestName(t), savedContent, t.encoding);
+      const res = await saveChecked(
+        t.title,
+        savedContent,
+        t.encoding,
+        (allow) => SaveFileDialog(suggestName(t), savedContent, saveOpts(t, t.encoding, true, allow)),
+        // The dialog already ran: save at the path it returned with the error.
+        (allow, goErr) => {
+          const path = goErr.split("\n").pop()?.trim() || "";
+          return path ? SaveFileAs(path, savedContent, saveOpts(t, t.encoding, true, allow)) : Promise.reject(goErr);
+        }
+      );
       if (!res || res.canceled) return;
       const lang = langFromPath(res.path);
       setTabs((prev) => {
@@ -1332,6 +1831,7 @@ function App() {
                 // stay dirty if the user typed while the dialog was open
                 dirty: liveContent(x) !== savedContent,
                 view: lang === "plaintext" && x.view === "split" ? "editor" : x.view,
+                ...formatOf(res),
               }
             : x
         );
@@ -1344,30 +1844,85 @@ function App() {
     } catch (e) {
       alert("저장하지 못했습니다:\n" + String(e));
     }
-  }, [getActive, liveContent]);
+  }, [getActive, liveContent, saveChecked]);
 
+  // Write the active tab to its own file and update the tab from the result.
+  const writeTab = useCallback(
+    async (t: Tab, enc: string, force: boolean) => {
+      const savedContent = liveContent(t);
+      const doc = await saveChecked(t.title, savedContent, enc, (allow) =>
+        SaveFile(t.path, savedContent, saveOpts(t, enc, force, allow))
+      );
+      if (!doc) return;
+      setTabs((prev) =>
+        prev.map((x) =>
+          x.id === t.id
+            ? {
+                ...x,
+                content: savedContent,
+                encoding: enc,
+                dirty: liveContent(x) !== savedContent,
+                mtime: doc.modTime,
+                // unchanged: the file was left as it was, mixed line breaks and all
+                ...(doc.unchanged ? {} : formatOf(doc)),
+              }
+            : x
+        )
+      );
+    },
+    [liveContent, saveChecked]
+  );
+
+  // Save writes the file only when there is something to write: a tab nobody
+  // edited is never written (its file keeps its bytes and mtime — a log is
+  // evidence), and Go skips the write too when the edited text ended up equal
+  // to the file's (typed and undone). A real save keeps the file's line breaks
+  // and BOM. An unedited tab whose file was deleted asks to re-create it.
   const doSave = useCallback(async () => {
     const t = getActive();
     if (!t || t.needsLoad) return; // content not read yet — never write ""
+    const locked = saveLockedMode();
+    if (locked) {
+      flash(
+        `${locked === "read" ? "📖 읽기 전용" : "🔒 잠금"} 칸이라 저장하지 않았습니다 — 고쳐 저장하려면 칸을 ✏️ 편집으로 바꾸거나 「다른 이름으로」 저장하세요`
+      );
+      return;
+    }
     if (!t.path) {
       await doSaveAs();
       return;
     }
-    const savedContent = liveContent(t);
+    if (!t.dirty) {
+      // Nothing edited — unless the file is gone: then this text exists only here.
+      let st: main.FileStat | null = null;
+      try {
+        st = await StatFile(t.path);
+      } catch {
+        st = null;
+      }
+      if (st && !st.exists) {
+        if (
+          window.confirm(
+            `"${t.title}" 파일이 지워졌거나 옮겨졌습니다.\n${t.path}\n지금 보이는 내용으로 이 자리에 다시 만들까요?`
+          )
+        ) {
+          try {
+            await writeTab(t, t.encoding, true);
+          } catch (e) {
+            alert("저장하지 못했습니다:\n" + String(e));
+          }
+        }
+      }
+      return;
+    }
+    if (!mixedOk(t)) return;
     if (!(await confirmOverwriteIfChanged(t))) return;
     try {
-      const doc = await SaveFile(t.path, savedContent, t.encoding);
-      setTabs((prev) =>
-        prev.map((x) =>
-          x.id === t.id
-            ? { ...x, content: savedContent, dirty: liveContent(x) !== savedContent, mtime: doc.modTime }
-            : x
-        )
-      );
+      await writeTab(t, t.encoding, false);
     } catch (e) {
       alert("저장하지 못했습니다:\n" + String(e));
     }
-  }, [getActive, doSaveAs, confirmOverwriteIfChanged, liveContent]);
+  }, [getActive, doSaveAs, confirmOverwriteIfChanged, saveLockedMode, flash, writeTab]);
 
   const doCloseTab = useCallback((id: string) => {
     const prev = tabsRef.current;
@@ -1392,11 +1947,42 @@ function App() {
   // Only the tab being looked at is read, so a session full of big logs starts
   // fast and holds in memory just what has actually been opened.
   const loadingIds = useRef(new Set<string>());
+  // Big restored tabs the user agreed to read (「열기」 in the pane).
+  const bigApproved = useRef(new Set<string>());
   const loadTabFromDisk = useCallback(async (t: Tab) => {
+    // Compressed logs are only supported by the line filter. A tab can briefly
+    // reach this deferred loader during pane activation before its lines view
+    // state is committed, so guard here as well as in the render effect.
+    if (isGz(t.path)) {
+      setTabs((prev) => prev.map((x) => x.id === t.id ? { ...x, lines: { ...(x.lines ?? DEFAULT_LINES), on: true }, encAuto: true } : x));
+      return;
+    }
     if (loadingIds.current.has(t.id)) return;
     loadingIds.current.add(t.id);
     let res: Awaited<ReturnType<typeof ReadFile>> | null = null;
     let err = "";
+    // Same size rule as gateSizes, but asked inside the pane: a restored session
+    // may hold several big tabs, and a stack of dialogs at start-up would block
+    // the whole window.
+    if (!bigApproved.current.has(t.id)) {
+      let size = 0;
+      try {
+        const st = await StatFile(t.path);
+        size = st?.exists ? st.size : 0;
+      } catch {
+        size = 0;
+      }
+      if (size >= BIG_FILE) {
+        loadingIds.current.delete(t.id);
+        const tooBig = size > TOO_BIG_FILE ? tooBigText([{ name: t.title, size }]) : "";
+        setTabs((prev) =>
+          prev.map((x) =>
+            x.id !== t.id || !x.needsLoad ? x : tooBig ? { ...x, loadError: tooBig } : { ...x, bigSize: size }
+          )
+        );
+        return;
+      }
+    }
     try {
       // Keep the encoding the tab was using; fall back to auto-detection (and
       // detect when the tab was never read: opened into 「태그 줄만」).
@@ -1419,9 +2005,11 @@ function App() {
                 content: res.content,
                 encoding: res.encoding || x.encoding,
                 encAuto: false,
+                ...formatOf(res),
                 mtime: res.modTime,
                 needsLoad: false,
                 loadError: "",
+                bigSize: 0,
                 reloadSeq: x.reloadSeq + 1,
               }
             : { ...x, loadError: err || "파일을 읽지 못했습니다." }
@@ -1429,10 +2017,16 @@ function App() {
     );
   }, []);
 
+  // 「열기」 on a big restored tab: read it now.
+  const approveBig = useCallback((id: string) => {
+    bigApproved.current.add(id);
+    setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, bigSize: 0 } : x)));
+  }, []);
+
   useEffect(() => {
-    if (active && active.needsLoad && !active.loadError && !active.lines?.on) loadTabFromDisk(active);
+    if (active && active.needsLoad && !active.loadError && !active.lines?.on && !active.bigSize) loadTabFromDisk(active);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active?.id, active?.needsLoad, active?.loadError, active?.lines?.on, loadTabFromDisk]);
+  }, [active?.id, active?.needsLoad, active?.loadError, active?.lines?.on, active?.bigSize, loadTabFromDisk]);
 
   // --- multi view -----------------------------------------------------------
   // The focused pane's tab is the active tab, so the status bar, save, close and
@@ -1495,6 +2089,9 @@ function App() {
   // --- log bundle ----------------------------------------------------------------
   // Open one file as a tab (or find it already open); null if not text.
   const openOne = useCallback(async (path: string, label: string): Promise<string | null> => {
+    // Bundle callers also use this helper; never send compressed logs through
+    // the editor reader even if a caller misses the lines-only routing.
+    if (isGz(path)) return openLinesOnly(path, label);
     const existing = tabsRef.current.find((t) => samePath(t.path, path));
     if (existing) {
       if (!existing.label) {
@@ -1513,11 +2110,12 @@ function App() {
       view: defaultView(lang),
       mtime: res.modTime,
       encoding: res.encoding,
+      ...formatOf(res),
       label,
     });
     setTabs((prev) => (prev.some((t) => samePath(t.path, tab.path)) ? prev : [...prev, tab]));
     return tab.id;
-  }, []);
+  }, [openLinesOnly]);
 
   const scanBundle = useCallback(async (root: string): Promise<main.Bundle | null> => {
     try {
@@ -1547,12 +2145,13 @@ function App() {
     const b = await scanBundle(root);
     if (!b) return;
     bundleGen.current++;
-    const servers = b.servers.map((x) => x.name);
+    // A server folder with no files gets no pane (the tree still lists it).
+    const servers = (b.servers ?? []).filter((x) => (x.files ?? []).length > 0).map((x) => x.name);
     const old = multiRef.current.bundle;
     setFindOpen(false);
     setMulti((m) => ({
       on: true,
-      count: Math.min(servers.length, MAX_PANES),
+      count: Math.max(1, Math.min(servers.length, MAX_PANES)),
       bundle: { root, servers },
       slots: m.slots.map((x, i) => ({ ...x, tabId: "", server: servers[i] ?? "", note: "" })),
     }));
@@ -1588,16 +2187,26 @@ function App() {
       const serverOf = (i: number) => (serverFor && serverFor.slot === i ? serverFor.server : m.slots[i]?.server ?? "");
       const targets = (only != null ? [only] : Array.from({ length: m.count }, (_, i) => i)).filter((i) => serverOf(i));
       const picks = targets.map((i) => ({ i, server: serverOf(i), file: resolveInServer(scan, serverOf(i), rel) }));
-      const big = picks.filter((x) => x.file && !x.file.compressed && x.file.size >= BIG_FILE);
-      let linesOnly = false; // every pane of this switch shows 「태그 줄만」 (side by side alike)
-      if (big.length) {
-        const c = await askBig(
-          `큰 파일이 있습니다 (${big.map((x) => `${x.server} ${fmtSize(x.file!.size)}`).join(", ")})`,
-          BIG_TEXT
-        );
-        if (c === "cancel" || gen !== bundleGen.current) return;
-        linesOnly = c === "lines";
-      }
+      // Size check (shared gateSizes) for the files this switch would read.
+      const toRead = picks.filter(
+        (x) =>
+          x.file &&
+          !x.file.compressed &&
+          !tabsRef.current.some((t) => samePath(t.path, bundlePath(root, x.server, x.file!.rel)))
+      );
+      // Sizes are stat'ed again (restat): a log may have grown past a limit
+      // since the bundle was scanned.
+      const gate = await gateSizes(
+        toRead.map((x) => ({
+          path: bundlePath(root, x.server, x.file!.rel),
+          size: x.file!.size,
+          restat: true,
+          name: `${x.server} ${x.file!.rel.split("/").pop()}`,
+        }))
+      );
+      // Declined the big-file confirm, or the one file asked for is too big:
+      // leave the panes as they are.
+      if (gate.declined || (picks.length === 1 && gate.tooBig.size === 1) || gen !== bundleGen.current) return;
       const base = rel.split("/").pop() || rel;
       const result = new Map<number, { tabId: string; note: string; server: string }>();
       // tab id → visible pane showing it. Panes outside this switch keep theirs;
@@ -1609,17 +2218,20 @@ function App() {
       for (const x of picks) {
         let r = { tabId: "", note: "", server: x.server };
         if (!x.file) r.note = `${x.server}에는 ${base} 가 없습니다`;
+        else if (x.file.compressed && !isGz(x.file.rel)) r.note = `${x.file.rel} 은 압축 파일이라 전체로 열 수 없습니다 (풀어서 여세요)`;
+        else if (gate.tooBig.has(bundlePath(root, x.server, x.file.rel)))
+          r.note = `${x.file.rel} 은 너무 커서 열 수 없습니다 (${sizeText(gate.sizes.get(bundlePath(root, x.server, x.file.rel)) ?? x.file.size)}, ${LIMIT_TEXT} 까지)`;
         else {
           let id: string | null = null;
           const fp = bundlePath(root, x.server, x.file.rel);
           const label = `${x.server} · ${x.file.rel.split("/").pop()}`;
+          let why = "텍스트 문서가 아닙니다";
           try {
-            // .gz can't be read into the editor; its tag lines can be shown
-            id = linesOnly || x.file.compressed ? openLinesOnly(fp, label) : await openOne(fp, label);
-          } catch {
-            id = null;
+            id = gate.lines.has(fp) || isGz(fp) ? openLinesOnly(fp, label) : await openOne(fp, label);
+          } catch (e) {
+            why = String(e);
           }
-          if (!id) r.note = `${x.file.rel} 을 열 수 없습니다 (텍스트가 아니거나 읽기 실패)`;
+          if (!id) r.note = `${x.file.rel} 을 열 수 없습니다 — ${why}`;
           else if (taken.has(id)) r.note = `같은 파일이 ${taken.get(id)! + 1}번 칸에 열려 있습니다`;
           else {
             taken.set(id, x.i);
@@ -1654,7 +2266,7 @@ function App() {
       activeIdRef.current = focusId;
       setActiveId(focusId);
     },
-    [openOne, scanBundle, askBig, openLinesOnly]
+    [openOne, scanBundle, gateSizes, openLinesOnly]
   );
 
   // Point a pane at another server of the bundle, keeping the log it shows.
@@ -1690,6 +2302,22 @@ function App() {
       switchBundleLog(rel, target, { slot: target, server });
     },
     [switchBundleLog, focusPane]
+  );
+
+  // M: a file lying directly in the bundle root (「(묶음 루트)」 in the tree)
+  // belongs to no server: it opens as a plain tab in the given pane (default:
+  // the focused one), through the usual size check.
+  const openRootFile = useCallback(
+    (rel: string, pane?: number) => {
+      const m = multiRef.current;
+      if (!m.bundle) return;
+      const sep = m.bundle.root.includes("\\") ? "\\" : "/";
+      const path = m.bundle.root.replace(/[\\/]+$/, "") + sep + rel;
+      const at = pane ?? Math.min(focusSlotRef.current, m.count - 1);
+      focusPane(at);
+      openIntoPanes([path], at);
+    },
+    [focusPane, openIntoPanes]
   );
 
   // After a restart the bundle's file list is read again for the tree.
@@ -1781,6 +2409,7 @@ function App() {
     for (const x of multi.slots.slice(0, multi.count)) {
       const t = tabs.find((y) => y.id === x.tabId);
       if (t && t.needsLoad && !t.loadError && !t.lines?.on) loadTabFromDisk(t);
+      if (t && t.needsLoad && !t.loadError && !t.bigSize) loadTabFromDisk(t);
     }
   }, [multi, tabs, loadTabFromDisk]);
 
@@ -1809,6 +2438,8 @@ function App() {
   );
 
   // Change the encoding the file is written with (and save now if it has a path).
+  // Picking the encoding the tab already has is a plain save: nothing edited →
+  // nothing written, mixed line breaks → asked first (same as 💾 저장).
   const saveWithEncoding = useCallback(
     async (enc: string) => {
       const t = getActive();
@@ -1818,24 +2449,22 @@ function App() {
         setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, encoding: enc } : x)));
         return;
       }
+      if (saveLockedMode()) return; // 📖 / 🔒 pane: never rewrite the file
+      if (enc === t.encoding) {
+        await doSave();
+        return;
+      }
+      if (!mixedOk(t)) return;
       if (!(await confirmOverwriteIfChanged(t))) return;
       try {
-        // Commit the encoding ONLY after the write succeeds, so a failed re-encode
-        // (e.g. CP949 with unsupported chars) leaves the tab on its working encoding.
-        const text = liveContent(t);
-        const doc = await SaveFile(t.path, text, enc);
-        setTabs((prev) =>
-          prev.map((x) =>
-            x.id === t.id
-              ? { ...x, content: text, encoding: enc, dirty: liveContent(x) !== text, mtime: doc.modTime }
-              : x
-          )
-        );
+        // An explicit conversion writes even when the text is unchanged (force).
+        // The tab takes the new encoding only once the write succeeded.
+        await writeTab(t, enc, true);
       } catch (e) {
         alert("저장하지 못했습니다:\n" + String(e));
       }
     },
-    [getActive, confirmOverwriteIfChanged, liveContent]
+    [getActive, confirmOverwriteIfChanged, saveLockedMode, doSave, writeTab]
   );
 
   // Re-read the file from disk decoding it with a different encoding.
@@ -1851,6 +2480,10 @@ function App() {
       if (t.dirty && !window.confirm("저장하지 않은 변경사항이 사라집니다.\n다른 인코딩으로 다시 열까요?")) {
         return;
       }
+      // The same size check as every other read (big → confirm, too big → no).
+      const g = await gateSizes([{ path: t.path, name: t.title }]);
+      if (!g.allowed.has(t.path)) return;
+      if (t.needsLoad) bigApproved.current.add(t.id); // 「열기」 waiting in the pane: this answers it
       const before = liveContent(t);
       try {
         const res = await ReadFileAs(t.path, enc);
@@ -1876,10 +2509,12 @@ function App() {
                   content: res.content,
                   encoding: res.encoding,
                   encAuto: false,
+                  ...formatOf(res),
                   dirty: false,
                   mtime: res.modTime,
                   needsLoad: false,
                   loadError: "",
+                  bigSize: 0,
                   reloadSeq: x.reloadSeq + 1, // force the editor to remount with new content
                 }
               : x
@@ -1889,7 +2524,7 @@ function App() {
         alert("다시 열지 못했습니다:\n" + String(e));
       }
     },
-    [getActive, liveContent]
+    [getActive, liveContent, gateSizes]
   );
 
   // --- editor right-click context menu --------------------------------------
@@ -2153,7 +2788,8 @@ function App() {
       if (!id) return;
       e.preventDefault();
       const m = multiRef.current;
-      if (m.on && m.slots[focusSlotRef.current]?.mode === "lock" && LOCK_BLOCKED_CMDS.has(id)) return;
+      // Ctrl+S still reaches doSave, which writes nothing there but says why.
+      if (m.on && m.slots[focusSlotRef.current]?.mode === "lock" && LOCK_BLOCKED_CMDS.has(id) && id !== "save") return;
       runCommand(id);
     };
     window.addEventListener("keydown", onKey);
@@ -2356,12 +2992,9 @@ function App() {
     refreshActive,
   ]);
 
-  const previewHtml = useMemo(() => {
-    if (!active) return "";
-    if (active.lang === "html") return ""; // handled by the sandboxed iframe
-    if (active.lang === "markdown") return renderMarkdown(previewSrc);
-    return `<pre class="plain">${escapeHtml(previewSrc)}</pre>`;
-  }, [previewSrc, active?.lang]);
+  // The preview HTML is rendered inside PreviewBody, under the preview's own
+  // error boundary: a markdown/sanitizer error there used to take the whole App
+  // down (it was computed in App's render).
 
   const htmlPreview = active?.lang === "html" ? previewSrc : "";
 
@@ -2427,7 +3060,7 @@ function App() {
     } else {
       el.scrollTop = previewScroll.current;
     }
-  }, [previewHtml, activeId]);
+  }, [previewSrc, active?.lang, activeId]);
 
   // Synced scrolling in split view: scrolling the source or the preview scrolls
   // the other proportionally. (HTML preview is a sandboxed iframe whose scroll
@@ -2689,6 +3322,9 @@ function App() {
             {n}
           </button>
         ))}
+      </span>
+    );
+  };
   // 「태그 줄만」 of a tab: filtered by the saved tags (filterStore), coloured
   // like the editor (live tags).
   const renderLines = (t: Tab, focused: boolean) => {
@@ -2706,7 +3342,7 @@ function App() {
       <LinesView
         key={t.id + "#lines"}
         path={t.path}
-        encoding={t.encAuto ? "" : t.encoding}
+        encoding={isGz(t.path) || t.encAuto ? "" : t.encoding}
         rules={filterRules(filterStore, ap.names, off)}
         ruleTags={ruleOwners(filterStore, ap.names, off)}
         tagNames={ap.names}
@@ -2749,8 +3385,33 @@ function App() {
   const toggleLogColors = (t: Tab) =>
     setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
 
+  // A restored tab whose file is big waits for 「열기」 (the size confirm, asked
+  // in the pane instead of a dialog).
+  const bigPrompt = (t: Tab) => (
+    <>
+      <div className="empty-title">큰 파일입니다 ({fmtSize(t.bigSize)})</div>
+      <div className="empty-sub">{t.path}</div>
+      {t.bigSize > EDIT_MEM_FILE && <div className="empty-sub">{EDIT_MEM_NOTE}</div>}
+      <div className="empty-sub">{BIG_CONFIRM_TAIL}</div>
+      <div className="empty-actions">
+        <button className="tb-btn" onClick={() => approveBig(t.id)}>
+          열기
+        </button>
+        <button className="tb-btn" onClick={() => doCloseTab(t.id)}>
+          × 탭 닫기
+        </button>
+      </div>
+    </>
+  );
+
   // --- multi-view panes ------------------------------------------------------
   const visibleSlots = multi.slots.slice(0, multi.count);
+  // 📖 / 🔒: the pane showing the active tab must not write its file.
+  const activePaneMode = multi.on ? visibleSlots.find((x) => x.tabId === activeId)?.mode : undefined;
+  const saveLocked = activePaneMode === "read" || activePaneMode === "lock";
+  const saveLockedTip = saveLocked
+    ? `${activePaneMode === "read" ? "📖 읽기 전용" : "🔒 잠금"} 칸이라 원본 파일에 저장하지 않습니다 — 고쳐 저장하려면 칸을 ✏️ 편집으로 바꾸거나 「다른 이름으로」 저장하세요`
+    : "";
   const renderPane = (slot: Slot, i: number) => {
     const t = slot.tabId ? tabs.find((x) => x.id === slot.tabId) : undefined;
     const focused = i === focusSlot;
@@ -2790,6 +3451,11 @@ function App() {
             if (typeof server === "string" && typeof rel === "string") {
               focusPane(i);
               switchBundleLog(rel, i, { slot: i, server });
+              if (!server) openRootFile(rel, i); // a bundle-root file
+              else {
+                focusPane(i); // with its tab (see openFromTree)
+                switchBundleLog(rel, i, { slot: i, server });
+              }
             }
           } catch {
             /* not ours */
@@ -2797,6 +3463,7 @@ function App() {
         }}
       >
         <div className="mpane-body">
+          <ErrorBoundary what={`${i + 1}번 칸`} resetKey={t ? t.id + "#" + t.reloadSeq : ""}>
           {!t ? (
             <div className="empty">
               <div className="empty-title">{slot.server ? slot.server : "빈 칸"}</div>
@@ -2835,6 +3502,8 @@ function App() {
                     </button>
                   </div>
                 </>
+              ) : t.bigSize ? (
+                bigPrompt(t)
               ) : (
                 <div className="empty-title">불러오는 중…</div>
               )}
@@ -2854,12 +3523,18 @@ function App() {
               onSelectionChange={focused ? onSelectionChange : noop}
             />
           )}
+          </ErrorBoundary>
         </div>
         <div className="mpane-foot">
           <span className="mp-num">{i + 1}</span>
           {t?.dirty && (
             <span className="dot" title="저장하지 않은 변경사항">
               ●
+            </span>
+          )}
+          {t && unkept.has(t.id) && (
+            <span className="unkept" title={UNKEPT_TIP}>
+              ⚠ 저장해야 남음
             </span>
           )}
           {multi.bundle && (
@@ -2963,6 +3638,12 @@ function App() {
       paneOfServer.set(x.server, [...(paneOfServer.get(x.server) ?? []), i]);
       const t = x.tabId ? tabs.find((y) => y.id === x.tabId) : undefined;
       const prefix = bundlePath(multi.bundle!.root, x.server, "");
+      // a bundle-root file shown in this pane ("" server in the tree)
+      const rootPrefix = multi.bundle!.root.replace(/[\\/]+$/, "");
+      if (t && underRoot(t.path, rootPrefix) && !/[\\/]/.test(t.path.slice(rootPrefix.length + 1))) {
+        const k = "\u0000" + t.path.slice(rootPrefix.length + 1);
+        treeShown.set(k, [...(treeShown.get(k) ?? []), i]);
+      }
       if (t && underRoot(t.path, prefix)) {
         const k = x.server + "\u0000" + t.path.slice(prefix.length).replace(/\\/g, "/");
         treeShown.set(k, [...(treeShown.get(k) ?? []), i]);
@@ -3036,8 +3717,8 @@ function App() {
           <button
             className="tb-btn"
             onClick={doSave}
-            title={`저장 (${keyHint("save")})`}
-            disabled={!active}
+            title={saveLocked ? saveLockedTip : `저장 (${keyHint("save")}) — 고친 것이 없으면 파일을 쓰지 않습니다`}
+            disabled={!active || saveLocked}
           >
             💾 저장
           </button>
@@ -3155,9 +3836,106 @@ function App() {
           >
             ⌨ 단축키
           </button>
-          <span className="autosave">⟳ 자동저장 켜짐</span>
+          <button
+            className={sessionBlocked ? "autosave off" : "autosave"}
+            title={
+              sessionBlocked
+                ? "이번 실행은 세션을 저장하지 않습니다 (안내 막대 참고) — 눌러서 보관된 세션 보기"
+                : "자동저장 — 창을 닫아도 다음 실행 때 복원됩니다. 눌러서 보관된 세션(.bak 등)에서 탭 불러오기"
+            }
+            onClick={openRestoreMenu}
+          >
+            {sessionBlocked ? "⚠ 세션 저장 꺼짐" : "⟳ 자동저장 켜짐"}
+          </button>
         </div>
       </div>
+
+      {sessionNotice && (
+        <div className="notice-bar" role="alert">
+          <span className="notice-text">
+            ⚠ {sessionNotice.text}
+            {noticeDetail && sessionNotice.detail && <span className="notice-detail">{sessionNotice.detail}</span>}
+          </span>
+          {sessionNotice.legacy && (
+            <button
+              className="tb-btn"
+              title={`${sessionNotice.legacy.name} 의 탭 ${sessionNotice.legacy.tabs}개를 지금 탭 옆에 엽니다 (지금 탭은 그대로)`}
+              onClick={async () => {
+                if (await importSession(sessionNotice.legacy!.name))
+                  setSessionNotice((n) => (n ? { ...n, legacy: null } : n));
+              }}
+            >
+              예전 버전 작업 불러오기
+            </button>
+          )}
+          {sessionNotice.backup && (
+            <button
+              className="tb-btn"
+              title={`${sessionNotice.backup.name} 의 탭 ${sessionNotice.backup.tabs}개를 지금 탭 옆에 엽니다 (지금 탭은 그대로)`}
+              onClick={async () => {
+                if (await importSession(sessionNotice.backup!.name))
+                  setSessionNotice((n) => (n ? { ...n, backup: null } : n));
+              }}
+            >
+              지난 정상 세션(.bak) 불러오기
+            </button>
+          )}
+          <button className="tb-btn" title="보관된 세션 목록 (.bak · 깨져 보관한 세션 · 예전 버전)" onClick={openRestoreMenu}>
+            보관된 세션…
+          </button>
+          {sessionNotice.detail && (
+            <button className="tb-btn" onClick={() => setNoticeDetail((v) => !v)}>
+              {noticeDetail ? "자세히 닫기" : "자세히 보기"}
+            </button>
+          )}
+          <button className="tb-btn" onClick={() => setSessionNotice(null)}>
+            닫기
+          </button>
+        </div>
+      )}
+
+      {restoreMenu && (
+        <div className="chips-overlay" onMouseDown={() => setRestoreMenu(null)}>
+          <div className="chips-dialog restore-menu" onMouseDown={(e) => e.stopPropagation()}>
+            <div className="chips-title">보관된 세션에서 탭 불러오기</div>
+            <div className="chips-sub">
+              고른 세션의 탭을 지금 탭 옆에 엽니다 — 지금 열린 탭은 그대로 둡니다. 이미 열린 파일은 건너뛰고, 다르게 고친 내용은 「(불러온 판)」 새 탭으로 엽니다.
+            </div>
+            {restoreMenu.length === 0 && <div className="chips-sub">보관된 세션이 없습니다.</div>}
+            {restoreMenu.map((b) => (
+              <div key={b.name} className="restore-row">
+                <span className="restore-name">
+                  {b.kind === "bak"
+                    ? "지난 실행의 세션"
+                    : b.kind === "bak2"
+                      ? "그 전 실행의 세션"
+                      : b.kind === "broken"
+                        ? "깨져서 보관한 세션"
+                        : "예전 버전 Chipper 의 세션"}
+                  <span className="restore-sub">
+                    {" "}
+                    {b.name} · {new Date(b.modTime).toLocaleString()} · {b.note ? b.note : `탭 ${b.tabs}개`}
+                  </span>
+                </span>
+                <button
+                  className="tb-btn"
+                  disabled={!!b.note || !b.tabs}
+                  onClick={async () => {
+                    if (await importSession(b.name)) setRestoreMenu(null);
+                  }}
+                >
+                  불러오기
+                </button>
+              </div>
+            ))}
+            <div className="restore-actions">
+              <button className="tb-btn" onClick={() => setRestoreMenu(null)}>
+                닫기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="tabbar" ref={tabBarRef}>
         {tabsOverflow && (
@@ -3194,6 +3972,11 @@ function App() {
                 ●
               </span>
             )}
+            {unkept.has(t.id) && (
+              <span className="unkept" title={UNKEPT_TIP}>
+                ⚠
+              </span>
+            )}
             <span className="tab-title">{t.label || t.title}</span>
             <span
               className="tab-close"
@@ -3227,23 +4010,26 @@ function App() {
         {multi.on ? (
           <>
             {multi.bundle && bundleScan && bundleScan.root === multi.bundle.root && (treeOpen ? (
-              <BundleTree
-                key={bundleScan.root}
-                scan={bundleScan}
-                shown={treeShown}
-                paneOfServer={paneOfServer}
-                onOpen={openFromTree}
-                onOpenAll={(rel) => switchBundleLog(rel, null)}
-                onHide={() => setTreeOpen(false)}
-                rotationKey={rotationKey}
-                fmtSize={fmtSize}
-                bigFile={BIG_FILE}
-                pathOf={(server, rel) => bundlePath(bundleScan.root, server, rel)}
-                tagsOf={treeTagsOf}
-                onAssign={openAssign}
-                canAssign={tagsReady}
-                saveProblem={tagsSaveProblem}
-              />
+              <ErrorBoundary what="로그 묶음 트리" resetKey={bundleScan}>
+                <BundleTree
+                  key={bundleScan.root}
+                  scan={bundleScan}
+                  shown={treeShown}
+                  paneOfServer={paneOfServer}
+                  onOpen={openFromTree}
+                  onOpenRoot={(rel) => openRootFile(rel)}
+                  onOpenAll={(rel) => switchBundleLog(rel, null)}
+                  onHide={() => setTreeOpen(false)}
+                  rotationKey={rotationKey}
+                  fmtSize={fmtSize}
+                  bigFile={BIG_FILE}
+                  pathOf={(server, rel) => bundlePath(bundleScan.root, server, rel)}
+                  tagsOf={treeTagsOf}
+                  onAssign={openAssign}
+                  canAssign={tagsReady}
+                  saveProblem={tagsSaveProblem}
+                />
+              </ErrorBoundary>
             ) : (
               <button className="bt-show" title="로그 묶음 트리 펼치기" onClick={() => setTreeOpen(true)}>
                 ▶
@@ -3279,6 +4065,8 @@ function App() {
                   </button>
                 </div>
               </>
+            ) : active.bigSize ? (
+              bigPrompt(active)
             ) : (
               <div className="empty-title">불러오는 중…</div>
             )}
@@ -3301,17 +4089,19 @@ function App() {
                 {active.lines?.on && active.path ? (
                   renderLines(active, true)
                 ) : (
-                  <CodeEditor
-                    key={active.id + "#" + active.reloadSeq}
-                    initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
-                    lang={active.lang}
-                    fontSize={fontSize}
-                    logRules={logOn(active) ? layersForTab(active) : null}
-                    onDocChanged={() => markEdited(active.id)}
-                    onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
-                    onView={(v) => setView(active.id, v)}
-                    onSelectionChange={onSelectionChange}
-                  />
+                  <ErrorBoundary what="편집기" resetKey={active.id + "#" + active.reloadSeq}>
+                    <CodeEditor
+                      key={active.id + "#" + active.reloadSeq}
+                      initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
+                      lang={active.lang}
+                      fontSize={fontSize}
+                      logRules={logOn(active) ? layersForTab(active) : null}
+                      onDocChanged={() => markEdited(active.id)}
+                      onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
+                      onView={(v) => setView(active.id, v)}
+                      onSelectionChange={onSelectionChange}
+                    />
+                  </ErrorBoundary>
                 )}
                 {findOpen && (
                   <FindReplace
@@ -3330,25 +4120,27 @@ function App() {
             {showPreview && (
               <div className="pane preview-pane" style={{ flex: "1 1 0" }}>
                 <div className="pane-head">미리보기 · 읽기 전용</div>
-                {active.lang === "html" ? (
-                  <iframe
-                    className="preview-frame"
-                    sandbox=""
-                    srcDoc={htmlDoc}
-                    title="HTML 미리보기"
-                  />
-                ) : (
-                  <div
-                    className="preview-md"
-                    ref={previewRef}
-                    style={{ fontSize: previewFontPx + "px" }}
-                    onScroll={(e) => {
-                      previewScroll.current = (e.target as HTMLDivElement).scrollTop;
-                    }}
-                    onClick={onPreviewClick}
-                    dangerouslySetInnerHTML={{ __html: previewHtml }}
-                  />
-                )}
+                <ErrorBoundary what="미리보기" resetKey={active.id + "#" + active.reloadSeq + "#" + previewSrc.length}>
+                  {active.lang === "html" ? (
+                    <iframe
+                      className="preview-frame"
+                      sandbox=""
+                      srcDoc={htmlDoc}
+                      title="HTML 미리보기"
+                    />
+                  ) : (
+                    <PreviewBody
+                      src={previewSrc}
+                      lang={active.lang}
+                      divRef={previewRef}
+                      fontPx={previewFontPx}
+                      onScroll={(top) => {
+                        previewScroll.current = top;
+                      }}
+                      onClick={onPreviewClick}
+                    />
+                  )}
+                </ErrorBoundary>
               </div>
             )}
           </>
@@ -3359,6 +4151,11 @@ function App() {
         {active ? (
           <>
             <span className="st-path">{active.path || "저장되지 않음 (아직 파일 없음)"}</span>
+            {flashMsg && (
+              <span className="st-flash" role="status">
+                {flashMsg}
+              </span>
+            )}
             <span className="st-right">
               <button
                 className="st-font"
@@ -3433,6 +4230,18 @@ function App() {
                 )}
               </span>
               <span className="st-lang">{langLabel(active.lang)}</span>
+              {active.path && active.eol && (
+                <span
+                  className={active.eolMixed ? "st-eol mixed" : "st-eol"}
+                  title={
+                    active.eolMixed
+                      ? `줄바꿈 종류가 섞여 있습니다. 고쳐 저장하면 모두 ${eolName(active.eol)} 로 맞춰집니다`
+                      : "줄바꿈 종류 — 저장할 때 그대로 지킵니다"
+                  }
+                >
+                  {active.eolMixed ? `줄바꿈 섞임(${eolName(active.eol)} 많음)` : eolName(active.eol)}
+                </span>
+              )}
               <span className="st-enc-wrap">
                 <button
                   className="st-enc"
@@ -3447,11 +4256,15 @@ function App() {
                 </button>
                 {encMenu && (
                   <div className="enc-menu" onMouseDown={(e) => e.stopPropagation()}>
-                    <div className="menu-head">인코딩하여 저장 / 변환</div>
+                    <div className="menu-head" title={saveLockedTip}>
+                      인코딩하여 저장 / 변환{saveLocked ? " (이 칸에서는 꺼짐)" : ""}
+                    </div>
                     {ENCODINGS.map((e) => (
                       <button
                         key={"save-" + e.id}
                         className="menu-item"
+                        disabled={saveLocked}
+                        title={saveLockedTip}
                         onClick={() => {
                           setEncMenu(false);
                           saveWithEncoding(e.id);
@@ -3482,13 +4295,25 @@ function App() {
               <span className="st-chars">
                 {(viewsRef.current.get(active.id)?.state.doc.length ?? active.content.length).toLocaleString()}자
               </span>
+              {unkept.has(active.id) && (
+                <span className="st-unkept" title={UNKEPT_TIP}>
+                  ⚠ 큰 파일 — 고친 내용은 저장해야 남습니다
+                </span>
+              )}
               <span className={active.dirty ? "st-dirty on" : "st-dirty"}>
                 {active.dirty ? "● 변경됨" : "저장됨"}
               </span>
             </span>
           </>
         ) : (
-          <span className="st-path">준비됨</span>
+          <>
+            <span className="st-path">준비됨</span>
+            {flashMsg && (
+              <span className="st-flash" role="status">
+                {flashMsg}
+              </span>
+            )}
+          </>
         )}
       </div>
 
@@ -3964,7 +4789,7 @@ function App() {
 
       {releaseNotes && (
         <div
-          className="modal-backdrop"
+          className="chips-overlay"
           onClick={() => {
             setReleaseNotes(null);
             MarkReleaseNotesSeen().catch(() => {});
