@@ -115,13 +115,36 @@ export function repairTagName(raw: string, taken: string[]): string {
   return uniqueTagName(n, taken);
 }
 
-// "collector (2)", "collector (3)", … — the first name not in `taken`.
-export function uniqueTagName(base: string, taken: string[]): string {
-  if (!taken.includes(base)) return base;
+// The one name maker: `base` when it is free, else "collector (2)",
+// "collector (3)", … — the first not in `taken` (a list, or a Set/Map of
+// names for big stores). The base is cut so the name stays within the
+// 100-character limit.
+export function uniqueTagName(base: string, taken: string[] | { has(name: string): boolean }): string {
+  const has = Array.isArray(taken) ? (x: string) => taken.includes(x) : (x: string) => taken.has(x);
+  if (!has(base)) return base;
+  const chars = [...base];
   for (let i = 2; ; i++) {
-    const n = `${base} (${i})`;
-    if (!taken.includes(n)) return n;
+    const suffix = ` (${i})`;
+    const room = MAX_TAG_NAME_LEN - suffix.length;
+    const n = (chars.length > room ? chars.slice(0, room).join("").trimEnd() : base) + suffix;
+    if (!has(n)) return n;
   }
+}
+
+// Why `s` (a rule label, say) holds characters a tag name may not: control
+// characters or invisible ones (zero-width, direction marks/overrides, BOM …)
+// — the same character rules as tag names. "" = none.
+export function hiddenCharProblem(s: string): string {
+  if (CONTROL.test(s)) return "제어 문자(줄바꿈·탭 등)";
+  if (INVISIBLE.test(s)) return "보이지 않는 글자(폭 없는 문자·방향 제어 문자 등)";
+  return "";
+}
+
+// An assignment key as stored: "/"-separated, no slashes at the ends; for
+// file/name keys (rotation keys) the early stage-3 ".*" ending is dropped.
+export function assignKey(raw: string, rotation: boolean): string {
+  const key = raw.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+  return rotation ? legacyRotationKey(key) : key;
 }
 
 function normalizeAssignMap(raw: any, rename: Map<string, string>, rotation: boolean): Record<string, string[]> {
@@ -137,9 +160,7 @@ function normalizeAssignMap(raw: any, rename: Map<string, string>, rotation: boo
           .filter((x) => x !== COMMON)
       ),
     ];
-    let key = k.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-    if (rotation) key = legacyRotationKey(key);
-    out[key] = names;
+    out[assignKey(k, rotation)] = names;
   }
   return out;
 }

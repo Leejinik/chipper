@@ -12,18 +12,7 @@ import {
   tagNameProblem,
   type TagStore,
 } from "./logTags";
-import {
-  exportFileName,
-  exportPayload,
-  runImport,
-  summaryDetails,
-  summaryLine,
-  type ImportChoice,
-  type ImportConflict,
-  type ImportFile,
-  type ImportSummary,
-} from "./logTagsIO";
-import { ExportTagsDialog, ImportTagsDialog } from "../wailsjs/go/main/App";
+import { useTagsIO } from "./TagsIO";
 
 // The log colour tag window (was the 「로그 색 규칙」 dialog): tag list on the
 // left, the selected tag's rules on the right.
@@ -65,22 +54,8 @@ interface Props {
   applied: string[]; // tags applied to the current tab (marked in the list)
   notice: string; // save problem / read-only notice ("" = none)
   // Write the tags now (optionally `next` first): "" = saved (or nothing to
-  // save), otherwise why not. Used around an import so tags.json.bak is the
-  // store right before it.
+  // save), otherwise why not. Used around an import (TagsIO.tsx).
   onSaveNow: (next?: TagStore) => Promise<string>;
-}
-
-interface ExportState {
-  checked: string[];
-  name: string; // file name typed (used once typed)
-  typed: boolean;
-}
-
-interface ImportResult {
-  summary: ImportSummary;
-  before: TagStore;
-  after: TagStore; // undo only while the store is still this
-  saveError: string;
 }
 
 export default function TagsDialog({ store, onChange, onClose, initial, applied, notice, onSaveNow }: Props) {
@@ -92,44 +67,17 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
   const tag = store.tags.find((t) => t.name === sel) ?? store.tags[0];
   const rules = tag.rules;
   const isCommon = tag.name === COMMON;
-  const storeRef = useRef(store);
-  storeRef.current = store;
-
-  // --- export / import state
-  const [exporting, setExporting] = useState<ExportState | null>(null);
-  const [conflict, setConflict] = useState<{
-    c: ImportConflict;
-    resolve: (a: { choice: ImportChoice; all: boolean } | null) => void;
-  } | null>(null);
-  const [conflictAll, setConflictAll] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [ioMsg, setIoMsg] = useState<{ text: string; bad?: boolean } | null>(null);
-  const [result, setResult] = useState<ImportResult | null>(null);
-  const conflictRef = useRef(conflict);
-  conflictRef.current = conflict;
-  const exportingRef = useRef(exporting);
-  exportingRef.current = exporting;
-  // window closed with a clash question up (e.g. by the app): stop that import
-  useEffect(() => () => conflictRef.current?.resolve(null), []);
+  // export / import / backups (TagsIO.tsx): buttons, result band, small windows
+  const io = useTagsIO({ store, onChange, onSaveNow, current: tag.name, select: setSel });
 
   // Esc closes the window wherever the focus is (not while renaming a tag);
-  // with a clash question up it stops the import, with the export panel up it
-  // closes only that panel.
+  // with one of TagsIO's small windows up, TagsIO closes only that one first.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || (e.target as HTMLElement | null)?.classList?.contains("tag-rename")) return;
       e.preventDefault();
-      if (conflictRef.current) {
-        conflictRef.current.resolve(null);
-        setConflict(null);
-        return;
-      }
-      if (exportingRef.current) {
-        setExporting(null);
-        return;
-      }
       onCloseRef.current();
     };
     window.addEventListener("keydown", onKey);
@@ -194,94 +142,8 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
 
   const places = placesOf(store, tag.name);
 
-  // ---- export
-  const exportNames = exporting ? names.filter((n) => exporting.checked.includes(n)) : [];
-  const exportName = exporting ? (exporting.typed ? exporting.name : exportNames.length === 1 ? exportNames[0] : "") : "";
-  const exportFile = exportFileName(exportName);
-  const startExport = () => {
-    setIoMsg(null);
-    setExporting({ checked: [tag.name], name: "", typed: false });
-  };
-  const doExport = async () => {
-    if (!exporting || !exportNames.length || !exportFile || busy) return;
-    setBusy(true);
-    try {
-      const path = await ExportTagsDialog(exportFile, exportPayload(store, exportNames));
-      if (path) {
-        setExporting(null);
-        setIoMsg({ text: `태그 ${exportNames.length}개(${exportNames.map((n) => `「${n}」`).join(", ")})를 ${path} 로 내보냈습니다.` });
-      }
-    } catch (e) {
-      setIoMsg({ text: "내보내기 실패: " + String(e), bad: true });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // ---- import
-  const ask = (c: ImportConflict) =>
-    new Promise<{ choice: ImportChoice; all: boolean } | null>((resolve) => {
-      setConflictAll(false);
-      setConflict({ c, resolve });
-    });
-  const answer = (choice: ImportChoice) => {
-    if (!conflict) return;
-    conflict.resolve({ choice, all: conflictAll });
-    setConflict(null);
-  };
-  const doImport = async () => {
-    if (busy) return;
-    setIoMsg(null);
-    setExporting(null);
-    setBusy(true);
-    try {
-      let files: ImportFile[] | null;
-      try {
-        files = (await ImportTagsDialog()) as ImportFile[] | null;
-      } catch (e) {
-        setIoMsg({ text: "가져오기 실패: " + String(e), bad: true });
-        return;
-      }
-      if (!files || !files.length) return;
-      // pending edits first, so tags.json.bak ends up being exactly the store
-      // right before this import
-      await onSaveNow();
-      const before = storeRef.current;
-      const { store: after, summary } = await runImport(before, files, ask);
-      if (summary.canceled) {
-        setIoMsg({ text: "가져오기를 그만뒀습니다. 바뀐 것은 없습니다." });
-        return;
-      }
-      let saveError = "";
-      if (after !== before) {
-        onChange(after);
-        storeRef.current = after;
-        const err = await onSaveNow(after);
-        if (err)
-          saveError =
-            `가져온 태그를 tags.json 에 저장하지 못했습니다: ${err}. 이번 실행 동안에는 쓰이지만 다시 켜면 사라집니다.` +
-            (/새 버전|newer|version/i.test(err) ? " 디스크의 tags.json 이 더 새 버전 chipper 의 것이면 chipper 를 업데이트한 뒤 다시 가져오세요." : "");
-        const first = summary.added[0] ?? summary.renamed[0]?.to ?? summary.overwritten[0];
-        if (first) setSel(first);
-      }
-      setResult({ summary, before, after, saveError });
-    } finally {
-      setBusy(false);
-    }
-  };
-  const canUndo = !!result && result.after !== result.before && store === result.after;
-  const undoImport = async () => {
-    if (!result || !canUndo) return;
-    onChange(result.before);
-    storeRef.current = result.before;
-    const err = await onSaveNow(result.before);
-    if (!result.before.tags.some((t) => t.name === sel)) setSel(COMMON);
-    setResult(null);
-    setIoMsg(err ? { text: "가져오기 전으로 되돌렸지만 저장하지 못했습니다: " + err, bad: true } : { text: "가져오기 전으로 되돌렸습니다." });
-  };
-
   return (
-    <div className="chips-overlay" onMouseDown={() => !conflict && !busy && onClose()}>
+    <div className="chips-overlay" onMouseDown={() => !io.blocking && onClose()}>
       <div
         className="keys-dialog rules-dialog tags-dialog"
         onMouseDown={(e) => e.stopPropagation()}
@@ -292,44 +154,7 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
           태그 쪽 색이 이깁니다. 태그 이름은 대소문자를 구분합니다(collector 와 Collector 는 다른 태그).
         </div>
         {notice && <div className="tags-notice">{notice}</div>}
-        {ioMsg && (
-          <div className={"tags-io-msg" + (ioMsg.bad ? " bad" : "")}>
-            <span>{ioMsg.text}</span>
-            <button className="mp-x" title="닫기" onClick={() => setIoMsg(null)}>
-              ✕
-            </button>
-          </div>
-        )}
-        {result && (
-          <div className="tags-import-result">
-            <div className="tags-import-head">
-              <b>가져오기 결과</b>
-              <span className="tags-import-line">{summaryLine(result.summary)}</span>
-              {result.after !== result.before && (
-                <button
-                  className="tb-btn tags-undo"
-                  disabled={!canUndo}
-                  title={canUndo ? "이번 가져오기를 통째로 취소합니다" : "가져온 뒤 태그를 고쳐서 되돌릴 수 없습니다"}
-                  onClick={() => void undoImport()}
-                >
-                  되돌리기
-                </button>
-              )}
-              <button className="mp-x" title="닫기" onClick={() => setResult(null)}>
-                ✕
-              </button>
-            </div>
-            {result.saveError && <div className="tags-import-save">{result.saveError}</div>}
-            <ul className="tags-import-details">
-              {summaryDetails(result.summary).map((d, i) => (
-                <li key={i}>{d}</li>
-              ))}
-              {result.after !== result.before && !result.saveError && (
-                <li className="dim">가져오기 전 태그는 tags.json.bak 에도 남아 있습니다.</li>
-              )}
-            </ul>
-          </div>
-        )}
+        {io.banner}
         <div className="tags-body">
           <div className="tags-side">
             <div className="tags-list">
@@ -399,14 +224,7 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
                 </button>
               )}
             </div>
-            <div className="tags-side-actions tags-io-actions">
-              <button className="tb-btn tags-export" disabled={busy} title="고른 태그를 파일 하나로 내보냅니다 (다른 사람에게 주기)" onClick={startExport}>
-                내보내기…
-              </button>
-              <button className="tb-btn tags-import" disabled={busy} title="태그 파일을 가져옵니다 (여러 파일 선택 가능)" onClick={() => void doImport()}>
-                가져오기…
-              </button>
-            </div>
+            {io.buttons}
           </div>
           <div className="tags-main">
             <div className="tags-where">
@@ -511,90 +329,7 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
             닫기
           </button>
         </div>
-        {exporting && (
-          <div className="tags-sub-overlay">
-            <div className="tags-sub tags-export-panel">
-              <div className="chips-title">태그 내보내기</div>
-              <div className="chips-sub">고른 태그와 그 규칙을 파일 하나로 저장합니다. 어디에 붙였는지(폴더·파일 지정)는 넣지 않습니다.</div>
-              <div className="tags-export-list">
-                {store.tags.map((t) => (
-                  <label key={t.name} className="tags-export-item">
-                    <input
-                      type="checkbox"
-                      data-tag={t.name}
-                      checked={exporting.checked.includes(t.name)}
-                      onChange={(e) =>
-                        setExporting({
-                          ...exporting,
-                          checked: e.target.checked ? [...exporting.checked, t.name] : exporting.checked.filter((n) => n !== t.name),
-                        })
-                      }
-                    />
-                    <span className="tag-name">{t.name}</span>
-                    <span className="tag-count">규칙 {t.rules.length}</span>
-                  </label>
-                ))}
-              </div>
-              <label className="tags-export-name">
-                <span>파일 이름</span>
-                <input
-                  className="tags-export-file"
-                  value={exportName}
-                  placeholder={exportNames.length > 1 ? "여러 태그 — 파일 이름을 정해 주세요" : "파일 이름"}
-                  onChange={(e) => setExporting({ ...exporting, name: e.target.value, typed: true })}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void doExport();
-                  }}
-                />
-                <span className="dim tags-export-preview">{exportFile || "(이름 필요)"}</span>
-              </label>
-              <div className="chips-actions">
-                <button className="tb-btn" onClick={() => setExporting(null)}>
-                  취소
-                </button>
-                <button
-                  className="tb-btn primary tags-export-go"
-                  disabled={busy || !exportNames.length || !exportFile}
-                  title={!exportNames.length ? "내보낼 태그를 하나 이상 고르세요" : !exportFile ? "파일 이름을 정해 주세요" : "저장할 곳을 고릅니다"}
-                  onClick={() => void doExport()}
-                >
-                  내보내기…
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-        {conflict && (
-          <div className="tags-sub-overlay">
-            <div className="tags-sub tags-conflict" role="alertdialog">
-              <div className="chips-title tags-conflict-q">「{conflict.c.name}」 태그가 이미 있습니다. 덮어쓰시겠습니까?</div>
-              <div className="chips-sub">
-                가져올 파일 {conflict.c.file} 의 「{conflict.c.name}」(규칙 {conflict.c.theirs}개)이 내 「{conflict.c.name}」(규칙 {conflict.c.mine}개)과
-                내용이 다릅니다.
-                {conflict.c.isCommon && " common 은 모든 로그에 쓰이는 태그라, 덮어쓰면 모든 로그의 색이 바뀝니다."} 덮어써도 가져오기가 끝난 뒤
-                「되돌리기」로 통째로 취소할 수 있고, 지금 태그는 tags.json.bak 에도 남습니다.
-              </div>
-              {conflict.c.left > 0 && (
-                <label className="tags-conflict-all">
-                  <input type="checkbox" checked={conflictAll} onChange={(e) => setConflictAll(e.target.checked)} />
-                  나머지 {conflict.c.left}개도 모두 같게
-                </label>
-              )}
-              <div className="chips-actions">
-                <button className="tb-btn primary tags-c-overwrite" onClick={() => answer("overwrite")}>
-                  덮어쓰기
-                </button>
-                <button className="tb-btn tags-c-skip" onClick={() => answer("skip")}>
-                  건너뛰기
-                </button>
-                <button className="tb-btn tags-c-rename" title={`「${conflict.c.renameTo}」 로 추가합니다`} onClick={() => answer("rename")}>
-                  다른 이름으로 ({conflict.c.renameTo})
-                </button>
-              </div>
-              <div className="dim tags-conflict-esc">Esc: 가져오기 그만두기 (아무것도 바꾸지 않음)</div>
-            </div>
-          </div>
-        )}
+        {io.panels}
       </div>
     </div>
   );

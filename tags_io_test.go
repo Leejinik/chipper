@@ -163,11 +163,13 @@ func TestExportPath(t *testing.T) {
 		in, out  string
 		appended bool
 	}{
+		// changed = not the path the dialog asked about (stage 5 fix: always
+		// <stem>.chipper-tags.json — TestExportPathNormalized has the rest)
 		{d + "collector.chipper-tags.json", d + "collector.chipper-tags.json", false},
 		{d + "collector", d + "collector.chipper-tags.json", true},
-		{d + "collector..chipper-tags.json", d + "collector.chipper-tags.json", false},
-		{d + "collector..CHIPPER-TAGS.JSON", d + "collector.CHIPPER-TAGS.JSON", false},
-		{d + "mine.json", d + "mine.json", false},
+		{d + "collector..chipper-tags.json", d + "collector.chipper-tags.json", true},
+		{d + "collector..CHIPPER-TAGS.JSON", d + "collector.chipper-tags.json", true},
+		{d + "mine.json", d + "mine.chipper-tags.json", true},
 		{d + "v1.2 tags", d + "v1.2 tags.chipper-tags.json", true},
 	}
 	for _, c := range cases {

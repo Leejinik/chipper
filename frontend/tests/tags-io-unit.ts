@@ -62,7 +62,8 @@ const store0 = (): TagStore =>
   const v = JSON.parse(js);
   eq("export envelope", [v.format, v.version, v.exported], ["chipper-tags", 1, NOW]);
   eq("export tags in store order, unknown skipped", v.tags.map((t: any) => t.name), ["collector", "admin"]);
-  eq("export rule fields (no id)", Object.keys(v.tags[0].rules[0]), ["on", "label", "pattern", "kind", "caseSensitive", "color", "line", "filter"]);
+  // stage 5 fix: rule ids travel (common's default ids "error", "warn" … survive a round trip)
+  eq("export rule fields (with id)", Object.keys(v.tags[0].rules[0]), ["id", "on", "label", "pattern", "kind", "caseSensitive", "color", "line", "filter"]);
   eq("export has no assign / updated", ["assign" in v, "updated" in v.tags[0]], [false, false]);
   eq("export common", JSON.parse(exportPayload(s, [COMMON], NOW)).tags[0].rules[0].pattern, "ERROR");
   eq("export ends with newline", js.endsWith("}\n"), true);
@@ -99,7 +100,8 @@ eq("file name: Korean", exportFileName("수집기 태그"), "수집기 태그" +
   eq("rule: #RGB expands, lower-cased", (ok({ pattern: "a", color: "#F0A" }) as LogRule).color, "#ff00aa");
   eq("rule: #RRGGBB lower-cased", (ok({ pattern: "a", color: "#ABCDEF" }) as LogRule).color, "#abcdef");
   eq("rule: unknown fields ignored", Object.keys(ok({ pattern: "a", shiny: 1, id: "theirs", updated: "x" }) as LogRule).includes("shiny"), false);
-  eq("rule: their id not kept", (ok({ pattern: "a", id: "theirs" }) as LogRule).id, "id");
+  eq("rule: their id kept (stage 5 fix)", (ok({ pattern: "a", id: "theirs" }) as LogRule).id, "theirs");
+  eq("rule: a non-text id is not", (ok({ pattern: "a", id: 7 }) as LogRule).id, "id");
   eq("rule: non-boolean flag → default", (ok({ pattern: "a", line: "yes", on: 0 }) as LogRule).line === false, true);
   const bad: [string, unknown, string][] = [
     ["not an object", "kafka", "{ } 형식"],
@@ -137,10 +139,11 @@ eq("file name: Korean", exportFileName("수집기 태그"), "수집기 태그" +
 // ---- sameRules ------------------------------------------------------------------
 {
   const a = [R({ id: "1", label: "mine", pattern: "x", color: "#AABBCC" })];
-  eq("same: ids, labels, colour case ignored", sameRules(a, [R({ id: "2", label: "theirs", pattern: "x", color: "#aabbcc" })]), true);
-  for (const k of ["kind", "pattern", "caseSensitive", "color", "line", "filter", "on"] as const) {
+  // 판정 ③ (stage 5 fix): the label counts — only ids and colour case don't
+  eq("same: ids, colour case ignored", sameRules(a, [R({ id: "2", label: "mine", pattern: "x", color: "#aabbcc" })]), true);
+  for (const k of ["label", "kind", "pattern", "caseSensitive", "color", "line", "filter", "on"] as const) {
     const changed: Partial<LogRule> =
-      k === "kind" ? { kind: "word" } : k === "pattern" ? { pattern: "y" } : k === "color" ? { color: "#000000" } : { [k]: !a[0][k] };
+      k === "label" ? { label: "theirs" } : k === "kind" ? { kind: "word" } : k === "pattern" ? { pattern: "y" } : k === "color" ? { color: "#000000" } : { [k]: !a[0][k] };
     eq("differs on " + k, sameRules(a, [R({ ...a[0], ...changed })]), false);
   }
   eq("differs on order", sameRules([R({ pattern: "a" }), R({ pattern: "b" })], [R({ pattern: "b" }), R({ pattern: "a" })]), false);
@@ -185,7 +188,7 @@ function script(answers: ({ choice: ImportChoice; all?: boolean } | null)[]) {
     const { asked, ask } = script([{ choice: "overwrite" }, { choice: "skip" }, { choice: "rename" }]);
     const f = file("team.chipper-tags.json", [
       { name: "kafka", rules: [{ pattern: "rebalance" }] }, // new
-      { name: "collector", rules: [{ ...sameCollector[0], label: "different label", id: "zz" }] }, // same content
+      { name: "collector", rules: [{ ...sameCollector[0], id: "zz" }] }, // same content (other id; a label difference would be asked — tags-io-fix-unit)
       { name: "Collector", rules: [{ pattern: "UPPER" }] }, // case-different → new, no question
       { name: COMMON, rules: [{ pattern: "FATAL", color: "#ff0000" }] }, // differs → overwrite
       { name: "admin", rules: [{ pattern: "logout" }] }, // differs → skip

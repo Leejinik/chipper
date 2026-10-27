@@ -408,6 +408,60 @@ export namespace main {
 	        this.size = source["size"];
 	    }
 	}
+	export class TagsBackupInfo {
+	    file: string;
+	    kind: string;
+	    time: string;
+	    tags: number;
+	    names: string[];
+	    places: number;
+	    problem: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new TagsBackupInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.file = source["file"];
+	        this.kind = source["kind"];
+	        this.time = source["time"];
+	        this.tags = source["tags"];
+	        this.names = source["names"];
+	        this.places = source["places"];
+	        this.problem = source["problem"];
+	    }
+	}
+	export class TagsExportResult {
+	    path: string;
+	    confirm: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TagsExportResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.confirm = source["confirm"];
+	    }
+	}
+	export class TagsImportAssign {
+	    dir: Record<string, Array<string>>;
+	    file: Record<string, Array<string>>;
+	    name: Record<string, Array<string>>;
+	
+	    static createFrom(source: any = {}) {
+	        return new TagsImportAssign(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.dir = source["dir"];
+	        this.file = source["file"];
+	        this.name = source["name"];
+	    }
+	}
 	export class TagsImportTag {
 	    name: string;
 	    rules: any[];
@@ -429,6 +483,7 @@ export namespace main {
 	    tags: TagsImportTag[];
 	    problems: string[];
 	    tagsJson: boolean;
+	    assign?: TagsImportAssign;
 	
 	    static createFrom(source: any = {}) {
 	        return new TagsImportFile(source);
@@ -442,6 +497,7 @@ export namespace main {
 	        this.tags = this.convertValues(source["tags"], TagsImportTag);
 	        this.problems = source["problems"];
 	        this.tagsJson = source["tagsJson"];
+	        this.assign = this.convertValues(source["assign"], TagsImportAssign);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
