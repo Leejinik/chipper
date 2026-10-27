@@ -1,5 +1,7 @@
 import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate } from "@codemirror/view";
 import type { Extension, Range } from "@codemirror/state";
+import { RE2JS } from "re2js";
+import { translateJS } from "./jsRegex";
 
 // Log highlighting (what vim's `messages` syntax, VS Code's Log File Highlighter
 // and MobaXterm's keyword colouring do). There is no single standard; level
@@ -99,263 +101,353 @@ export const DEFAULT_LOG_RULES: LogRule[] = [
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// A group that is itself repeated ("(...)+", "(...)*", "(...){2,}") can
-// backtrack exponentially on an unlucky line when
-//   - it contains a repeat:            (a+)+  (\w*)*  (x|y+){2,}
-//   - or its alternatives can overlap: (a|aa)+$  (a|ab)*  (.|x)+  (a?b|b)+
-// Colouring runs on the UI thread with no way to interrupt a regex, so such
-// rules are refused. A small bounded repeat of the group ({2}, {1,4}) can't
-// blow up and is allowed — IP addresses are written (\d{1,3}\.){3}\d{1,3}.
-// Overlap is judged on each alternative's first token and
-// errs on the safe side: a class, ".", an escape class like \d, a nested group,
-// an optional first token or an empty alternative counts as overlapping.
-export function riskyRegex(src: string): boolean {
-  type Frame = {
-    inner: boolean; // contains a repeat
-    firsts: string[]; // first-token key of each finished alternative
-    cur: string | null; // first-token key of the current alternative
-    justFirst: boolean; // the last token was that first token
+// --- matching engines ------------------------------------------------------------
+//
+// A rule the user writes as a regex runs on re2js (RE2 ported to JavaScript):
+// matching time is linear in the line length whatever the pattern, so no regex
+// can freeze the editor — the old guard (a heuristic that refused "risky"
+// shapes like (a|aa)+ and also many harmless ones like (\w|-)+) is gone.
+// The pattern is still JavaScript syntax: translateJS (jsRegex.ts) rewrites it
+// into RE2 syntax exactly like the Go line filter does, so a line is coloured
+// exactly when 「태그 줄만 보기」 keeps it. What RE2 cannot express (look-ahead,
+// look-behind, back-references) is refused with the reason.
+//
+// The built-in default patterns, and 「글자 그대로」/「단어」 rules (escaped
+// text), run on the browser's own RegExp, which is faster: they are known
+// linear, and translateJS keeps their meaning identical.
+
+export type RuleProblem = "" | "invalid" | "unsupported";
+
+// Matches of one rule on one line: flat [from, to, from, to, …], non-empty,
+// in order, not overlapping.
+export interface RuleMatcher {
+  engine: "v8" | "re2";
+  ranges(text: string): number[];
+}
+
+interface CompiledRule {
+  matcher: RuleMatcher | null;
+  problem: RuleProblem;
+  reason: string; // Korean, "" when fine
+}
+
+const BUILTIN_PATTERNS = new Set(DEFAULT_LOG_RULES.map((r) => r.pattern));
+const NONE: number[] = [];
+
+function v8Matcher(re: RegExp): RuleMatcher {
+  return {
+    engine: "v8",
+    ranges(text) {
+      re.lastIndex = 0;
+      let out: number[] | null = null;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) {
+        if (!m[0]) {
+          re.lastIndex++;
+          continue;
+        }
+        (out ??= []).push(m.index, m.index + m[0].length);
+      }
+      return out ?? NONE;
+    },
   };
-  const stack: Frame[] = [];
-  const top = (): Frame | undefined => stack[stack.length - 1];
-  // A token that is not a group/quantifier/alternation, inside the current group.
-  const token = (key: string) => {
-    const f = top();
-    if (!f) return;
-    if (f.cur === null) {
-      f.cur = key;
-      f.justFirst = true;
-    } else f.justFirst = false;
+}
+
+function re2Matcher(re: RE2JS): RuleMatcher {
+  return {
+    engine: "re2",
+    ranges(text) {
+      // test() runs the DFA only (fast); most lines don't match most rules.
+      if (!re.test(text)) return NONE;
+      const out: number[] = [];
+      const m = re.matcher(text);
+      while (m.find()) {
+        const a = m.start();
+        const b = m.end();
+        if (b > a) out.push(a, b);
+      }
+      return out;
+    },
   };
-  const overlap = (keys: string[]) => {
-    for (let i = 0; i < keys.length; i++)
-      for (let j = i + 1; j < keys.length; j++) {
-        const a = keys[i];
-        const b = keys[j];
-        if (a === b || a === "any" || b === "any") return true;
+}
+
+// re2js / Go regexp parse errors → the same Korean words the Go filter uses.
+const RE2_ERRORS: [string, string][] = [
+  ["invalid character class range", "글자 범위가 잘못되었습니다"],
+  ["invalid character class", "잘못된 글자 묶음입니다"],
+  ["invalid escape", "잘못된 이스케이프입니다"],
+  ["invalid named capture", "잘못된 이름 그룹입니다"],
+  ["invalid or unsupported Perl syntax", "알 수 없는 그룹 표기 (? 입니다"],
+  ["invalid nested repetition", "반복 기호를 잘못 썼습니다"],
+  ["invalid repeat count", "반복 횟수는 1000 이하만 됩니다"],
+  ["invalid UTF-8", "잘못된 UTF-8 글자가 있습니다"],
+  ["missing closing ]", "글자 묶음 [ 이 닫히지 않았습니다"],
+  ["missing closing )", "괄호 짝이 맞지 않습니다"],
+  ["unexpected )", "괄호 짝이 맞지 않습니다"],
+  ["missing argument to repetition", "반복할 대상이 없습니다"],
+  ["trailing backslash", "정규식 끝에 \\ 가 홀로 있습니다"],
+  ["nests too deeply", "괄호가 너무 깊습니다"],
+  ["too large", "정규식이 너무 큽니다"],
+];
+function re2ErrorReason(e: unknown): string {
+  const msg = String((e as any)?.message ?? e);
+  for (const [k, v] of RE2_ERRORS) if (msg.includes(k)) return v;
+  return "정규식을 해석할 수 없습니다";
+}
+
+const compileCache = new Map<string, CompiledRule>();
+
+function compileFull(r: Pick<LogRule, "kind" | "pattern" | "caseSensitive">): CompiledRule {
+  if (!r.pattern) return { matcher: null, problem: "", reason: "" };
+  const key = `${r.kind}\u0000${r.caseSensitive ? 1 : 0}\u0000${r.pattern}`;
+  const hit = compileCache.get(key);
+  if (hit) return hit;
+  let res: CompiledRule;
+  if (r.kind === "regex" && !BUILTIN_PATTERNS.has(r.pattern)) {
+    const t = translateJS(r.pattern, !r.caseSensitive);
+    // "… 지원하지 않습니다" = JavaScript-only syntax; anything else is a broken pattern
+    if (t.reason) res = { matcher: null, problem: t.reason.includes("지원하지 않습니다") ? "unsupported" : "invalid", reason: t.reason };
+    else {
+      try {
+        const re = RE2JS.compile(t.out);
+        res = re.test("")
+          ? { matcher: null, problem: "invalid", reason: "빈 글자에도 걸리는 정규식입니다" }
+          : { matcher: re2Matcher(re), problem: "", reason: "" };
+      } catch (e) {
+        res = { matcher: null, problem: "invalid", reason: re2ErrorReason(e) };
       }
-    return false;
-  };
-  // Quantifier at src[i]: [its length, most repeats] or null.
-  const quant = (i: number): [number, number] | null => {
-    const c = src[i];
-    if (c === "*" || c === "+") return [1, Infinity];
-    if (c === "?") return [1, 1];
-    if (c === "{") {
-      const m = /^\{(\d*)(,?)(\d*)\}/.exec(src.slice(i));
-      if (!m || (m[1] === "" && m[3] === "")) return null; // a literal "{"
-      const max = m[2] ? (m[3] === "" ? Infinity : Number(m[3])) : Number(m[1]);
-      return [m[0].length, max];
     }
-    return null;
-  };
-  const SMALL_BOUND = 4; // (..){n,m} with m <= this backtracks at most k^4 ways
-  for (let i = 0; i < src.length; i++) {
-    const c = src[i];
-    if (c === "\\") {
-      const n = src[i + 1] ?? "";
-      i++;
-      if (n === "b" || n === "B") continue; // zero-width
-      // \d \w \s \p{..} \uXXXX \xXX backrefs … : treat as "anything"
-      if (/[dDwWsSpPuxXk0-9cfnrtv]/.test(n)) token("any");
-      else token("c:" + n.toLowerCase());
-      continue;
+  } else {
+    try {
+      const re = new RegExp(ruleSource(r), r.caseSensitive ? "g" : "gi");
+      res = re.test("")
+        ? { matcher: null, problem: "invalid", reason: "빈 글자에도 걸리는 정규식입니다" }
+        : { matcher: v8Matcher(re), problem: "", reason: "" };
+    } catch {
+      res = { matcher: null, problem: "invalid", reason: "정규식을 해석할 수 없습니다" };
     }
-    if (c === "[") {
-      let j = i + 1;
-      if (src[j] === "^") j++;
-      if (src[j] === "]") j++;
-      for (; j < src.length && src[j] !== "]"; j++) if (src[j] === "\\") j++;
-      i = j;
-      token("any");
-      continue;
-    }
-    if (c === "(") {
-      token("any"); // a nested group as an alternative's first token may overlap
-      stack.push({ inner: false, firsts: [], cur: null, justFirst: false });
-      // skip (?: (?= (?! (?<= (?<! (?<name>
-      const m = /^\(\?(?::|=|!|<=|<!|<[A-Za-z_$][\w$]*>)/.exec(src.slice(i));
-      if (m) i += m[0].length - 1;
-      continue;
-    }
-    if (c === "|") {
-      const f = top();
-      if (f) {
-        f.firsts.push(f.cur ?? "any"); // empty alternative overlaps everything
-        f.cur = null;
-        f.justFirst = false;
-      }
-      continue;
-    }
-    if (c === ")") {
-      const f = stack.pop();
-      if (!f) continue;
-      f.firsts.push(f.cur ?? "any");
-      const q = quant(i + 1);
-      const repeated = !!q && q[1] > 1;
-      const ambiguous = f.firsts.length > 1 && overlap(f.firsts);
-      if (q && q[1] > SMALL_BOUND && (f.inner || ambiguous)) return true;
-      const p = top();
-      if (p) {
-        // an ambiguous alternation inside a repeated group, ((a|aa))+, is as
-        // bad as a repeat inside it
-        if (f.inner || repeated || ambiguous) p.inner = true;
-        p.justFirst = false;
-      }
-      if (q) {
-        i += q[0];
-        if (src[i + 1] === "?") i++; // lazy
-      }
-      continue;
-    }
-    const q = quant(i);
-    if (q) {
-      const f = top();
-      if (f) {
-        if (q[1] > 1) f.inner = true;
-        if (f.justFirst) f.cur = "any"; // optional / repeated first token
-        f.justFirst = false;
-      }
-      i += q[0] - 1;
-      if (src[i + 1] === "?") i++;
-      continue;
-    }
-    if (c === "^" || c === "$") continue;
-    token(c === "." ? "any" : "c:" + c.toLowerCase());
   }
-  return false;
+  if (compileCache.size > 500) compileCache.clear();
+  compileCache.set(key, res);
+  return res;
 }
 
-// Why a rule can't be used: "" (fine), "invalid" regex / matches "", or "slow".
-export function ruleProblem(r: LogRule): "" | "invalid" | "slow" {
-  if (!r.pattern) return "";
-  if (r.kind === "regex" && riskyRegex(r.pattern)) return "slow";
-  return compileRule(r) ? "" : "invalid";
+// THE check of a rule (one function for every caller — tag window, import,
+// 「이 글자로 규칙」): whether it can be used and, if not, why.
+//   problem: "" (fine), "invalid" (a broken regex, or one that matches the
+//            empty string) or "unsupported" (JavaScript-only syntax RE2 has no
+//            equivalent for: look-ahead, look-behind, back-references, …);
+//   reason:  the same in Korean words ("" when fine), the Go filter's wording.
+// Cached per (kind, case, pattern), so calling it on every render is cheap.
+export function ruleCheck(r: Pick<LogRule, "kind" | "pattern" | "caseSensitive">): { problem: RuleProblem; reason: string } {
+  const c = compileFull(r);
+  return { problem: c.problem, reason: c.reason };
 }
+// Shorthands of ruleCheck.
+export const ruleProblem = (r: LogRule): RuleProblem => ruleCheck(r).problem;
+export const ruleProblemReason = (r: LogRule): string => ruleCheck(r).reason;
 
-// The JavaScript regex source a rule compiles to.
+// The JavaScript regex source a rule means (text and word rules escaped).
 export function ruleSource(r: Pick<LogRule, "kind" | "pattern">): string {
   if (r.kind === "regex") return r.pattern;
   if (r.kind === "word") return `(?<![\\w])${escapeRe(r.pattern)}(?![\\w])`;
   return escapeRe(r.pattern);
 }
 
-// Compile a rule; null when empty, an invalid / slow regex, or one matching "".
-export function compileRule(r: LogRule): RegExp | null {
-  if (!r.pattern) return null;
-  if (r.kind === "regex" && riskyRegex(r.pattern)) return null;
-  try {
-    const re = new RegExp(ruleSource(r), r.caseSensitive ? "g" : "gi");
-    return re.test("") ? null : re; // a pattern matching "" would loop forever
-  } catch {
-    return null;
-  }
+// The matcher for a rule; null when empty or unusable (see ruleProblem).
+export function compileRule(r: LogRule): RuleMatcher | null {
+  return compileFull(r).matcher;
 }
 
+// --- colouring ---------------------------------------------------------------------
+//
+// Priority (what colour a character gets when several rules match it):
+//  - between layers (rulesFor/layersFor: the file's tags, then common), the
+//    higher layer wins — a tag beats common;
+//  - inside one layer it is what v1.2.0 showed. v1.2.0 put every match in as
+//    an overlapping mark and CodeMirror shows the innermost one: the match
+//    that ends first, then the one that starts last. So a user rule added
+//    below a default rule shows inside the longer default match (Pointer inside
+//    NullPointerException). For two rules matching the very same range v1.2.0
+//    had no fixed answer — CodeMirror puts such marks in separate layers and
+//    its heap order (which depends on the other marks around) picked one — so
+//    here the later rule wins, as the plan says (a rule added below wins).
+// Line background: the first rule with 「줄」 that matches, in the highest
+// layer that has one (v1.2.0: the first matching line rule).
+// Overlaps are resolved here so the editor gets non-overlapping marks.
+
 const MAX_LINE_SCAN = 2000; // don't regex-scan minified megabyte lines in full
-// Safety net for slow rules the heuristic missed: a rule that takes longer than
-// this in one pass is switched off for the rest of the session.
+// Safety net: a rule that takes longer than this in one pass (now only
+// possible with very many matches) is switched off for the rest of the session.
 const RULE_BUDGET_MS = 60;
+const LINE_CACHE_MAX = 4000; // lines whose colouring is remembered (per rule set)
 
 interface Compiled {
-  re: RegExp;
+  m: RuleMatcher;
+  layer: number;
   mark: Decoration;
   line: Decoration | null;
   label: string;
   dead: boolean;
-  spent?: number; // ms used in the current pass
+  spent: number; // ms used in the current pass
 }
 
-// Parts of [from,to) not yet coloured by an earlier rule (claimed is sorted).
-function unclaimed(claimed: [number, number][], from: number, to: number): [number, number][] {
-  const out: [number, number][] = [];
-  let s = from;
-  for (const [a, b] of claimed) {
-    if (b <= s) continue;
-    if (a >= to) break;
-    if (a > s) out.push([s, a]);
-    s = Math.max(s, b);
-    if (s >= to) break;
+// One line's colouring: spans = flat [from, to, rule, …] (rule = index into the
+// compiled list), tint = the rule whose line background shows, or -1.
+export interface LinePaint {
+  spans: number[];
+  tint: number;
+}
+
+// Resolve the matches of every rule on one line. found[i] = ranges of rule i
+// (flat, sorted, non-overlapping), layer[i] = its layer (0 = highest).
+export function resolvePaint(len: number, found: number[][], layer: number[], lineRule: boolean[]): LinePaint {
+  let tint = -1;
+  let count = 0;
+  for (let i = 0; i < found.length; i++) {
+    if (!found[i].length) continue;
+    count += found[i].length / 2;
+    if (tint < 0 && lineRule[i]) tint = i;
   }
-  if (s < to) out.push([s, to]);
-  return out;
+  if (!count) return { spans: NONE, tint };
+  // Gather and order by start; nothing overlapping → done.
+  const all: number[] = []; // from, to, rule
+  for (let i = 0; i < found.length; i++) {
+    const f = found[i];
+    for (let k = 0; k < f.length; k += 2) all.push(f[k], f[k + 1], i);
+  }
+  const idx = Array.from({ length: count }, (_, k) => k);
+  idx.sort((x, y) => all[3 * x] - all[3 * y] || x - y);
+  let overlap = false;
+  for (let k = 1; k < count; k++)
+    if (all[3 * idx[k]] < all[3 * idx[k - 1] + 1]) {
+      overlap = true;
+      break;
+    }
+  if (!overlap) {
+    const spans: number[] = [];
+    for (const k of idx) spans.push(all[3 * k], all[3 * k + 1], all[3 * k + 2]);
+    return { spans, tint };
+  }
+  // Per character winner. Each rule's own matches never overlap, so the work is
+  // at most (rules × line length).
+  const win = new Int32Array(len).fill(-1);
+  const beats = (a: number, b: number) => {
+    const ra = all[3 * a + 2];
+    const rb = all[3 * b + 2];
+    if (layer[ra] !== layer[rb]) return layer[ra] < layer[rb];
+    const ta = all[3 * a + 1];
+    const tb = all[3 * b + 1];
+    if (ta !== tb) return ta < tb; // innermost: ends first
+    const fa = all[3 * a];
+    const fb = all[3 * b];
+    if (fa !== fb) return fa > fb; // … then starts last
+    return ra > rb; // the very same range: the later rule (see above)
+  };
+  for (let k = 0; k < count; k++) {
+    const a = all[3 * k];
+    const b = Math.min(all[3 * k + 1], len);
+    for (let c = a; c < b; c++) if (win[c] < 0 || beats(k, win[c])) win[c] = k;
+  }
+  const spans: number[] = [];
+  for (let c = 0; c < len; ) {
+    const w = win[c];
+    let e = c + 1;
+    while (e < len && win[e] === w) e++;
+    if (w >= 0) spans.push(c, e, all[3 * w + 2]);
+    c = e;
+  }
+  return { spans, tint };
 }
 
-function build(view: EditorView, rules: Compiled[]): DecorationSet {
-  const out: Range<Decoration>[] = [];
-  const doc = view.state.doc;
-  for (const { from, to } of view.visibleRanges) {
-    let pos = from;
-    while (pos <= to) {
-      const line = doc.lineAt(pos);
-      const text = line.length > MAX_LINE_SCAN ? line.text.slice(0, MAX_LINE_SCAN) : line.text;
-      let tinted = false;
-      const claimed: [number, number][] = []; // sorted, non-overlapping
-      for (const r of rules) {
-        if (r.dead) continue;
-        const t0 = performance.now();
-        r.re.lastIndex = 0;
-        let m: RegExpExecArray | null;
-        let added = false;
-        while ((m = r.re.exec(text))) {
-          if (!m[0]) {
-            r.re.lastIndex++;
-            continue;
-          }
-          const a = m.index;
-          const b = a + m[0].length;
-          const parts: [number, number][] = claimed.length ? unclaimed(claimed, a, b) : [[a, b]];
-          for (const [x, y] of parts) {
-            out.push(r.mark.range(line.from + x, line.from + y));
-            claimed.push([x, y]);
-            added = true;
-          }
-          if (r.line && !tinted) {
-            out.push(r.line.range(line.from));
-            tinted = true;
-          }
-        }
-        if (added) claimed.sort((p, q) => p[0] - q[0]);
-        r.spent = (r.spent ?? 0) + performance.now() - t0;
+class Painter {
+  cache = new Map<string, LinePaint>();
+  layer: number[];
+  lineRule: boolean[];
+  constructor(public rules: Compiled[]) {
+    this.layer = rules.map((r) => r.layer);
+    this.lineRule = rules.map((r) => !!r.line);
+  }
+  paint(text: string): LinePaint {
+    const hit = this.cache.get(text);
+    if (hit) return hit;
+    const found: number[][] = [];
+    for (const r of this.rules) {
+      if (r.dead) {
+        found.push(NONE);
+        continue;
       }
-      pos = line.to + 1;
+      const t0 = performance.now();
+      found.push(r.m.ranges(text));
+      r.spent += performance.now() - t0;
     }
+    const p = resolvePaint(text.length, found, this.layer, this.lineRule);
+    if (this.cache.size >= LINE_CACHE_MAX) this.cache.clear();
+    this.cache.set(text, p);
+    return p;
   }
-  for (const r of rules) {
-    if (!r.dead && (r.spent ?? 0) > RULE_BUDGET_MS) {
-      r.dead = true;
-      console.warn(`로그 색 규칙 「${r.label}」이 너무 느려 이번 실행 동안 끕니다`);
+  build(view: EditorView): DecorationSet {
+    const out: Range<Decoration>[] = [];
+    const doc = view.state.doc;
+    for (const { from, to } of view.visibleRanges) {
+      let pos = from;
+      while (pos <= to) {
+        const line = doc.lineAt(pos);
+        const text = line.length > MAX_LINE_SCAN ? line.text.slice(0, MAX_LINE_SCAN) : line.text;
+        const p = this.paint(text);
+        if (p.tint >= 0) out.push(this.rules[p.tint].line!.range(line.from));
+        const s = p.spans;
+        for (let k = 0; k < s.length; k += 3) out.push(this.rules[s[k + 2]].mark.range(line.from + s[k], line.from + s[k + 1]));
+        pos = line.to + 1;
+      }
     }
-    r.spent = 0;
+    let died = false;
+    for (const r of this.rules) {
+      if (!r.dead && r.spent > RULE_BUDGET_MS) {
+        r.dead = died = true;
+        console.warn(`로그 색 규칙 「${r.label}」이 너무 느려 이번 실행 동안 끕니다`);
+      }
+      r.spent = 0;
+    }
+    if (died) this.cache.clear();
+    return Decoration.set(out, true);
   }
-  return Decoration.set(out, true);
 }
 
-// The editor extension for a rule set (only enabled, valid rules). Rules are
-// in priority order: where two rules match the same characters the EARLIER
-// one colours them, and the earliest matching rule with 「줄」 tints the line.
-// rulesFor (logTags.ts) puts the file's tags before common, so a tag wins.
-export function logHighlighter(rules: LogRule[]): Extension {
-  const compiled = rules
-    .filter((r) => r.on)
-    .map((r) => ({ r, re: compileRule(r) }))
-    .filter((x): x is { r: LogRule; re: RegExp } => !!x.re)
-    .map(({ r, re }): Compiled => ({
-      re,
-      label: r.label || r.pattern,
-      dead: false,
-      mark: Decoration.mark({ attributes: { style: `color:${r.color};font-weight:600` } }),
-      line: r.line ? Decoration.line({ attributes: { style: `background-color:${r.color}1f` } }) : null,
-    }));
+// Rules in layers, highest priority first (a tag's rules, …, common's rules).
+export type RuleLayers = LogRule[][];
+
+// The editor extension for a rule set (only enabled, usable rules). A flat
+// list is one layer — v1.2.0's meaning. See the priority notes above.
+export function logHighlighter(rules: LogRule[] | RuleLayers): Extension {
+  const layers: LogRule[][] = rules.length && Array.isArray(rules[0]) ? (rules as RuleLayers) : [rules as LogRule[]];
+  const compiled: Compiled[] = [];
+  layers.forEach((rs, layer) => {
+    for (const r of rs) {
+      if (!r.on) continue;
+      const m = compileRule(r);
+      if (!m) continue;
+      compiled.push({
+        m,
+        layer,
+        label: r.label || r.pattern,
+        dead: false,
+        spent: 0,
+        mark: Decoration.mark({ attributes: { style: `color:${r.color};font-weight:600` } }),
+        line: r.line ? Decoration.line({ attributes: { style: `background-color:${r.color}1f` } }) : null,
+      });
+    }
+  });
   if (!compiled.length) return [];
+  const painter = new Painter(compiled);
   return ViewPlugin.fromClass(
     class {
       decorations: DecorationSet;
       constructor(view: EditorView) {
-        this.decorations = build(view, compiled);
+        this.decorations = painter.build(view);
       }
       update(u: ViewUpdate) {
-        if (u.docChanged || u.viewportChanged) this.decorations = build(u.view, compiled);
+        if (u.docChanged || u.viewportChanged) this.decorations = painter.build(u.view);
       }
     },
     { decorations: (v) => v.decorations }

@@ -14,16 +14,21 @@ import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
 import { runSyncedNav, syncedNavCommand } from "./syncNav";
 import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
-import { looksLikeLog, type LogRule } from "./logHighlight";
+import { looksLikeLog, ruleProblem, type LogRule, type RuleLayers } from "./logHighlight";
 import {
   COMMON,
+  layersFor,
+  legacyLogRules,
   migratedStore,
   normalizeTagStore,
   rotationKey,
+  TAGS_ERR,
+  tagsErrorCode,
   rulesFor,
   serializeTags,
   tagsFor,
   type AppliedTags,
+  type BundleRef,
   type TagStore,
 } from "./logTags";
 import TagsDialog from "./TagsDialog";
@@ -231,10 +236,15 @@ interface Session {
   splitRatio: number;
   fontSize?: number; // editor font size (px); optional so older sessions still load
   keybindings?: Record<string, string>; // per-command combo overrides
-  // Log colour rules from before tags (now the `common` tag in tags.json). Only
-  // read, to build common on first run; written back only until tags.json exists.
+  // Log colour rules from before tags (now the `common` tag in tags.json). Read
+  // only to build common on first run. Written on every save — common in the
+  // old format (legacyLogRules) — so v1.2.0 still shows the rules after a
+  // downgrade; what v1.2.0 then changes is not read back (tags.json wins).
   logRules?: unknown;
   multi?: MultiState;
+  // Log bundles opened recently (newest first), so tabs from an earlier bundle
+  // keep their folder/file tags after switching bundles. Unknown to v1.2.0.
+  bundles?: BundleRef[];
 }
 
 // v3: clean tabs carry no content (needsLoad). Older builds reject v3 instead of
@@ -556,10 +566,14 @@ function App() {
   const tagsReadyRef = useRef(false);
   const tagsReadOnlyRef = useRef(false);
   const [tagsNotice, setTagsNotice] = useState<string>(""); // shown in the tag window
-  // The old session's logRules, carried in the session only until tags.json
-  // has been written once — so a failed first tag save loses nothing.
+  // The old session's logRules, carried in the session as received until
+  // tags.json has been written once (or found) — so a failed first tag save
+  // loses nothing. After that the session gets common in the old format.
   const legacyRulesRef = useRef<unknown>(undefined);
   const lastSavedTags = useRef(""); // tags.json text last written (or loaded)
+  const tagsSaving = useRef<Promise<void>>(Promise.resolve()); // the save in flight
+  // Bundles opened recently, newest first (for tagsFor; see Session.bundles).
+  const bundleHistory = useRef<BundleRef[]>([]);
   const [tagsOpen, setTagsOpen] = useState<string | null>(null); // tag window, with the tag to select
   const [treeOpen, setTreeOpen] = useState<boolean>(true); // log bundle tree beside the panes
   const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
@@ -665,8 +679,13 @@ function App() {
       splitRatio: ratioRef.current,
       fontSize: fontSizeRef.current,
       keybindings: keybindsRef.current,
-      ...(legacyRulesRef.current !== undefined ? { logRules: legacyRulesRef.current } : {}),
+      ...(legacyRulesRef.current !== undefined
+        ? { logRules: legacyRulesRef.current }
+        : tagsReadyRef.current
+          ? { logRules: legacyLogRules(tagStoreRef.current) }
+          : {}),
       multi: multiRef.current,
+      bundles: bundleHistory.current,
     };
     return JSON.stringify(s);
   }, [liveContent]);
@@ -689,11 +708,17 @@ function App() {
           notes.push(`태그 파일이 깨져 있어 ${r.broken} 로 옮겨 두었습니다 (${r.problem}).`);
         }
         if (r.exists && r.data) {
-          store = normalizeTagStore(JSON.parse(r.data));
+          const renamed: string[] = [];
+          store = normalizeTagStore(JSON.parse(r.data), renamed);
+          if (renamed.length) {
+            alarm = true;
+            notes.push(...renamed);
+          }
+          legacyRulesRef.current = undefined; // tags.json exists: common comes from it
           // what is on disk counts as saved: no rewrite (and no .bak turnover)
           // at every start just because normalizing changed the formatting
           if (!r.restored) lastSavedTags.current = serializeTags(store);
-          if (r.restored) notes.push("직전 태그 파일(tags.json.bak)로 되살렸습니다.");
+          if (r.restored) notes.push(`직전 태그 파일(${r.restoredFrom || "tags.json.bak"})로 되살렸습니다.`);
           if (r.newer) {
             tagsReadOnlyRef.current = true;
             notes.push("더 새 버전의 chipper 가 만든 태그 파일이라, 여기서 바꾼 내용은 저장되지 않습니다.");
@@ -708,6 +733,15 @@ function App() {
       if (!store) {
         store = migratedStore(legacy);
         if (Array.isArray(legacy)) legacyRulesRef.current = legacy;
+        // v1.2.0 ran regexes on the browser engine; now they run on RE2, which
+        // has no look-around / back-references. Say so once, at the move.
+        const bad = store.tags[0].rules.filter((x) => x.on && ruleProblem(x));
+        if (bad.length) {
+          alarm = true;
+          notes.push(
+            `옛 로그 색 규칙 ${bad.length}개(${bad.map((x) => x.label || x.pattern).join(", ")})는 새 정규식 방식에서 쓸 수 없어 칠해지지 않습니다. 태그 창(🏷)에서 이유를 볼 수 있습니다.`
+          );
+        }
       }
       setTagStore(store);
       tagStoreRef.current = store;
@@ -725,6 +759,11 @@ function App() {
         if (raw) {
           const s = JSON.parse(raw);
           legacy = s?.logRules;
+          if (Array.isArray(s?.bundles))
+            bundleHistory.current = s.bundles
+              .filter((b: any) => b && typeof b.root === "string" && Array.isArray(b.servers))
+              .map((b: any) => ({ root: b.root, servers: b.servers.filter((x: unknown) => typeof x === "string") }))
+              .slice(0, 8);
           // A recognized session is honored verbatim — including an empty tab
           // list — so "no tabs open" is faithfully restored, not re-welcomed.
           if (s && typeof s.version === "number" && s.version <= SESSION_VERSION && Array.isArray(s.tabs)) {
@@ -838,24 +877,38 @@ function App() {
 
   // --- tags: debounced save, like the session --------------------------------
   const tagsTimer = useRef<number | undefined>(undefined);
-  const saveTagsNow = useCallback(async (): Promise<void> => {
+  // Saves run one after another: a call made while a save is in flight waits
+  // for it, then writes the latest store — so closing the window right after a
+  // debounced save started still gets the last change on disk.
+  const saveTagsNow = useCallback((): Promise<void> => {
     window.clearTimeout(tagsTimer.current);
-    if (!tagsReadyRef.current || tagsReadOnlyRef.current) return;
-    const js = serializeTags(tagStoreRef.current);
-    if (js === lastSavedTags.current) return;
-    lastSavedTags.current = js;
-    try {
-      await SaveTags(js);
-      setTagsNotice((n) => (n.startsWith("태그 저장 실패") ? "" : n));
-      if (legacyRulesRef.current !== undefined) {
-        legacyRulesRef.current = undefined; // common lives in tags.json from now on
-        scheduleAutosave();
+    const run = async () => {
+      if (!tagsReadyRef.current || tagsReadOnlyRef.current) return;
+      const js = serializeTags(tagStoreRef.current);
+      if (js === lastSavedTags.current) return;
+      lastSavedTags.current = js;
+      try {
+        await SaveTags(js);
+        setTagsNotice((n) => (n.startsWith("태그 저장 실패") ? "" : n));
+        if (legacyRulesRef.current !== undefined) {
+          legacyRulesRef.current = undefined; // common lives in tags.json from now on
+          scheduleAutosave();
+        }
+      } catch (e) {
+        console.error("태그 저장 실패", e);
+        if (tagsErrorCode(e) === TAGS_ERR.NEWER_ON_DISK) {
+          // a newer chipper wrote tags.json meanwhile: stop saving over it
+          tagsReadOnlyRef.current = true;
+          setTagsNotice("더 새 버전의 chipper 가 태그 파일을 바꿔, 여기서 바꾼 내용은 저장되지 않습니다. 다시 켜면 그 내용을 읽습니다.");
+          return;
+        }
+        lastSavedTags.current = ""; // retry on the next change
+        setTagsNotice("태그 저장 실패: " + String(e));
       }
-    } catch (e) {
-      lastSavedTags.current = ""; // retry on the next change
-      console.error("태그 저장 실패", e);
-      setTagsNotice("태그 저장 실패: " + String(e));
-    }
+    };
+    const p = tagsSaving.current.then(run, run);
+    tagsSaving.current = p.catch(() => {});
+    return p;
   }, [scheduleAutosave]);
   useEffect(() => {
     if (!tagsReady) return;
@@ -1450,6 +1503,16 @@ function App() {
       scanBundle(multi.bundle.root);
     }
   }, [loaded, multi.on, multi.bundle, scanBundle]);
+  // Remember every bundle opened (newest first) so a tab from an earlier one
+  // keeps its folder/file tags after a switch.
+  useEffect(() => {
+    const b = multi.bundle;
+    if (!b) return;
+    bundleHistory.current = [
+      { root: b.root, servers: [...b.servers] },
+      ...bundleHistory.current.filter((x) => x.root !== b.root),
+    ].slice(0, 8);
+  }, [multi.bundle]);
 
   const clearPane = useCallback((i: number) => {
     setMulti((m) => ({ ...m, slots: m.slots.map((x, k) => (k === i ? { ...x, tabId: "" } : x)) }));
@@ -2333,7 +2396,14 @@ function App() {
   // Tags applied to a tab, and their merged rules. Rule lists are cached per
   // tag combination so editors only reconfigure when the rules really change.
   const ruleCache = useMemo(() => new Map<string, LogRule[]>(), [tagStore]);
-  const appliedTags = (t: Tab): AppliedTags => tagsFor(tagStore, t.path, multi.bundle);
+  const layerCache = useMemo(() => new Map<string, RuleLayers>(), [tagStore]);
+  // The current bundle first, then bundles opened earlier (a tab keeps the
+  // tags of the bundle it came from).
+  const bundles: BundleRef[] = multi.bundle
+    ? [multi.bundle, ...bundleHistory.current.filter((b) => b.root !== multi.bundle!.root)]
+    : bundleHistory.current;
+  const appliedTags = (t: Tab): AppliedTags => tagsFor(tagStore, t.path, bundles);
+  // Flat rule list (tags first, common last) — what the line filter takes.
   const rulesForTab = (t: Tab): LogRule[] => {
     const names = appliedTags(t).names;
     const key = names.join("\u0000");
@@ -2341,6 +2411,17 @@ function App() {
     if (!r) {
       r = rulesFor(tagStore, names);
       ruleCache.set(key, r);
+    }
+    return r;
+  };
+  // The same rules in layers, for the editor's colouring (a tag beats common).
+  const layersForTab = (t: Tab): RuleLayers => {
+    const names = appliedTags(t).names;
+    const key = names.join("\u0000");
+    let r = layerCache.get(key);
+    if (!r) {
+      r = layersFor(tagStore, names);
+      layerCache.set(key, r);
     }
     return r;
   };
@@ -2443,7 +2524,7 @@ function App() {
               fontSize={fontSize}
               mode={slot.mode}
               autoFocus={focused}
-              logRules={logOn(t) ? rulesForTab(t) : null}
+              logRules={logOn(t) ? layersForTab(t) : null}
               onDocChanged={() => markEdited(t.id)}
               onFlush={(text) => flushContent(t.id, t.reloadSeq, text)}
               onView={(v) => setView(t.id, v)}
@@ -2884,7 +2965,7 @@ function App() {
                   initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
                   lang={active.lang}
                   fontSize={fontSize}
-                  logRules={logOn(active) ? rulesForTab(active) : null}
+                  logRules={logOn(active) ? layersForTab(active) : null}
                   onDocChanged={() => markEdited(active.id)}
                   onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
                   onView={(v) => setView(active.id, v)}

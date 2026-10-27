@@ -1091,6 +1091,11 @@
 .rule-pattern.bad {
   border-color: var(--danger) !important;
 }
+.rule-problem {
+  margin: -2px 0 4px 28px;
+  font-size: 12px;
+  color: var(--danger);
+}
 .rule-row label {
   display: inline-flex;
   align-items: center;

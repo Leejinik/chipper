@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState } from "react";
-import { DEFAULT_LOG_RULES, ruleProblem, type LogRule, type RuleKind } from "./logHighlight";
+import { Fragment, useEffect, useRef, useState } from "react";
+import { DEFAULT_LOG_RULES, ruleProblem, ruleProblemReason, type LogRule, type RuleKind } from "./logHighlight";
 import {
   COMMON,
   addTag,
   deleteTag,
+  normalizeTagName,
   placesOf,
   renameTag,
+  repairTagName,
   setTagRules,
   tagNameProblem,
-  uniqueTagName,
   type TagStore,
 } from "./logTags";
 
@@ -40,8 +41,8 @@ export function newRule(): LogRule {
 
 function placeLabel(kind: "dir" | "file" | "name", key: string): string {
   if (kind === "dir") return key === "" ? "📁 모든 서버의 전체 (서버 폴더 아래 모든 파일)" : `📁 모든 서버의 ${key}`;
-  if (kind === "file") return `📄 모든 서버의 ${key}`;
-  return `🏷 이름이 「${key}」 인 파일 (로그 묶음 밖)`;
+  if (kind === "file") return `📄 모든 서버의 ${key} (회전 파일 포함)`;
+  return `🏷 이름이 「${key}」 인 파일과 그 회전 파일 (로그 묶음 밖)`;
 }
 
 interface Props {
@@ -90,7 +91,7 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
   };
   const commitRename = () => {
     if (!renaming) return;
-    const v = renaming.value;
+    const v = normalizeTagName(renaming.value);
     if (v === renaming.from) {
       setRenaming(null);
       return;
@@ -106,14 +107,14 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
     setNameErr("");
   };
   const create = () => {
-    const name = uniqueTagName("새 태그", names);
+    const name = repairTagName("새 태그", names);
     onChange(addTag(store, name));
     setSel(name);
     setNameErr("");
     setRenaming({ from: name, value: name });
   };
   const duplicate = () => {
-    const name = uniqueTagName(`${tag.name} 복사`, names);
+    const name = repairTagName(`${tag.name} 복사`, names);
     onChange(addTag(store, name, tag.rules.map((r) => ({ ...r }))));
     setSel(name);
   };
@@ -171,7 +172,7 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
                     }}
                     onBlur={() => {
                       // keep the box open while the name is not acceptable
-                      if (!tagNameProblem(renaming.value, names.filter((n) => n !== renaming.from)) || renaming.value === renaming.from)
+                      if (!tagNameProblem(normalizeTagName(renaming.value), names.filter((n) => n !== renaming.from)) || normalizeTagName(renaming.value) === renaming.from)
                         commitRename();
                     }}
                   />
@@ -232,28 +233,24 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
               )}
             </div>
             <div className="chips-sub tags-rules-sub">
-              위 규칙부터 칠합니다. 「글자 그대로」는 넣은 글자가 들어간 곳 전부(공백 포함 가능), 「단어」는 앞뒤가 글자·숫자가 아닐 때만,
-              「정규식」은 JavaScript 정규식입니다. 「줄만」은 태그에 걸린 줄만 보는 화면에서 이 규칙을 쓸지입니다.
+              「글자 그대로」는 넣은 글자가 들어간 곳 전부(공백 포함 가능), 「단어」는 앞뒤가 글자·숫자가 아닐 때만,
+              「정규식」은 JavaScript 정규식 문법이고, 화면이 멈추지 않는 RE2 방식으로 찾습니다(앞보기·뒤돌아보기·역참조는 쓸 수 없음).
+              같은 글자에 규칙 여럿이 걸리면 더 좁게 걸린 규칙(같으면 아래 규칙) 색이 보이고, 줄 배경은 위 규칙이 이깁니다. 다른 태그의 규칙은 common 보다 앞섭니다. 「줄만」은 태그에 걸린 줄만 보는 화면에서 이 규칙을 쓸지입니다.
             </div>
             <div className="rules-list">
               {rules.length === 0 && <div className="tags-place dim">규칙이 없습니다. ＋ 규칙 추가로 만드세요.</div>}
               {rules.map((r, i) => {
                 const problem = ruleProblem(r);
                 return (
-                  <div className={r.on ? "rule-row" : "rule-row off"} key={r.id}>
+                  <Fragment key={r.id}>
+                  <div className={r.on ? "rule-row" : "rule-row off"}>
                     <input type="checkbox" checked={r.on} title="이 규칙 켜기" onChange={(e) => upd(r.id, { on: e.target.checked })} />
                     <input className="rule-label" value={r.label} placeholder="이름" onChange={(e) => upd(r.id, { label: e.target.value })} />
                     <input
                       className={problem ? "rule-pattern bad" : "rule-pattern"}
                       value={r.pattern}
                       placeholder={KIND_HINT[r.kind]}
-                      title={
-                        problem === "slow"
-                          ? "반복이 겹친 정규식(예: (a+)+, (a|aa)+)은 화면을 멈출 수 있어 쓰지 않습니다"
-                          : problem === "invalid"
-                            ? "정규식이 잘못됐거나 빈 문자열에 맞습니다 — 이 규칙은 쓰이지 않습니다"
-                            : r.pattern
-                      }
+                      title={problem ? `쓸 수 없음: ${ruleProblemReason(r)} — 이 규칙은 쓰이지 않습니다` : r.pattern}
                       data-problem={problem}
                       style={{ color: r.color }}
                       onChange={(e) => upd(r.id, { pattern: e.target.value })}
@@ -296,6 +293,8 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
                       🗑
                     </button>
                   </div>
+                  {problem && <div className="rule-problem">쓸 수 없음: {ruleProblemReason(r)}</div>}
+                  </Fragment>
                 );
               })}
             </div>

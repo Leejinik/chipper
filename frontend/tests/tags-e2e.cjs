@@ -38,7 +38,7 @@ function serve() {
 
 // ---- fake Go side -------------------------------------------------------------
 function makeBackend() {
-  const st = { session: "", tags: null, bak: null, calls: [], files: {}, scan: null, failSave: false, loadTags: null };
+  const st = { session: "", tags: null, bak: null, calls: [], files: {}, scan: null, failSave: false, loadTags: null, saveDelay: 0, saveDone: [] };
   const impl = {
     LoadSession: () => st.session,
     SaveSession: (d) => {
@@ -53,14 +53,16 @@ function makeBackend() {
         ? { data: "", exists: false, restored: false, broken: "", problem: "", newer: false }
         : { data: st.tags, exists: true, restored: false, broken: "", problem: "", newer: false };
     },
-    SaveTags: (js) => {
-      if (st.failSave) throw new Error("disk full (fake)");
+    SaveTags: async (js) => {
+      if (st.failSave) throw new Error(typeof st.failSave === "string" ? st.failSave : "disk full (fake)");
       const v = JSON.parse(js);
       if (v.version !== 1 || !Array.isArray(v.tags)) throw new Error("bad envelope");
       const names = v.tags.map((t) => t.name);
       if (new Set(names).size !== names.length) throw new Error("dup tag name");
+      if (st.saveDelay) await new Promise((r) => setTimeout(r, st.saveDelay));
       if (st.tags != null) st.bak = st.tags;
       st.tags = js;
+      st.saveDone.push(Date.now());
     },
     ReadFile: (p) => {
       const c = st.files[p];
@@ -169,6 +171,7 @@ async function main() {
       let { ctx, page } = await openPage(browser, url, be);
       await sleep(500);
       const s1 = savedTags(be);
+      const tagsMigrated = be.st.tags;
       ok("tags.json 생성됨", !!s1);
       ok("common 하나", s1 && s1.tags.length === 1 && s1.tags[0].name === "common", s1 && s1.tags.map((t) => t.name));
       const r = s1 ? s1.tags[0].rules : [];
@@ -178,11 +181,26 @@ async function main() {
       ok("옛 regex 필드는 새 규칙에 없음", r.every((x) => !("regex" in x)));
       // colours from the migrated common: "banana" is a word rule (old regex:false)
       ok("이전된 단어 규칙 색칠 (banana 만, xxBANANAxx 아님)", JSON.stringify(await spansWith(page, "#aa0003")) === JSON.stringify(["banana"]), await spansWith(page, "#aa0003"));
-      // session written afterwards has no logRules
+      // the session keeps common in the OLD format (so v1.2.0 still shows the rules)
       await page.evaluate(() => window.dispatchEvent(new Event("blur")));
       await sleep(700);
-      ok("세션에 logRules 더는 안 씀", !("logRules" in JSON.parse(be.st.session)), Object.keys(JSON.parse(be.st.session)));
+      const lr = JSON.parse(be.st.session).logRules;
+      ok("세션에 common 을 옛 형식 logRules 로 계속 씀", Array.isArray(lr) && lr.map((x) => x.id).join() === "error,info,u1", lr);
+      ok("옛 형식: regex 참/거짓 · kind 없음", lr && lr.map((x) => x.regex).join() === "true,false,false" && lr.every((x) => !("kind" in x)), lr);
+      ok("옛 형식: 패턴·색·줄 그대로", lr && lr[0].pattern === "\\bERROR\\b" && lr[0].color === "#aa0001" && lr[0].line === true, lr && lr[0]);
+      // a change in the tag window reaches the session's old-format copy too
+      await page.dispatchEvent(".st-tags", "mousedown");
+      await page.waitForSelector(".tags-dialog");
+      await page.click(".rule-add");
+      const rowsL = await page.$$(".tags-dialog .rule-row");
+      await (await rowsL[rowsL.length - 1].$(".rule-pattern")).fill("a.b");
+      await sleep(600);
+      await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+      await sleep(700);
+      const lr2 = JSON.parse(be.st.session).logRules;
+      ok("새 「글자 그대로」 규칙은 옛 형식에서 이스케이프한 정규식", lr2 && lr2.length === 4 && lr2[3].pattern === "a\\.b" && lr2[3].regex === true, lr2 && lr2[3]);
       await ctx.close();
+      be.st.tags = tagsMigrated;
 
       // restart with an OLD session again (logRules present) — tags.json wins, no second migration
       const tagsBefore = be.st.tags;
@@ -221,7 +239,12 @@ async function main() {
       be3.st.failSave = false;
       await page.evaluate(() => window.dispatchEvent(new Event("blur")));
       await sleep(700);
-      ok("저장 성공 뒤 세션에서 logRules 빠짐", !!be3.st.tags && !("logRules" in JSON.parse(be3.st.session)));
+      const lr3 = JSON.parse(be3.st.session).logRules;
+      ok(
+        "저장 성공 뒤 세션 logRules = tags.json 의 common (옛 형식)",
+        !!be3.st.tags && Array.isArray(lr3) && lr3.map((x) => [x.id, x.regex]).join() === "error,true,info,false,u1,false",
+        lr3
+      );
       await ctx.close();
     }
 
@@ -230,7 +253,8 @@ async function main() {
     {
       const be = makeBackend();
       be.st.files["D:\\logs\\k.log"] =
-        "10:00 Kafka Rebalance started\nerror err: xerr\ntook 120ms and 5ms\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\n";
+        "10:00 Kafka Rebalance started\nerror err: xerr\ntook 120ms and 5ms\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab\nhost-name.example ip 10.0.0.1\n" +
+        "a".repeat(1999) + "!\n" + "a,".repeat(1000) + "\n" + "abcd ".repeat(400) + "\n" + "ab".repeat(999) + "c\n";
       be.st.tags = JSON.stringify({
         version: 1,
         tags: [
@@ -266,16 +290,34 @@ async function main() {
       ok("새 규칙 기본 = 글자 그대로", (await last.$eval(".rule-kind", (e) => e.value)) === "text");
       ok("새 규칙 기본 = 줄만 씀", await last.$eval(".rule-filter", (e) => e.checked));
       await (await last.$(".rule-kind")).selectOption("regex");
-      await (await last.$(".rule-pattern")).fill("(a|aa)+$");
-      ok("(a|aa)+$ 거부 표시", (await last.$eval(".rule-pattern", (e) => e.getAttribute("data-problem"))) === "slow");
       await (await last.$("input[type=color]")).evaluate((e) => {
         const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value").set;
         set.call(e, "#cc0009");
         e.dispatchEvent(new Event("input", { bubbles: true }));
       });
-      const t0 = Date.now();
-      await sleep(200);
-      ok("위험 정규식으로 화면 안 멈춤 · 안 칠함", Date.now() - t0 < 1500 && (await spansWith(page, "#cc0009")).length === 0);
+      // the review's slow regexes: accepted, and the screen keeps responding
+      // (a 2,000-character worst-case line for each is in the file, on screen)
+      for (const pat of ["(a+){4}$", "(.*,){4}X", "(\\w+\\s?){4}!", "(ab?|b)+$", ".*a.*b", "(a|aa)+$"]) {
+        const t0 = Date.now();
+        await (await last.$(".rule-pattern")).fill(pat);
+        const lag = await page.evaluate(() => new Promise((r) => { const t = performance.now(); requestAnimationFrame(() => requestAnimationFrame(() => r(performance.now() - t))); }));
+        const ms = Date.now() - t0;
+        ok(`${pat}: 쓸 수 있음 · 화면 안 멈춤 (${ms}ms, 다음 프레임 ${Math.round(lag)}ms)`, (await last.$eval(".rule-pattern", (e) => e.getAttribute("data-problem"))) === "" && ms < 1500 && lag < 500, { ms, lag });
+      }
+      // v1.2.0 coloured these; the old stage-3 guard refused them
+      await (await last.$(".rule-pattern")).fill("(\\w|-)+\\.example");
+      await sleep(150);
+      ok("(\\w|-)+ 다시 칠함", JSON.stringify(await spansWith(page, "#cc0009")) === '["host-name.example"]', await spansWith(page, "#cc0009"));
+      await (await last.$(".rule-pattern")).fill("(\\d|\\.)+");
+      await sleep(150);
+      ok("(\\d|\\.)+ 다시 칠함", (await spansWith(page, "#cc0009")).includes("10.0.0.1"), await spansWith(page, "#cc0009"));
+      // JavaScript-only syntax: refused, and the reason is shown under the row
+      await (await last.$(".rule-pattern")).fill("(?<=ip )\\d+");
+      await sleep(100);
+      ok("뒤돌아보기 = 쓸 수 없음", (await last.$eval(".rule-pattern", (e) => e.getAttribute("data-problem"))) === "unsupported");
+      const why = await page.$$eval(".rule-problem", (es) => es.map((e) => e.textContent));
+      ok("이유가 줄 아래에 보임", why.some((w) => w.includes("쓸 수 없음") && w.includes("뒤돌아보기")), why);
+      ok("쓸 수 없는 규칙은 안 칠함", (await spansWith(page, "#cc0009")).length === 0);
       // same characters as "글자 그대로" are fine
       await (await last.$(".rule-kind")).selectOption("text");
       ok("같은 글자를 글자 그대로로 바꾸면 문제 없음", (await last.$eval(".rule-pattern", (e) => e.getAttribute("data-problem"))) === "");
@@ -286,8 +328,7 @@ async function main() {
       ok("단어 5ms 는 120ms 안에서 안 칠함", JSON.stringify(await spansWith(page, "#cc0009")) === '["5ms"]', await spansWith(page, "#cc0009"));
       await (await last.$(".rule-kind")).selectOption("text");
       await sleep(150);
-      // "120ms" is already claimed by the regex rule above (earlier rule wins); text 5ms colours only the free "5ms"
-      ok("글자 그대로 5ms — 앞 규칙이 칠한 곳은 앞 규칙 색", JSON.stringify(await spansWith(page, "#cc0009")) === '["5ms"]', await spansWith(page, "#cc0009"));
+      ok("글자 그대로 5ms", JSON.stringify(await spansWith(page, "#cc0009")) === '["5ms"]', await spansWith(page, "#cc0009"));
 
       // ---- tags: add / rename / case-distinct / conflict / duplicate / delete / clear common
       await page.click("text=＋ 새 태그");
@@ -359,6 +400,7 @@ async function main() {
       be.st.files[P("s1", "modules/lizcollector/collector.log")] = "kafka rebalance begin\nERROR x\n";
       be.st.files[P("s2", "modules/lizcollector/collector.log")] = "kafka rebalance begin\n";
       be.st.files[P("s1", "modules/lizcollector/admin.log.2026-10-21")] = "kafka rebalance\nlogin ok\n";
+      be.st.files[P("s2", "modules/lizcollector/admin.log")] = "login now\n";
       be.st.files["D:\\tmp\\messages"] = "kafka rebalance\nsshd login\n";
       be.st.scan = {
         root: R,
@@ -378,7 +420,7 @@ async function main() {
         ],
         assign: {
           dir: { "modules/lizcollector": ["collector"] },
-          file: { "modules/lizcollector/admin.log.*": ["admin"] },
+          file: { "modules/lizcollector/admin.log.*": ["admin"] }, // early stage-3 key form: read as admin.log
           name: { messages: ["syslog"] },
         },
       });
@@ -387,6 +429,7 @@ async function main() {
         tab("b", P("s2", "modules/lizcollector/collector.log"), { label: "s2 · collector.log" }),
         tab("c", P("s1", "modules/lizcollector/admin.log.2026-10-21"), { label: "s1 · admin.log.2026-10-21" }),
         tab("d", "D:\\tmp\\messages"),
+        tab("e", P("s2", "modules/lizcollector/admin.log"), { label: "s2 · admin.log" }),
       ];
       const multi = {
         on: true,
@@ -424,7 +467,7 @@ async function main() {
       await page.waitForSelector(".tags-dialog");
       ok("태그 창이 적용 태그(admin)를 선택", (await page.$eval(".tag-item.sel .tag-name", (e) => e.textContent)) === "admin");
       const where = await page.$$eval(".tags-place", (es) => es.map((e) => e.textContent));
-      ok("어디에 붙어 있나 표시", where.some((w) => w.includes("modules/lizcollector/admin.log.*")), where);
+      ok("어디에 붙어 있나 표시 (회전 파일 포함)", where.some((w) => w.includes("modules/lizcollector/admin.log (회전 파일 포함)")), where);
       if (process.env.SHOTS) await page.screenshot({ path: path.join(process.env.SHOTS, "stage3-tag-window.png") });
       ok("적용 중 태그 표시(●)", (await page.$$eval(".tag-item.applied .tag-name", (es) => es.map((e) => e.textContent))).join() === "common,admin");
       await page.keyboard.press("Escape");
@@ -446,6 +489,23 @@ async function main() {
       ok("묶음 밖 파일 = 이름 규칙 (messages → syslog)", (await statusTags(r2.page)) === "🏷 common + syslog", await statusTags(r2.page));
       ok("syslog 색", (await spansWith(r2.page, "#dd0003")).includes("sshd"));
       await r2.ctx.close();
+
+      // the live file of a rotated series has the file tag too
+      be.st.session = session(tabs, "e", { multi: { ...multi, on: false } });
+      const r3 = await openPage(browser, url, be);
+      await sleep(500);
+      ok("지금 쓰이는 파일(admin.log)도 파일 태그 (회전 파일과 같은 키)", (await statusTags(r3.page)) === "🏷 common + admin", await statusTags(r3.page));
+      ok("admin.log 에 admin 색", (await spansWith(r3.page, "#dd0002")).includes("login"));
+      // after switching to another bundle, a tab from the earlier one keeps its tags
+      const s3 = JSON.parse(be.st.session);
+      ok("세션에 열었던 묶음 기억", Array.isArray(s3.bundles) && s3.bundles.some((b) => b.root === R), s3.bundles);
+      await r3.ctx.close();
+      be.st.session = JSON.stringify({ ...s3, activeId: "a", multi: { ...multi, on: false, bundle: { root: "C:\\b\\other", servers: ["x1"] } } });
+      const r4 = await openPage(browser, url, be);
+      await sleep(500);
+      ok("묶음을 바꾼 뒤에도 이전 묶음 탭은 폴더 태그 유지", (await statusTags(r4.page)) === "🏷 common + collector", await statusTags(r4.page));
+      ok("이전 묶음 탭 collector 색", (await spansWith(r4.page, "#dd0001")).includes("kafka rebalance"));
+      await r4.ctx.close();
     }
 
     // =============== 4. close handshake saves the last tag change ================
@@ -475,12 +535,71 @@ async function main() {
       be2.st.loadTags = { data: JSON.stringify({ version: 2, tags: [{ name: "common", rules: [] }, { name: "future", rules: [] }] }), exists: true, restored: false, broken: "", problem: "", newer: true };
       const r2 = await openPage(browser, url, be2);
       await sleep(600);
+      await r2.page.dispatchEvent(".st-tags", "mousedown");
+      await r2.page.waitForSelector(".tags-dialog");
+      ok("새 버전 안내 표시", ((await r2.page.$eval(".tags-notice", (e) => e.textContent).catch(() => "")) || "").includes("더 새 버전"));
+      // really change something: a tag and a rule
+      await r2.page.click("text=＋ 새 태그");
+      await r2.page.fill(".tag-rename", "changed-here");
+      await r2.page.press(".tag-rename", "Enter");
+      await r2.page.click(".rule-add");
+      await sleep(900); // past the debounce
+      await r2.page.evaluate(() => window.dispatchEvent(new Event("blur")));
       await r2.page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
       await sleep(300);
-      ok("새 버전 형식 tags.json 은 저장 안 함", !be2.st.calls.some((c) => c.name === "SaveTags"));
-      await r2.page.dispatchEvent(".st-tags", "mousedown");
-      ok("새 버전 안내 표시", ((await r2.page.$eval(".tags-notice", (e) => e.textContent).catch(() => "")) || "").includes("더 새 버전"));
+      ok("새 버전 형식 tags.json 은 태그를 바꿔도 저장 안 함", !be2.st.calls.some((c) => c.name === "SaveTags"), be2.st.calls.filter((c) => c.name === "SaveTags").length);
       await r2.ctx.close();
+
+      // Go refuses because tags.json on disk is newer (error code, not words):
+      // the app stops saving instead of retrying on every change
+      const be5 = makeBackend();
+      be5.st.files["D:\\logs\\z.log"] = "hello\n";
+      be5.st.session = session([tab("t1", "D:\\logs\\z.log")], "t1");
+      be5.st.tags = JSON.stringify({ version: 1, tags: [{ name: "common", rules: [] }], assign: { dir: {}, file: {}, name: {} } });
+      const r5 = await openPage(browser, url, be5);
+      await sleep(400);
+      be5.st.failSave = "[TAGS_NEWER_ON_DISK] 디스크의 태그 파일이 더 새 버전의 chipper 가 만든 것이라 덮어쓰지 않았습니다";
+      await r5.page.dispatchEvent(".st-tags", "mousedown");
+      await r5.page.waitForSelector(".tags-dialog");
+      await r5.page.click("text=＋ 새 태그");
+      await r5.page.press(".tag-rename", "Enter");
+      await sleep(900);
+      const nFail = be5.st.calls.filter((c) => c.name === "SaveTags").length;
+      await r5.page.click(".rule-add");
+      await sleep(900);
+      await r5.page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
+      await sleep(300);
+      ok("디스크가 더 새 버전(오류 코드) → 한 번 거절된 뒤 다시 저장 시도 안 함", nFail >= 1 && be5.st.calls.filter((c) => c.name === "SaveTags").length === nFail, { nFail, now: be5.st.calls.filter((c) => c.name === "SaveTags").length });
+      ok("그 안내 표시", ((await r5.page.$eval(".tags-notice", (e) => e.textContent).catch(() => "")) || "").includes("더 새 버전"));
+      await r5.ctx.close();
+
+      // closing while a save is in flight waits for it
+      const be4 = makeBackend();
+      be4.st.files["D:\\logs\\z.log"] = "hello\n";
+      be4.st.session = session([tab("t1", "D:\\logs\\z.log")], "t1");
+      const r4 = await openPage(browser, url, be4);
+      await sleep(500);
+      be4.st.saveDelay = 600;
+      await r4.page.dispatchEvent(".st-tags", "mousedown");
+      await r4.page.waitForSelector(".tags-dialog");
+      await r4.page.click("text=＋ 새 태그");
+      await r4.page.fill(".tag-rename", "in-flight");
+      await r4.page.press(".tag-rename", "Enter");
+      const started = () => be4.st.calls.some((c) => c.name === "SaveTags" && String(c.args[0]).includes("in-flight"));
+      for (let i = 0; i < 80 && !started(); i++) await sleep(25);
+      const savingSince = Date.now();
+      const nCalls = be4.st.calls.filter((c) => c.name === "SaveTags").length;
+      ok("디바운스 저장이 진행 중", started() && be4.st.saveDone.length < nCalls, { started: started(), done: be4.st.saveDone.length, nCalls });
+      await r4.page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
+      for (let i = 0; i < 60 && !be4.st.calls.some((c) => c.name === "CloseWithSession"); i++) await sleep(25);
+      const closeAt = (be4.st.calls.find((c) => c.name === "CloseWithSession") || {}).t;
+      ok(
+        "닫기는 진행 중인 저장이 끝난 뒤 (CloseWithSession ≥ 저장 완료)",
+        !!closeAt && be4.st.saveDone.length >= nCalls && closeAt >= be4.st.saveDone[be4.st.saveDone.length - 1],
+        { closeAt: closeAt && closeAt - savingSince, done: be4.st.saveDone.map((d) => d - savingSince) }
+      );
+      ok("진행 중이던 변경이 저장됨", (tagNames(be4) || []).includes("in-flight"), tagNames(be4));
+      await r4.ctx.close();
 
       // broken file moved aside, restored from .bak: notice + alert
       const be3 = makeBackend();
