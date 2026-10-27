@@ -38,6 +38,8 @@ export function GetPlatform():Promise<string>;
 
 export function LoadSession():Promise<string>;
 
+export function LoadTags():Promise<main.TagsLoad>;
+
 export function MarkReleaseNotesSeen():Promise<void>;
 
 export function OpenDefaultAppsSettings():Promise<void>;
@@ -59,6 +61,8 @@ export function SaveFile(arg1:string,arg2:string,arg3:string):Promise<main.FileD
 export function SaveFileDialog(arg1:string,arg2:string,arg3:string):Promise<main.FileDoc>;
 
 export function SaveSession(arg1:string):Promise<void>;
+
+export function SaveTags(arg1:string):Promise<void>;
 
 export function ScanBundle(arg1:string):Promise<main.Bundle>;
 

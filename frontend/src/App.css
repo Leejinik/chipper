@@ -1091,6 +1091,11 @@
 .rule-pattern.bad {
   border-color: var(--danger) !important;
 }
+.rule-problem {
+  margin: -2px 0 4px 28px;
+  font-size: 12px;
+  color: var(--danger);
+}
 .rule-row label {
   display: inline-flex;
   align-items: center;
@@ -1239,4 +1244,134 @@
 }
 .bt-row.file[draggable="true"] {
   cursor: grab;
+}
+
+/* ---------- log colour tag window ---------- */
+.tags-dialog {
+  width: min(1060px, calc(100vw - 40px));
+}
+.tags-notice {
+  margin: -4px 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+.tags-body {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+.tags-side {
+  flex: 0 0 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.tags-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(56vh, 520px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  background: var(--bg);
+}
+.tag-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.tag-item:hover {
+  background: var(--bg-3);
+}
+.tag-item.sel {
+  background: rgba(74, 122, 224, 0.22);
+}
+.tag-item.applied .tag-name::after {
+  content: " ●";
+  color: var(--accent);
+}
+.tag-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+.tag-count {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.tag-rename {
+  background: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.tags-name-error {
+  min-height: 16px;
+  font-size: 11px;
+  color: var(--danger);
+}
+.tags-side-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.tags-side-actions .tb-btn {
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.tags-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tags-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.tags-place {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.tags-place.dim {
+  color: var(--text-dim);
+  border-style: dashed;
+}
+.tags-rules-sub {
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.tags-main-actions {
+  display: flex;
+  gap: 8px;
+}
+.st-tags {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
