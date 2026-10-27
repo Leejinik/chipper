@@ -15,6 +15,8 @@ export function CheckForUpdate():Promise<updater.UpdateInfo>;
 
 export function CloseWithSession(arg1:string):Promise<void>;
 
+export function ExportTagsDialog(arg1:string,arg2:string):Promise<string>;
+
 export function FileAssociationSupported():Promise<boolean>;
 
 export function FrontendReady():Promise<Array<string>>;
@@ -24,6 +26,10 @@ export function GetCurrentVersion():Promise<string>;
 export function GetPendingReleaseNotes():Promise<updater.PendingNotes>;
 
 export function GetPlatform():Promise<string>;
+
+export function ImportTagsDialog():Promise<Array<main.TagsImportFile>>;
+
+export function ImportTagsFiles(arg1:Array<string>):Promise<Array<main.TagsImportFile>>;
 
 export function LoadSession():Promise<string>;
 

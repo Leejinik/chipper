@@ -838,11 +838,14 @@ function App() {
 
   // --- tags: debounced save, like the session --------------------------------
   const tagsTimer = useRef<number | undefined>(undefined);
-  const saveTagsNow = useCallback(async (): Promise<void> => {
+  // Returns "" when saved (or nothing to save), otherwise why it wasn't.
+  const saveTagsNow = useCallback(async (): Promise<string> => {
     window.clearTimeout(tagsTimer.current);
-    if (!tagsReadyRef.current || tagsReadOnlyRef.current) return;
+    if (!tagsReadyRef.current) return "";
+    if (tagsReadOnlyRef.current)
+      return "태그 파일이 더 새 버전의 chipper 가 만든 것이거나 읽지 못한 파일이라, 이번 실행에서는 저장하지 않습니다";
     const js = serializeTags(tagStoreRef.current);
-    if (js === lastSavedTags.current) return;
+    if (js === lastSavedTags.current) return "";
     lastSavedTags.current = js;
     try {
       await SaveTags(js);
@@ -851,12 +854,23 @@ function App() {
         legacyRulesRef.current = undefined; // common lives in tags.json from now on
         scheduleAutosave();
       }
+      return "";
     } catch (e) {
       lastSavedTags.current = ""; // retry on the next change
       console.error("태그 저장 실패", e);
       setTagsNotice("태그 저장 실패: " + String(e));
+      return String(e);
     }
   }, [scheduleAutosave]);
+  // for the tag window around an import: `next` is written before React has
+  // re-rendered with it
+  const saveTagsWith = useCallback(
+    (next?: TagStore) => {
+      if (next) tagStoreRef.current = next;
+      return saveTagsNow();
+    },
+    [saveTagsNow]
+  );
   useEffect(() => {
     if (!tagsReady) return;
     window.clearTimeout(tagsTimer.current);
@@ -3245,6 +3259,7 @@ function App() {
           initial={tagsOpen}
           applied={active ? appliedTags(active).names : [COMMON]}
           notice={tagsNotice}
+          onSaveNow={saveTagsWith}
         />
       )}
 

@@ -162,6 +162,61 @@ export namespace main {
 	        this.size = source["size"];
 	    }
 	}
+	export class TagsImportTag {
+	    name: string;
+	    rules: any[];
+	
+	    static createFrom(source: any = {}) {
+	        return new TagsImportTag(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.rules = source["rules"];
+	    }
+	}
+	export class TagsImportFile {
+	    path: string;
+	    file: string;
+	    error: string;
+	    tags: TagsImportTag[];
+	    problems: string[];
+	    tagsJson: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TagsImportFile(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.file = source["file"];
+	        this.error = source["error"];
+	        this.tags = this.convertValues(source["tags"], TagsImportTag);
+	        this.problems = source["problems"];
+	        this.tagsJson = source["tagsJson"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class TagsLoad {
 	    data: string;
 	    exists: boolean;
