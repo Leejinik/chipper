@@ -64,9 +64,11 @@ func utf8Score(b []byte) (valid, invalid int) {
 // samples: BOM → BOM-less UTF-16 (app.go's heuristic) → UTF-8 or CP949. The
 // decision is never revised later, so a file always reads the same way whatever
 // the rules are. A UTF-8 file with a few broken bytes stays UTF-8 (they read as
-// U+FFFD and are counted). When the head is plain ASCII, more samples from the
-// whole file decide (English start-up lines followed by Korean are common).
-// size < 0: unknown (compressed stream); then extra is nil.
+// U+FFFD and are counted). When the head holds no multi-byte character (plain
+// ASCII, or ASCII with stray bytes), more samples decide together with it
+// (English start-up lines followed by Korean are common): spread over the whole
+// file, or for a .gz the inflated text that follows the head (up to
+// gzipSniffMax). size < 0: unknown (compressed stream).
 func detectEncoding(head []byte, size int64, extra func() [][]byte) string {
 	if len(head) >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF {
 		return EncUTF8BOM
@@ -106,7 +108,7 @@ func detectEncoding(head []byte, size int64, extra func() [][]byte) string {
 		}
 	}
 	v, inv := utf8Score(head)
-	if v == 0 && inv == 0 && extra != nil {
+	if v == 0 && extra != nil {
 		for _, s := range extra() {
 			a, b := utf8Score(s)
 			v += a

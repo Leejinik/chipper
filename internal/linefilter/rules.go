@@ -48,10 +48,6 @@ const (
 	kindRegex
 )
 
-// MaxActiveRules is the number of enabled rules one filter can use (hit masks
-// are a uint64).
-const MaxActiveRules = 64
-
 func (r Rule) kind() int {
 	switch r.Kind {
 	case "text":
@@ -80,8 +76,7 @@ type lit struct {
 
 // compiledRule is one enabled, usable rule.
 type compiledRule struct {
-	index int // index in the request's Rules
-	bit   uint64
+	index int // index in the request's Rules (its position k in matcher.rules is its hit bit)
 	// litOnly: a text/word rule whose case folding is plain ASCII lower-casing.
 	// An occurrence of needle (with ASCII word boundaries for word rules) is a
 	// hit by itself and its position is the match position.
@@ -125,21 +120,25 @@ func compileRules(rules []Rule) ([]compiledRule, []RuleIssue) {
 		}
 		cr, reason := compileOne(r)
 		if reason != "" {
-			issues = append(issues, RuleIssue{Index: i, ID: r.ID, Reason: issuePrefix + reason})
-			continue
-		}
-		if len(out) >= MaxActiveRules {
-			issues = append(issues, RuleIssue{Index: i, ID: r.ID, Reason: fmt.Sprintf(issuePrefix+"켜진 규칙은 %d개까지만 씁니다", MaxActiveRules)})
+			prefix := issuePrefixRegex
+			if r.kind() != kindRegex {
+				prefix = issuePrefixRule
+			}
+			issues = append(issues, RuleIssue{Index: i, ID: r.ID, Reason: prefix + reason})
 			continue
 		}
 		cr.index = i
-		cr.bit = 1 << uint(len(out))
 		out = append(out, cr)
 	}
 	return out, issues
 }
 
-const issuePrefix = "줄만 보기에서 쓸 수 없음: "
+// Issue reasons start with these (the plan's wording). Only a text or word
+// rule holding a line break gets the second one.
+const (
+	issuePrefixRegex = "줄만 보기에서는 쓸 수 없는 정규식: "
+	issuePrefixRule  = "줄만 보기에서는 쓸 수 없는 규칙: "
+)
 
 const wordBefore, wordAfter = `(?:^|[^0-9A-Za-z_])`, `(?:[^0-9A-Za-z_]|$)`
 

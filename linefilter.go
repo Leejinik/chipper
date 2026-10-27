@@ -28,7 +28,9 @@ import (
 //  4. When progress.version goes up (lines were appended to the file), drop the
 //     rows from the first one that shows a line ≥ (previous tailLine − above)
 //     (or a gap row reaching it) and fetch again from there. progress.changed:
-//     the file was rewritten — start again.
+//     the file was rewritten — start again. Limit: a rewrite that keeps the
+//     file's size and modification time is not noticed (see the
+//     linefilter.Progress doc).
 //  5. FilterCancel stops a scan (for this view); FilterClose frees the view.
 
 // FilterProgressEvent is emitted with a linefilter.Progress payload: on the

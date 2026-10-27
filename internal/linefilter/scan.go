@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -19,6 +20,7 @@ type region struct{ start, end int64 }
 type chunkResult struct {
 	lines       int64
 	hits        []hit
+	ext         []uint64 // the hits' rules past the 64th (see hit.ext)
 	longs       []longLine
 	full        bool  // stopped at MaxRows+1 hits (the rest of the region was not scanned)
 	invalid     int64 // bytes that are not UTF-8 (UTF-8 files only)
@@ -296,12 +298,15 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 		}
 		for _, h := range hs {
 			h.line += base
-			j.hits = append(j.hits, h)
-			for ri := range j.m.rules {
-				if h.mask&j.m.rules[ri].bit != 0 {
-					j.ruleHits[j.m.rules[ri].index]++
-				}
+			j.m.eachRule(h, r.ext, func(k int) { j.ruleHits[j.m.rules[k].index]++ })
+			if h.ext != 0 {
+				// move the entry from the region's arena to the job's (append
+				// only: rows being read keep a snapshot of the slice)
+				w := j.m.extWords
+				j.ext = append(j.ext, r.ext[int(h.ext-1)*w:int(h.ext)*w]...)
+				h.ext = uint32(len(j.ext) / w)
 			}
+			j.hits = append(j.hits, h)
 		}
 		lastLine := int64(-1)
 		if trunc && len(hs) > 0 {
@@ -427,6 +432,8 @@ func (sr *scanRun) worker(mem int) {
 			}
 		}
 		res := sr.processRegion(f, ws, wb, reg)
+		res.ext, ws.ext = ws.ext, nil
+		ws.clearHi()
 		sr.deposit(k, res)
 	}
 }
@@ -537,7 +544,7 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 		}
 	} else {
 		var err error
-		le, next, err = skipToLineEnd(f, lineStart+int64(len(buf)), limit, buf[:cap(buf)])
+		le, next, err = skipToLineEnd(f, lineStart+int64(len(buf)), limit, buf[:cap(buf)], &sr.j.stop)
 		if err != nil {
 			return 0, err
 		}
@@ -566,8 +573,9 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 		ws.fold, ws.low, ws.lowPtr = nil, nil, nil // do not keep a giant copy around
 		return next, nil
 	}
-	mask, inv, err := ws.streamLine(f, lineStart, le, buf[:cap(buf)])
+	mask, inv, err := ws.streamLine(f, lineStart, le, buf[:cap(buf)], &j.stop)
 	if err != nil {
+		ws.clearHi()
 		return 0, err
 	}
 	if sr.checkUTF8 && inv > 0 {
@@ -576,8 +584,8 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 			res.invalidLine = lineIdx
 		}
 	}
-	if mask != 0 {
-		res.hits = append(res.hits, hit{line: lineIdx, start: lineStart, end: le, mask: mask, col: -1})
+	if ws.lineHit(mask) {
+		res.hits = ws.addHit(res.hits, hit{line: lineIdx, start: lineStart, end: le, mask: mask, col: -1})
 		if len(res.hits) >= j.e.opt.MaxRows+1 {
 			res.full = true
 		}
@@ -585,9 +593,13 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 	return next, nil
 }
 
-// skipToLineEnd finds the end of the line that continues at off.
-func skipToLineEnd(f *os.File, off, limit int64, scratch []byte) (int64, int64, error) {
+// skipToLineEnd finds the end of the line that continues at off. It gives up
+// with errCanceled once stop is set.
+func skipToLineEnd(f *os.File, off, limit int64, scratch []byte, stop *atomic.Bool) (int64, int64, error) {
 	for off < limit {
+		if stop.Load() {
+			return 0, 0, errCanceled
+		}
 		want := int64(len(scratch))
 		if limit-off < want {
 			want = limit - off
@@ -623,8 +635,10 @@ func skipToLineEnd(f *os.File, off, limit int64, scratch []byte) (int64, int64, 
 
 // streamLine judges a line too long for memory, piece by piece, with each
 // rule's DFA (a DFA that gives up falls back to the stdlib on a stream).
-// Returns the rule mask and the number of bytes that are not UTF-8.
-func (ws *wstate) streamLine(f *os.File, start, end int64, scratch []byte) (uint64, int64, error) {
+// Returns the rule mask (rules past the 64th in ws.hi) and the number of bytes
+// that are not UTF-8. Once stop is set it gives up with errCanceled: it checks
+// before each rule's piece and, in the stdlib fallback, every 64KB read.
+func (ws *wstate) streamLine(f *os.File, start, end int64, scratch []byte, stop *atomic.Bool) (uint64, int64, error) {
 	m := ws.m
 	type st struct {
 		d    *dfa
@@ -670,6 +684,9 @@ func (ws *wstate) streamLine(f *os.File, start, end int64, scratch []byte) (uint
 			if x.done || x.std {
 				continue
 			}
+			if stop.Load() {
+				return 0, 0, errCanceled
+			}
 			ns, ok := x.d.feed(x.s, piece)
 			if x.d.failed {
 				x.std = true
@@ -677,7 +694,7 @@ func (ws *wstate) streamLine(f *os.File, start, end int64, scratch []byte) (uint
 			}
 			if ok {
 				x.done = true
-				mask |= m.rules[ri].bit
+				ws.setRule(&mask, ri)
 				continue
 			}
 			x.s = ns
@@ -696,24 +713,33 @@ func (ws *wstate) streamLine(f *os.File, start, end int64, scratch []byte) (uint
 			if r.emptyToo && m.progs[ri] != nil {
 				re = m.progs[ri].re // non-empty matches only
 			}
-			if re.MatchReader(&runeReader{r: sec}) {
-				mask |= r.bit
+			rr := &runeReader{r: sec, stop: stop}
+			matched := re.MatchReader(rr)
+			if rr.canceled {
+				return 0, 0, errCanceled
+			}
+			if matched {
+				ws.setRule(&mask, ri)
 			}
 			continue
 		}
 		if x.d.feedEnd(x.s) {
-			mask |= r.bit
+			ws.setRule(&mask, ri)
 		}
 	}
 	return mask, invalid, nil
 }
 
 // runeReader is a buffered io.RuneReader (invalid bytes read as U+FFFD, width 1).
+// When stop is set it ends the input early (canceled says so), so a regexp
+// reading it returns soon.
 type runeReader struct {
-	r    io.Reader
-	buf  []byte
-	i, n int
-	eof  bool
+	r        io.Reader
+	stop     *atomic.Bool
+	canceled bool
+	buf      []byte
+	i, n     int
+	eof      bool
 }
 
 func (rr *runeReader) ReadRune() (rune, int, error) {
@@ -724,6 +750,10 @@ func (rr *runeReader) ReadRune() (rune, int, error) {
 		copy(rr.buf, rr.buf[rr.i:rr.n])
 		rr.n -= rr.i
 		rr.i = 0
+		if rr.stop != nil && rr.stop.Load() {
+			rr.canceled, rr.eof, rr.n = true, true, 0
+			return 0, 0, io.EOF
+		}
 		for rr.n < 4 && !rr.eof {
 			k, err := rr.r.Read(rr.buf[rr.n:])
 			rr.n += k

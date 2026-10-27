@@ -417,7 +417,13 @@ func gzipError(err error) error {
 	return fmt.Errorf("압축 파일(.gz)을 풀 수 없습니다: %v", err)
 }
 
-const gzipHead = 4 << 20
+// gzipHead: the inflated head read before anything else (encoding detection).
+// gzipSniffMax: how far the head is extended when it holds no multi-byte
+// character and the encoding is detected (still decided once, before the scan).
+const (
+	gzipHead     = 4 << 20
+	gzipSniffMax = 32 << 20
+)
 
 // gzipSource opens the stream and reads its head (for encoding detection).
 type gzipSource struct {
@@ -434,25 +440,39 @@ func openGzip(f *os.File, size int64) (*gzipSource, error) {
 		return nil, gzipError(err)
 	}
 	g := &gzipSource{cr: cr, zr: zr}
-	g.head = make([]byte, gzipHead)
-	n, err := io.ReadFull(zr, g.head)
-	g.head = g.head[:n]
+	if _, err := g.extendHead(gzipHead); err != nil {
+		return nil, err
+	}
+	return g, nil
+}
+
+// extendHead inflates more of the stream into head, up to max bytes in all,
+// and returns the bytes added.
+func (g *gzipSource) extendHead(max int) ([]byte, error) {
+	have := len(g.head)
+	if g.eof || have >= max {
+		return nil, nil
+	}
+	nh := make([]byte, max)
+	copy(nh, g.head)
+	n, err := io.ReadFull(g.zr, nh[have:])
+	g.head = nh[:have+n]
 	switch err {
 	case nil:
 	case io.EOF, io.ErrUnexpectedEOF:
-		if err == io.ErrUnexpectedEOF && n == 0 {
+		if err == io.ErrUnexpectedEOF && have+n == 0 {
 			return nil, gzipError(err)
 		}
 		g.eof = true
 		// ReadFull reports a short stream as ErrUnexpectedEOF even when the gzip
 		// stream ended cleanly; a corrupt one fails on the next Read too.
-		if _, e := zr.Read(make([]byte, 1)); e != nil && e != io.EOF {
+		if _, e := g.zr.Read(make([]byte, 1)); e != nil && e != io.EOF {
 			return nil, gzipError(e)
 		}
 	default:
 		return nil, gzipError(err)
 	}
-	return g, nil
+	return g.head[have:], nil
 }
 
 // inflate runs the stream into the temp copy: as is (UTF-8), or through the
@@ -519,6 +539,7 @@ func (j *job) inflate(sr *scanRun, g *gzipSource, tmp *os.File, enc string, skip
 			err = fmt.Errorf("압축을 푼 크기가 상한(%s)을 넘어 멈췄습니다", humanBytes(limit))
 		} else {
 			pieces <- piece{b: g.head, src: g.cr.count()}
+			g.head = nil // up to gzipSniffMax: let it go once written
 		}
 		for err == nil && !g.eof && !sr.stopped() && !failed() {
 			buf := <-free
@@ -559,6 +580,7 @@ func (j *job) inflate(sr *scanRun, g *gzipSource, tmp *os.File, enc string, skip
 	var feedErr error
 	carry := append([]byte(nil), g.head[skip:]...)
 	var total int64 = int64(len(g.head) - skip)
+	g.head = nil // up to gzipSniffMax: do not keep two copies
 	srcPos := int64(skip)
 	buf := make([]byte, 1<<20)
 	eof := g.eof
@@ -611,7 +633,11 @@ func (j *job) inflate(sr *scanRun, g *gzipSource, tmp *os.File, enc string, skip
 			cut = sp
 		}
 		data := append(p.srcFree.get(0), carry[:cut]...)
-		carry = append(carry[:0], carry[cut:]...)
+		if len(carry)-cut > 4<<20 {
+			carry = carry[cut:] // a long sniffed head: do not move it for every piece
+		} else {
+			carry = append(carry[:0], carry[cut:]...)
+		}
 		srcEnd := g.cr.count()
 		p.in <- srcChunk{k: k, data: data, srcStart: srcPos, srcEnd: srcEnd}
 		srcPos += int64(cut)
