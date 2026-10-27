@@ -28,6 +28,8 @@ export function FilterCancel(arg1:string):Promise<void>;
 
 export function FilterClose(arg1:string):Promise<void>;
 
+export function FilterRowOfLine(arg1:string,arg2:number,arg3:number,arg4:number):Promise<number>;
+
 export function FilterRows(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number):Promise<linefilter.Page>;
 
 export function FilterStart(arg1:linefilter.Request):Promise<linefilter.StartResult>;

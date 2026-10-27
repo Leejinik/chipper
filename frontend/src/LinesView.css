@@ -1,0 +1,261 @@
+/* 「🏷 태그 줄만」 view (LinesView.tsx) and the 전체/줄만 switch */
+.lines-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #282c34; /* the editor's (one dark) background */
+}
+.lv-head {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.lv-btn {
+  flex: none;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.lv-btn:hover {
+  border-color: var(--accent);
+}
+.lv-title {
+  color: var(--text);
+  font-weight: 600;
+}
+.lv-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+}
+.lv-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.lv-tag.off {
+  color: var(--text-dim);
+  text-decoration: line-through;
+}
+.lv-tag input {
+  margin: 0;
+}
+.lv-ctx {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.lv-ctx input {
+  width: 52px;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 3px;
+  font-size: 12px;
+}
+.lv-stat {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.lv-note {
+  flex: none;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.lv-note.warn {
+  color: #e5c07b;
+}
+.lv-note.err {
+  color: var(--danger);
+}
+.lv-note.info {
+  color: var(--text-dim);
+}
+.lv-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  position: relative;
+  outline: none;
+  color: #abb2bf;
+  font-family: "Cascadia Code", "D2Coding", "Consolas", "Menlo", "Courier New",
+    "Noto Sans Mono CJK KR", "Ubuntu Mono", "DejaVu Sans Mono", monospace;
+}
+.lv-scroll:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--accent-dim);
+}
+.lv-space {
+  position: relative;
+  min-width: 100%;
+}
+.lv-row {
+  position: absolute;
+  left: 0;
+  min-width: 100%;
+  display: flex;
+  white-space: pre;
+  cursor: default;
+}
+.lv-row.sel {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background-color: rgba(76, 141, 255, 0.16) !important;
+}
+.lv-no {
+  flex: none;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  padding-right: 6px;
+  text-align: right;
+  color: #636d83;
+  background: #282c34;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.lv-hit .lv-no {
+  color: #c8ccd4;
+}
+.lv-no:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+.lv-gap .lv-no,
+.lv-wait .lv-no {
+  cursor: default;
+  text-decoration: none;
+}
+.lv-mark {
+  flex: none;
+  width: 3px;
+  margin-right: 6px;
+}
+.lv-text {
+  flex: none;
+}
+.lv-near .lv-text {
+  opacity: 0.85;
+}
+.lv-gap .lv-text {
+  color: #7f848e;
+  font-style: italic;
+  padding-left: 1ch;
+}
+.lv-gap {
+  background: repeating-linear-gradient(90deg, rgba(255, 255, 255, 0.03) 0 6px, transparent 6px 12px);
+}
+.lv-wait .lv-text {
+  color: #4b5263;
+}
+.lv-cut {
+  color: #7f848e;
+  font-style: italic;
+}
+.lv-empty {
+  position: absolute;
+  top: 12px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+/* 전체 | 🏷 줄만 switch (pane head and multi-view pane foot) */
+.lines-seg {
+  flex: none;
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+  vertical-align: middle;
+  text-transform: none;
+  letter-spacing: 0;
+}
+.lines-seg button {
+  background: var(--bg-3);
+  color: var(--text-dim);
+  border: none;
+  border-left: 1px solid var(--border);
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.lines-seg button:first-child {
+  border-left: none;
+}
+.lines-seg button.on {
+  background: var(--accent);
+  color: #fff;
+}
+.lines-seg button:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+.pane-head .lines-seg {
+  margin-left: 10px;
+}
+/* big file: whole file or tag lines only */
+.big-ask-back {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.big-ask {
+  width: min(520px, 92vw);
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 18px;
+  color: var(--text);
+  font-size: 13px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.5);
+}
+.big-ask h3 {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+.big-ask p {
+  margin: 4px 0;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+}
+.big-ask .ba-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+.big-ask .ba-actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
