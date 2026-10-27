@@ -1343,3 +1343,36 @@ button.autosave:hover {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* v1.2.1 final — error screen: edited tabs the session did not get */
+.render-error-sub {
+  white-space: pre-line;
+}
+.render-error-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 0 12px;
+  text-align: left;
+}
+.render-error-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.render-error-item .rei-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.render-error-item .rei-done {
+  color: #7fc98b;
+}
+.render-error-item .rei-fail {
+  color: var(--danger);
+  word-break: break-all;
+}

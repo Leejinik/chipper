@@ -9,13 +9,14 @@ import {
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import type { EditorView } from "@codemirror/view";
+import type { Text } from "@codemirror/state";
 import { undo, redo, selectAll } from "@codemirror/commands";
 import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
 import { runSyncedNav, syncedNavCommand } from "./syncNav";
 import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
 import ErrorBoundary from "./ErrorBoundary";
-import { setRescue } from "./rescue";
+import { setRescue, setRescueItems, type RescueItem } from "./rescue";
 import {
   DEFAULT_LOG_RULES,
   looksLikeLog,
@@ -245,6 +246,10 @@ function tooBigText(files: { name: string; size: number }[]): string {
   );
 }
 const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?";
+// Over this, the open confirm also says what editing costs: on the test PC
+// (.18) saving an edited 384MB log took WebView 3.2GB + Go 4.5GB.
+const EDIT_MEM_FILE = 128 << 20;
+const EDIT_MEM_NOTE = "고치면 메모리를 많이 씁니다(384MB 저장 때 앱 전체 약 8GB).";
 // Go refuses (without writing) a save whose result is over the open limit
 // until the user agreed: the file could not be opened in Chipper again.
 const TOO_BIG_SAVE = "CHIPPER_TOO_BIG_AFTER_SAVE:";
@@ -252,15 +257,52 @@ const tooBigSaveText = (title: string, bytes: number) =>
   `"${title}" 을(를) 저장하면 ${sizeText(bytes)} 이 되어 ${LIMIT_TEXT} 를 넘습니다.\n` +
   "저장은 할 수 있지만, 다음부터는 Chipper 로 이 파일을 열 수 없습니다. 저장할까요?";
 
-// The session keeps the text of edited tabs only up to these sizes (UTF-16
-// code units). Measured on the test PC (.18): typing one letter in a 200MB log
-// put 210,779,937 characters into the autosave; serializing took 0.97s and
-// sending it to Go killed the WebView renderer (흰 창) while the editor alone
-// held 200MB fine. A bare 64M-character IPC takes ~2.9s, 32M ~1.5s. Bigger
-// edited tabs keep only their path in the session (their edits must be saved
-// to the file) and the close asks first.
+// The session keeps the text of edited tabs only up to these sizes, counted
+// in the bytes that cross to Go (sessionTextBytes), not in characters. Measured
+// on the test PC (.18): typing one letter in a 200MB log put 210,779,937
+// characters into the autosave; serializing took 0.97s and sending it to Go
+// killed the WebView renderer (흰 창) while the editor alone held 200MB fine.
+// A bare 64M-byte (ASCII) IPC takes ~2.9s, 32M ~1.5s. Korean text is 3 bytes a
+// character and escaped characters more, so a character count let a tab four
+// to seven times over through. Bigger edited tabs keep only their path in the
+// session (their edits must be saved to the file) and the close asks first.
 const SESSION_TAB_MAX = 32 << 20;
 const SESSION_TOTAL_MAX = 64 << 20;
+// The session JSON is a string argument of SaveSession, so the binding call
+// JSON-encodes it again: a line break goes `\n` → `\\n` (3 bytes), a quote or
+// backslash 4, other control characters `\\u00XX` (7); then UTF-8.
+function sessionTextBytes(s: string): number {
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) {
+      if (c >= 0x20) n += c === 0x22 || c === 0x5c ? 4 : 1;
+      else n += c === 10 || c === 13 || c === 9 || c === 8 || c === 12 ? 3 : 7;
+    } else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdfff) n += 2; // a surrogate pair = 4
+    else n += 3;
+  }
+  return n;
+}
+const SESSION_BREAK_BYTES = 3; // "\n" between lines, escaped twice
+// Per CodeMirror text node (immutable, shared between versions of a document):
+// after an edit only the nodes on the changed path are counted again.
+const docBytesCache = new WeakMap<Text, number>();
+function docSessionBytes(doc: Text): number {
+  const hit = docBytesCache.get(doc);
+  if (hit !== undefined) return hit;
+  let n: number;
+  const kids = doc.children;
+  if (kids) {
+    n = SESSION_BREAK_BYTES * (kids.length - 1); // implied breaks between children
+    for (const k of kids) n += docSessionBytes(k);
+  } else {
+    n = sessionTextBytes(doc.sliceString(0));
+  }
+  docBytesCache.set(doc, n);
+  return n;
+}
+const SESSION_TAB_OVERHEAD = 512; // the tab's other fields (title, path, …)
 const UNKEPT_TIP =
   "큰 파일이라 고친 내용을 자동 저장(세션)에 담지 않습니다 — 창을 닫거나 앱이 꺼지면 사라지니 💾 저장(Ctrl+S)하세요. 닫을 때 한 번 더 묻습니다.";
 
@@ -547,12 +589,13 @@ function normalizeTab(raw: any): Tab | null {
 
 // Which tabs the session cannot keep the text of (see SESSION_TAB_MAX): edited
 // or never-saved tabs over the per-tab size, or past the total once the smaller
-// ones are in (smallest first, so as many tabs as possible are kept).
-function sessionDrops(tabs: Tab[], lenOf: (t: Tab) => number): Set<string> {
+// ones are in (smallest first, so as many tabs as possible are kept). bytesOf:
+// the tab's size in the session (sessionBytes in App).
+function sessionDrops(tabs: Tab[], bytesOf: (t: Tab) => number): Set<string> {
   const drop = new Set<string>();
   const needText = tabs
     .filter((t) => !(t.path && !t.dirty) && !t.needsLoad)
-    .map((t) => ({ t, n: lenOf(t) }))
+    .map((t) => ({ t, n: bytesOf(t) }))
     .sort((a, b) => a.n - b.n);
   let total = 0;
   for (const { t, n } of needText) {
@@ -591,6 +634,96 @@ function tabsToImport(raw: string, open: Tab[]): Tab[] {
     out.push(tab);
   }
   return out;
+}
+
+// --- saving (also used by the error screen: rescued big tabs) ----------------
+
+// Ask before overwriting a file that changed on disk since we opened/saved it.
+async function confirmOverwriteIfChanged(t: Tab): Promise<boolean> {
+  if (!t.path || !t.mtime) return true;
+  try {
+    const st = await StatFile(t.path);
+    if (st.exists && st.modTime && st.modTime !== t.mtime) {
+      return window.confirm(
+        `"${t.title}" 파일이 다른 프로그램에서 변경되었습니다.\n지금 편집 중인 내용으로 덮어쓸까요? (디스크의 외부 변경사항은 사라집니다)`
+      );
+    }
+  } catch {
+    /* stat failed → proceed */
+  }
+  return true;
+}
+
+// How a tab is written back: its encoding, line breaks and BOM (Go SaveOptions).
+function saveOpts(t: Tab, enc: string, force: boolean, allowTooBig = false) {
+  return {
+    encoding: enc,
+    eol: t.eol,
+    eolMixed: t.eolMixed,
+    noBom: enc === t.encoding ? t.noBom : false, // an encoding change writes the usual BOM
+    force,
+    allowTooBig,
+  };
+}
+
+// A save whose result would be over the open limit: ask first (it still
+// saves, but Chipper will not open that file next time). The text length is
+// a lower bound of the bytes, so most such saves are asked before anything is
+// sent; Go refuses the rest (multi-byte text) and they are asked then.
+async function saveChecked(
+  title: string,
+  text: string,
+  enc: string,
+  send: (allowTooBig: boolean) => Promise<main.FileDoc>,
+  retry?: (allowTooBig: boolean, goErr: string) => Promise<main.FileDoc>
+): Promise<main.FileDoc | null> {
+  const lower = text.length * (enc === "utf-16le" || enc === "utf-16be" ? 2 : 1);
+  if (lower > TOO_BIG_FILE) {
+    if (!window.confirm(tooBigSaveText(title, lower))) return null;
+    return send(true);
+  }
+  try {
+    return await send(false);
+  } catch (e) {
+    const s = String(e);
+    const m = s.match(/CHIPPER_TOO_BIG_AFTER_SAVE:(\d+)/);
+    if (!m) throw e;
+    if (!window.confirm(tooBigSaveText(title, Number(m[1])))) return null;
+    return retry ? retry(true, s) : send(true);
+  }
+}
+
+const mixedOk = (t: Tab) =>
+  !t.eolMixed ||
+  window.confirm(
+    `"${t.title}" 은(는) 줄바꿈 종류(CRLF·LF·CR)가 섞여 있습니다.\n` +
+      `저장하면 줄바꿈이 모두 가장 많은 ${eolName(t.eol)} 로 맞춰집니다. 저장할까요?`
+  );
+
+// 「파일로 저장」 on the error screen: the text a tab held when the App went
+// down, written the way Ctrl+S (its own file: encoding, line breaks, BOM, the
+// changed-on-disk and too-big questions) or 「다른 이름으로」 (never saved)
+// would. true = written.
+async function saveRescuedText(t: Tab, text: string): Promise<boolean> {
+  if (t.path) {
+    if (!mixedOk(t)) return false;
+    if (!(await confirmOverwriteIfChanged(t))) return false;
+    const doc = await saveChecked(t.title, text, t.encoding, (allow) =>
+      SaveFile(t.path, text, saveOpts(t, t.encoding, false, allow))
+    );
+    return !!doc;
+  }
+  const res = await saveChecked(
+    t.title,
+    text,
+    t.encoding,
+    (allow) => SaveFileDialog(suggestName(t), text, saveOpts(t, t.encoding, true, allow)),
+    (allow, goErr) => {
+      const path = goErr.split("\n").pop()?.trim() || "";
+      return path ? SaveFileAs(path, text, saveOpts(t, t.encoding, true, allow)) : Promise.reject(goErr);
+    }
+  );
+  return !!res && !res.canceled;
 }
 
 function suggestName(tab: Tab): string {
@@ -813,8 +946,22 @@ function App() {
     (t: Tab): number => viewsRef.current.get(t.id)?.state.doc.length ?? t.content.length,
     []
   );
+  // A tab's text as bytes in the session (see SESSION_TAB_MAX). The character
+  // count is a lower bound, so a tab already over by characters is not scanned.
+  const textBytesCache = useRef(new Map<string, { s: string; n: number }>());
+  const sessionBytes = useCallback((t: Tab): number => {
+    const v = viewsRef.current.get(t.id);
+    const len = v ? v.state.doc.length : t.content.length;
+    if (len > SESSION_TAB_MAX) return len;
+    if (v) return docSessionBytes(v.state.doc) + SESSION_TAB_OVERHEAD;
+    const hit = textBytesCache.current.get(t.id);
+    if (hit && hit.s === t.content) return hit.n;
+    const n = sessionTextBytes(t.content) + SESSION_TAB_OVERHEAD;
+    textBytesCache.current.set(t.id, { s: t.content, n });
+    return n;
+  }, []);
   const snapshot = useCallback((): string => {
-    const drop = sessionDrops(tabsRef.current, textLength);
+    const drop = sessionDrops(tabsRef.current, sessionBytes);
     if (!sameSet(drop, unkeptRef.current)) {
       unkeptRef.current = drop;
       setUnkept(drop);
@@ -837,7 +984,7 @@ function App() {
       multi: multiRef.current,
     };
     return JSON.stringify(s);
-  }, [liveContent, textLength]);
+  }, [liveContent, sessionBytes]);
 
   // --- initial load (once) --------------------------------------------------
   const didInit = useRef(false);
@@ -979,17 +1126,48 @@ function App() {
   // session right now, from the editors themselves (they are still there in
   // this phase), so 「다시 시도」 reopens what was on screen; nothing written
   // afterwards (deadRef). The boundary tells the user how it went (rescue.ts).
+  // Edited tabs whose text the session does not get (too big — sessionDrops —
+  // or a run that does not save its session) are taken out of the editors too,
+  // for 「파일로 저장」 on the error screen; so are the other edited tabs, in case
+  // the session save fails.
   useLayoutEffect(() => {
     deadRef.current = false;
     return () => {
       deadRef.current = true;
       window.clearTimeout(autosaveTimer.current);
+      const items = (keptIds: Set<string> | null): RescueItem[] =>
+        tabsRef.current
+          .filter((t) => t.dirty && !t.needsLoad)
+          .map((t): RescueItem => {
+            const box = { text: liveContent(t) };
+            return {
+              id: t.id,
+              name: t.label || t.title,
+              path: t.path,
+              size: box.text.length,
+              inSession: !!keptIds && keptIds.has(t.id),
+              state: "",
+              error: "",
+              save: async () => {
+                const ok = await saveRescuedText(t, box.text);
+                if (ok) box.text = ""; // written: let the copy go
+                return ok;
+              },
+            };
+          });
       if (!loadedRef.current || sessionBlockedRef.current) {
+        try {
+          setRescueItems(loadedRef.current ? items(null) : []);
+        } catch (e) {
+          console.error("오류 순간의 내용을 꺼내지 못했습니다", e);
+        }
         setRescue("skipped");
         return;
       }
       let snap = "";
       try {
+        const drop = sessionDrops(tabsRef.current, sessionBytes);
+        setRescueItems(items(new Set(tabsRef.current.filter((t) => !drop.has(t.id)).map((t) => t.id))));
         snap = snapshot();
       } catch (e) {
         console.error("오류 순간의 세션을 만들지 못했습니다", e);
@@ -1002,7 +1180,7 @@ function App() {
         () => setRescue("failed")
       );
     };
-  }, [snapshot]);
+  }, [snapshot, liveContent, sessionBytes]);
 
   // Closing the window: Go waits for one last snapshot. Edits the session will
   // not hold (a big edited tab, or a run that does not save its session) are
@@ -1017,7 +1195,7 @@ function App() {
         await HoldClose().catch(() => {});
         const why = sessionBlockedRef.current
           ? "이번 실행은 세션을 저장하지 않으므로(안내 막대 참고)"
-          : `큰 파일(${fmtSize(SESSION_TAB_MAX)} 넘음)은 고친 내용을 세션에 담지 않으므로`;
+          : `큰 탭(세션에 담으면 한 탭 ${fmtSize(SESSION_TAB_MAX)}, 모두 합쳐 ${fmtSize(SESSION_TOTAL_MAX)} 넘음)은 고친 내용을 세션에 담지 않으므로`;
         const ok = window.confirm(
           "저장하지 않은 고친 내용이 있습니다:\n" +
             lost.map((t) => `- ${t.label || t.title} (${fmtSize(textLength(t))})`).join("\n") +
@@ -1065,22 +1243,6 @@ function App() {
     () => tabsRef.current.find((t) => t.id === activeIdRef.current),
     []
   );
-
-  // Ask before overwriting a file that changed on disk since we opened/saved it.
-  const confirmOverwriteIfChanged = useCallback(async (t: Tab): Promise<boolean> => {
-    if (!t.path || !t.mtime) return true;
-    try {
-      const st = await StatFile(t.path);
-      if (st.exists && st.modTime && st.modTime !== t.mtime) {
-        return window.confirm(
-          `"${t.title}" 파일이 다른 프로그램에서 변경되었습니다.\n지금 편집 중인 내용으로 덮어쓸까요? (디스크의 외부 변경사항은 사라집니다)`
-        );
-      }
-    } catch {
-      /* stat failed → proceed */
-    }
-    return true;
-  }, []);
 
   const doNew = useCallback(() => {
     const tab = makeTab({ title: "제목 없음", content: "", lang: "markdown", view: "split" });
@@ -1130,7 +1292,9 @@ function App() {
       const declined =
         big.length > 0 &&
         !window.confirm(
-          `큰 파일이 있습니다 (${big.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")}).\n` + BIG_CONFIRM_TAIL
+          `큰 파일이 있습니다 (${big.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")}).\n` +
+            (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") +
+            BIG_CONFIRM_TAIL
         );
       return {
         allowed: new Set(sized.filter((x) => x.size <= TOO_BIG_FILE && !(declined && x.size >= BIG_FILE)).map((x) => x.path)),
@@ -1302,46 +1466,6 @@ function App() {
     return mode === "read" || mode === "lock" ? mode : null;
   }, []);
 
-  // How a tab is written back: its encoding, line breaks and BOM (Go SaveOptions).
-  const saveOpts = (t: Tab, enc: string, force: boolean, allowTooBig = false) => ({
-    encoding: enc,
-    eol: t.eol,
-    eolMixed: t.eolMixed,
-    noBom: enc === t.encoding ? t.noBom : false, // an encoding change writes the usual BOM
-    force,
-    allowTooBig,
-  });
-
-  // A save whose result would be over the open limit: ask first (it still
-  // saves, but Chipper will not open that file next time). The text length is
-  // a lower bound of the bytes, so most such saves are asked before anything is
-  // sent; Go refuses the rest (multi-byte text) and they are asked then.
-  const saveChecked = useCallback(
-    async (
-      title: string,
-      text: string,
-      enc: string,
-      send: (allowTooBig: boolean) => Promise<main.FileDoc>,
-      retry?: (allowTooBig: boolean, goErr: string) => Promise<main.FileDoc>
-    ): Promise<main.FileDoc | null> => {
-      const lower = text.length * (enc === "utf-16le" || enc === "utf-16be" ? 2 : 1);
-      if (lower > TOO_BIG_FILE) {
-        if (!window.confirm(tooBigSaveText(title, lower))) return null;
-        return send(true);
-      }
-      try {
-        return await send(false);
-      } catch (e) {
-        const s = String(e);
-        const m = s.match(/CHIPPER_TOO_BIG_AFTER_SAVE:(\d+)/);
-        if (!m) throw e;
-        if (!window.confirm(tooBigSaveText(title, Number(m[1])))) return null;
-        return retry ? retry(true, s) : send(true);
-      }
-    },
-    []
-  );
-
   const doSaveAs = useCallback(async () => {
     const t = getActive();
     if (!t || t.needsLoad) return; // content not read yet — never write ""
@@ -1414,13 +1538,6 @@ function App() {
     },
     [liveContent, saveChecked]
   );
-
-  const mixedOk = (t: Tab) =>
-    !t.eolMixed ||
-    window.confirm(
-      `"${t.title}" 은(는) 줄바꿈 종류(CRLF·LF·CR)가 섞여 있습니다.\n` +
-        `저장하면 줄바꿈이 모두 가장 많은 ${eolName(t.eol)} 로 맞춰집니다. 저장할까요?`
-    );
 
   // Save writes the file only when there is something to write: a tab nobody
   // edited is never written (its file keeps its bytes and mtime — a log is
@@ -2755,6 +2872,7 @@ function App() {
     <>
       <div className="empty-title">큰 파일입니다 ({fmtSize(t.bigSize)})</div>
       <div className="empty-sub">{t.path}</div>
+      {t.bigSize > EDIT_MEM_FILE && <div className="empty-sub">{EDIT_MEM_NOTE}</div>}
       <div className="empty-sub">{BIG_CONFIRM_TAIL}</div>
       <div className="empty-actions">
         <button className="tb-btn" onClick={() => approveBig(t.id)}>
