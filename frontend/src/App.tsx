@@ -17,6 +17,7 @@ import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
 import { looksLikeLog, type LogRule } from "./logHighlight";
 import {
   COMMON,
+  bundleRel,
   migratedStore,
   normalizeTagStore,
   rotationKey,
@@ -27,6 +28,8 @@ import {
   type TagStore,
 } from "./logTags";
 import TagsDialog from "./TagsDialog";
+import TagAssignDialog from "./TagAssignDialog";
+import { placeTags, targetForPath, fromWhere, type AssignTarget } from "./tagAssign";
 import "./App.css";
 import {
   OpenFileDialog,
@@ -610,6 +613,11 @@ function App() {
   );
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSel: boolean; inOk: boolean } | null>(null);
   const [encMenu, setEncMenu] = useState<boolean>(false);
+  // Tag assignment window (tree right-click, tab menu, status bar 🏷), and the
+  // small 🏷 menu of a tab (tab right-click / status bar).
+  const [assign, setAssign] = useState<{ target: AssignTarget; title: string } | null>(null);
+  const assignReturn = useRef<HTMLElement | null>(null);
+  const [tagMenu, setTagMenu] = useState<{ x: number; y: number; tabId: string; fromKey: boolean } | null>(null);
   const [canInClause, setCanInClause] = useState<boolean>(false);
   const onSelectionChange = useCallback((text: string) => {
     setCanInClause(tokenizeList(text).ok);
@@ -1438,10 +1446,14 @@ function App() {
       const f = focusSlotRef.current;
       const idx = vis[f]?.server === server ? f : vis.findIndex((x) => x.server === server);
       const target = idx >= 0 ? idx : Math.min(f, m.count - 1);
-      setFocusSlot(target);
+      // Focus the pane together with its current tab (not just the slot): the
+      // "activated tab → its pane" effect would otherwise pull the focus back
+      // to the pane of the old active tab before the switch below finishes,
+      // leaving the status bar on another server's file.
+      focusPane(target);
       switchBundleLog(rel, target, { slot: target, server });
     },
-    [switchBundleLog]
+    [switchBundleLog, focusPane]
   );
 
   // After a restart the bundle's file list is read again for the tree.
@@ -1791,10 +1803,11 @@ function App() {
 
   // Close popups on outside click / Escape.
   useEffect(() => {
-    if (!ctxMenu && !encMenu) return;
+    if (!ctxMenu && !encMenu && !tagMenu) return;
     const close = () => {
       setCtxMenu(null);
       setEncMenu(false);
+      setTagMenu(null);
     };
     const onEsc = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
@@ -1807,7 +1820,7 @@ function App() {
       window.removeEventListener("resize", close);
       window.removeEventListener("keydown", onEsc);
     };
-  }, [ctxMenu, encMenu]);
+  }, [ctxMenu, encMenu, tagMenu]);
 
   // --- command dispatch -----------------------------------------------------
   // Runs an app command by id. Selection-gated commands (inClause/chips) no-op
@@ -2344,6 +2357,50 @@ function App() {
     }
     return r;
   };
+  // Where "tag this file" assigns for a tab: its rotation series inside the
+  // bundle, else its file name. null for a tab without a path.
+  const assignTargetOf = (t: Tab): AssignTarget | null => targetForPath(t.path, bundleRel(t.path, multi.bundle));
+  const openAssign = (target: AssignTarget, title: string, returnFocus: HTMLElement | null) => {
+    assignReturn.current = returnFocus;
+    setTagMenu(null);
+    setAssign({ target, title });
+  };
+  const closeAssign = () => {
+    setAssign(null);
+    const el = assignReturn.current;
+    assignReturn.current = null;
+    if (el && el.isConnected) requestAnimationFrame(() => el.focus());
+  };
+  // The 🏷 menu of a tab (tab right-click, status bar 🏷).
+  const openTagMenu = (tabId: string, x: number, y: number, fromKey = false) => {
+    setCtxMenu(null);
+    setEncMenu(false);
+    setTagMenu({ tabId, fromKey, x: Math.max(0, Math.min(x, window.innerWidth - 300)), y: Math.max(0, Math.min(y, window.innerHeight - 140)) });
+  };
+  const tagMenuTitle = (t: Tab, target: AssignTarget | null) =>
+    !target ? "" : target.kind === "file" ? `이 파일(회전 파일 포함)에 태그 지정…` : `이 이름(${t.title})의 파일에 태그…`;
+  const paneTagChips = (t: Tab) => {
+    const ap = appliedTags(t);
+    const own = ap.names.filter((n) => n !== COMMON);
+    if (!own.length) return null;
+    const from = fromWhere(ap.source);
+    return (
+      <span className={logOn(t) ? "mp-tags" : "mp-tags off"} title={`이 칸의 로그 색 태그 — ${from} 에서 (common 은 항상). 눌러서 태그 창`}>
+        🏷
+        {own.map((n) => (
+          <button
+            key={n}
+            className="mp-tag"
+            data-tag={n}
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => setTagsOpen(n)}
+          >
+            {n}
+          </button>
+        ))}
+      </span>
+    );
+  };
   const toggleLogColors = (t: Tab) =>
     setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
 
@@ -2386,7 +2443,7 @@ function App() {
           try {
             const { server, rel } = JSON.parse(raw);
             if (typeof server === "string" && typeof rel === "string") {
-              setFocusSlot(i);
+              focusPane(i);
               switchBundleLog(rel, i, { slot: i, server });
             }
           } catch {
@@ -2476,6 +2533,7 @@ function App() {
           <span className="mp-title" title={t ? t.path || t.title : ""}>
             {t ? (multi.bundle && slot.server && t.label ? t.title : t.label || t.title) : "빈 칸"}
           </span>
+          {t && !t.needsLoad && paneTagChips(t)}
           {findOpen && t && (
             <span className="mp-count" title={slot.mode === "lock" ? "잠긴 칸은 찾지 않습니다" : "이 칸에서 찾은 개수"}>
               🔍 {slot.mode === "lock" ? "—" : n === undefined ? "…" : n > 2000 ? "2000+" : n}
@@ -2770,6 +2828,10 @@ function App() {
             key={t.id}
             className={t.id === activeId ? "tab active" : "tab"}
             onClick={() => setActiveId(t.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              openTagMenu(t.id, e.clientX, e.clientY);
+            }}
             onAuxClick={(e) => {
               if (e.button === 1) {
                 e.preventDefault();
@@ -2827,6 +2889,9 @@ function App() {
                 rotationKey={rotationKey}
                 fmtSize={fmtSize}
                 bigFile={BIG_FILE}
+                pathOf={(server, rel) => bundlePath(bundleScan.root, server, rel)}
+                tagsOf={(target) => placeTags(tagStore, target, multi.bundle)}
+                onAssign={openAssign}
               />
             ) : (
               <button className="bt-show" title="로그 묶음 트리 펼치기" onClick={() => setTreeOpen(true)}>
@@ -2974,10 +3039,21 @@ function App() {
                   return (
                     <button
                       className={logOn(active) ? "st-log st-tags on" : "st-log st-tags"}
-                      title={`이 탭의 로그 색 태그 — ${from}. 눌러서 태그·규칙 고치기`}
+                      title={`이 탭의 로그 색 태그 — ${from}. 눌러서 태그 창 열기 · 이 파일에 태그 지정`}
                       onMouseDown={(e) => {
                         e.stopPropagation();
-                        setTagsOpen(ap.names.find((n) => n !== COMMON) ?? COMMON);
+                        if (tagMenu) {
+                          setTagMenu(null);
+                          return;
+                        }
+                        const r = e.currentTarget.getBoundingClientRect();
+                        openTagMenu(active.id, r.left, r.top - 130);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        const r = e.currentTarget.getBoundingClientRect();
+                        openTagMenu(active.id, r.left, r.top - 130, true);
                       }}
                     >
                       🏷 {ap.names.join(" + ")}
@@ -3236,6 +3312,58 @@ function App() {
         </div>
       )}
 
+
+      {tagMenu &&
+        (() => {
+          const t = tabs.find((x) => x.id === tagMenu.tabId);
+          if (!t) return null;
+          const target = assignTargetOf(t);
+          const ap = appliedTags(t);
+          return (
+            <div
+              className="ctx-menu tag-menu"
+              style={{ left: tagMenu.x, top: tagMenu.y }}
+              onMouseDown={(e) => e.stopPropagation()}
+              ref={(el) => {
+                if (el && tagMenu.fromKey && !el.contains(document.activeElement)) el.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+              }}
+            >
+              <div className="menu-head">🏷 {ap.names.join(" + ")} — {t.title}</div>
+              <button
+                className="menu-item"
+                disabled={!target}
+                title={target ? undefined : "저장한 적 없는 새 파일은 태그를 붙일 수 없습니다"}
+                onClick={() => {
+                  if (target) openAssign(target, t.title, document.querySelector<HTMLElement>(".st-tags"));
+                }}
+              >
+                🏷 {target ? tagMenuTitle(t, target) : "이 파일에 태그 지정…"}
+              </button>
+              <button
+                className="menu-item"
+                onClick={() => {
+                  setTagMenu(null);
+                  setTagsOpen(ap.names.find((n) => n !== COMMON) ?? COMMON);
+                }}
+              >
+                태그 창 열기 (규칙 고치기)
+              </button>
+            </div>
+          );
+        })()}
+
+      {assign && (
+        <TagAssignDialog
+          store={tagStore}
+          target={assign.target}
+          title={assign.title}
+          bundle={multi.bundle}
+          notice={tagsNotice}
+          onApply={setTagStore}
+          onClose={closeAssign}
+          onOpenTags={(n) => setTagsOpen(n)}
+        />
+      )}
 
       {tagsOpen !== null && (
         <TagsDialog
