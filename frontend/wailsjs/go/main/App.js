@@ -14,6 +14,10 @@ export function AutoUpdate() {
   return window['go']['main']['App']['AutoUpdate']();
 }
 
+export function BackupTagsBefore(arg1, arg2) {
+  return window['go']['main']['App']['BackupTagsBefore'](arg1, arg2);
+}
+
 export function CancelChips() {
   return window['go']['main']['App']['CancelChips']();
 }
@@ -28,6 +32,10 @@ export function CloseWithSession(arg1) {
 
 export function ExportTagsDialog(arg1, arg2) {
   return window['go']['main']['App']['ExportTagsDialog'](arg1, arg2);
+}
+
+export function ExportTagsTo(arg1, arg2) {
+  return window['go']['main']['App']['ExportTagsTo'](arg1, arg2);
 }
 
 export function FileAssociationSupported() {
@@ -78,6 +86,10 @@ export function ImportTagsFiles(arg1) {
   return window['go']['main']['App']['ImportTagsFiles'](arg1);
 }
 
+export function ListTagsBackups() {
+  return window['go']['main']['App']['ListTagsBackups']();
+}
+
 export function LoadSession() {
   return window['go']['main']['App']['LoadSession']();
 }
@@ -112,6 +124,10 @@ export function ReadFile(arg1) {
 
 export function ReadFileAs(arg1, arg2) {
   return window['go']['main']['App']['ReadFileAs'](arg1, arg2);
+}
+
+export function ReadTagsBackup(arg1) {
+  return window['go']['main']['App']['ReadTagsBackup'](arg1);
 }
 
 export function RegisterFileTypes(arg1) {

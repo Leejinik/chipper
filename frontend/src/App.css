@@ -1662,3 +1662,59 @@
   margin-top: 8px;
   font-size: 11px;
 }
+/* stage 5 fix (TagsIO.tsx): rule differences, 「붙인 곳도 같이」, backups */
+.tags-io-actions .tags-restore {
+  grid-column: 1 / -1;
+}
+.tags-conflict-diff {
+  margin-top: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.tags-conflict-diff.common {
+  border-color: var(--danger);
+}
+.tags-diff-line {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tags-diff-group {
+  margin-top: 4px;
+}
+.tags-diff-group ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  word-break: break-all;
+}
+.tags-export-assign {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 2px;
+  font-size: 12px;
+}
+.tags-restore-panel {
+  width: min(640px, calc(100% - 40px));
+}
+.tags-restore-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.tags-restore-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.tags-restore-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-all;
+}

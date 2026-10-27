@@ -9,28 +9,43 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // Sharing log colour tags: a tag export file (<name>.chipper-tags.json) holds
-// some tags and their rules — never where they are assigned:
+// some tags and their rules, and — only when the sender ticked 「붙인 곳도
+// 같이」 — where those tags are attached:
 //
 //	{ "format": "chipper-tags", "version": 1, "exported": "2026-10-27T10:00:00Z",
 //	  "tags": [ { "name": "collector",
-//	              "rules": [ { "pattern": "kafka rebalance", "kind": "text", "color": "#c678dd", ... } ] } ] }
+//	              "rules": [ { "id": "k1", "pattern": "kafka rebalance", "kind": "text", "color": "#c678dd", ... } ] } ],
+//	  "assign": { "dir": { "modules/lizcollector": ["collector"] }, "file": {}, "name": {} } }
 //
-// Go reads the envelope (format, version, tag names, rules being a list) and
-// hands the rules on untouched; whether a rule is usable (regex, colour, slow
-// patterns) is decided by the frontend, which owns the rule semantics.
-// A tags.json (version + tags, no format) is read the same way, assign ignored,
-// so someone can share their whole ~/.chipper/tags.json.
+// Go reads the envelope (format, version, limits, tag names, rules being a
+// list, assign's shape) and hands the rest on untouched; whether a rule is
+// usable (regex, colour …) and what of assign is taken is decided by the
+// frontend, which owns the rule semantics and the user's own assignments.
+// A tags.json (version + tags, no format) is read the same way, its assign
+// ignored (its owner did not choose to share it), so someone can share their
+// whole ~/.chipper/tags.json.
 
 const (
 	tagsExportFormat  = "chipper-tags"
 	tagsExportVersion = 1
 	tagsExportExt     = ".chipper-tags.json"
-	maxTagsExportSize = 16 << 20
+)
+
+// Import limits (product rule; the frontend's IMPORT_LIMITS are the same): a
+// file beyond any of them is refused as a whole, with why — so one wrong file
+// cannot make the tag store (and every colouring after it) huge.
+const (
+	maxTagsExportSize = 4 << 20 // bytes
+	maxImportTags     = 1000    // tags in one file
+	maxImportRules    = 2000    // rules in one tag
+	maxImportPattern  = 1000    // characters in one pattern
+	maxImportLabel    = 100     // characters in one label
 )
 
 // TagsImportTag is one importable tag: its name and its rules as written.
@@ -39,15 +54,25 @@ type TagsImportTag struct {
 	Rules []any  `json:"rules"`
 }
 
+// TagsImportAssign is where the file says its tags are attached (keys and
+// names as written; the frontend normalizes them and keeps the user's own).
+type TagsImportAssign struct {
+	Dir  map[string][]string `json:"dir"`
+	File map[string][]string `json:"file"`
+	Name map[string][]string `json:"name"`
+}
+
 // TagsImportFile is what one chosen file yielded. Error = the whole file was
-// refused (nothing in it is used); Problems = tags that were left out.
+// refused (nothing in it is used); Problems = tags (or assign entries) that
+// were left out.
 type TagsImportFile struct {
-	Path     string          `json:"path"`
-	File     string          `json:"file"` // base name, for messages
-	Error    string          `json:"error"`
-	Tags     []TagsImportTag `json:"tags"`
-	Problems []string        `json:"problems"`
-	TagsJSON bool            `json:"tagsJson"` // a tags.json rather than an export file
+	Path     string            `json:"path"`
+	File     string            `json:"file"` // base name, for messages
+	Error    string            `json:"error"`
+	Tags     []TagsImportTag   `json:"tags"`
+	Problems []string          `json:"problems"`
+	TagsJSON bool              `json:"tagsJson"` // a tags.json rather than an export file
+	Assign   *TagsImportAssign `json:"assign"`   // nil = the file says nothing about it
 }
 
 // tagsDialogFilters: tag files first (on Windows the first filter also gives the
@@ -116,7 +141,7 @@ func parseTagsImport(data []byte) TagsImportFile {
 			out.Error = "version 이 1 이상의 정수가 아닙니다: " + clip(string(raw), 20)
 			return out
 		}
-		if int(v) > tagsExportVersion {
+		if int(v) > importMaxVersion(out.TagsJSON) {
 			out.Error = fmt.Sprintf("더 새 버전의 chipper 가 만든 태그 파일입니다 (version %d) — chipper 를 업데이트한 뒤 가져오세요", int(v))
 			return out
 		}
@@ -133,6 +158,10 @@ func parseTagsImport(data []byte) TagsImportFile {
 	}
 	if len(tags) == 0 {
 		out.Error = "태그가 하나도 없습니다"
+		return out
+	}
+	if p := importLimitProblem(tags); p != "" {
+		out.Error = p
 		return out
 	}
 	seen := map[string]bool{}
@@ -169,8 +198,95 @@ func parseTagsImport(data []byte) TagsImportFile {
 		seen[name] = true
 		out.Tags = append(out.Tags, TagsImportTag{Name: name, Rules: rules})
 	}
-	if len(out.Tags) == 0 && out.Error == "" {
+	if len(out.Tags) == 0 {
 		out.Error = "가져올 수 있는 태그가 없습니다"
+		return out
+	}
+	if raw, ok := top["assign"]; ok && !out.TagsJSON && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		out.Assign = parseImportAssign(raw, &out.Problems)
+	}
+	return out
+}
+
+// importMaxVersion: an export file is compared with the export format's
+// version, someone's tags.json with the tag store's (tags.go tagsVersion).
+func importMaxVersion(tagsJSON bool) int {
+	if tagsJSON {
+		return tagsVersion
+	}
+	return tagsExportVersion
+}
+
+// importLimitProblem checks the limits on every tag of the file (also on tags
+// that are left out later for their name); "" when within them.
+func importLimitProblem(tags []json.RawMessage) string {
+	if len(tags) > maxImportTags {
+		return fmt.Sprintf("태그가 너무 많습니다 (%d개, 한 파일에 %d개까지) — 이 파일은 가져오지 않습니다", len(tags), maxImportTags)
+	}
+	for i, rt := range tags {
+		var t struct {
+			Name  any               `json:"name"`
+			Rules []json.RawMessage `json:"rules"`
+		}
+		if json.Unmarshal(rt, &t) != nil {
+			continue // not a tag with a rule list: reported per tag later
+		}
+		who := fmt.Sprintf("%d번째 태그", i+1)
+		if n, ok := t.Name.(string); ok {
+			who = "태그 " + quoteName(n)
+		}
+		if len(t.Rules) > maxImportRules {
+			return fmt.Sprintf("%s 의 규칙이 너무 많습니다 (%d개, 태그 하나에 %d개까지) — 이 파일은 가져오지 않습니다", who, len(t.Rules), maxImportRules)
+		}
+		for j, rr := range t.Rules {
+			var r struct {
+				Pattern any `json:"pattern"`
+				Label   any `json:"label"`
+			}
+			if json.Unmarshal(rr, &r) != nil {
+				continue
+			}
+			if p, ok := r.Pattern.(string); ok && utf8.RuneCountInString(p) > maxImportPattern {
+				return fmt.Sprintf("%s 의 %d번째 규칙: 패턴이 너무 깁니다 (%d자, %d자까지) — 이 파일은 가져오지 않습니다", who, j+1, utf8.RuneCountInString(p), maxImportPattern)
+			}
+			if l, ok := r.Label.(string); ok && utf8.RuneCountInString(l) > maxImportLabel {
+				return fmt.Sprintf("%s 의 %d번째 규칙: 이름표가 너무 깁니다 (%d자, %d자까지) — 이 파일은 가져오지 않습니다", who, j+1, utf8.RuneCountInString(l), maxImportLabel)
+			}
+		}
+	}
+	return ""
+}
+
+// parseImportAssign reads an export file's "assign": { dir|file|name: { key: [names] } }.
+// What has the wrong shape is left out and said in problems; other kinds are ignored.
+func parseImportAssign(raw json.RawMessage, problems *[]string) *TagsImportAssign {
+	var kinds map[string]json.RawMessage
+	if json.Unmarshal(raw, &kinds) != nil || kinds == nil {
+		*problems = append(*problems, "붙인 곳(assign)이 { } 형식이 아니라 뺐습니다")
+		return nil
+	}
+	out := &TagsImportAssign{Dir: map[string][]string{}, File: map[string][]string{}, Name: map[string][]string{}}
+	for _, k := range []struct {
+		name string
+		m    map[string][]string
+	}{{"dir", out.Dir}, {"file", out.File}, {"name", out.Name}} {
+		rk, ok := kinds[k.name]
+		if !ok || bytes.Equal(bytes.TrimSpace(rk), []byte("null")) {
+			continue
+		}
+		var entries map[string]json.RawMessage
+		if json.Unmarshal(rk, &entries) != nil || entries == nil {
+			*problems = append(*problems, fmt.Sprintf("붙인 곳(assign.%s)이 { } 형식이 아니라 뺐습니다", k.name))
+			continue
+		}
+		for key, rv := range entries {
+			var names []string
+			if json.Unmarshal(rv, &names) != nil || names == nil {
+				*problems = append(*problems, fmt.Sprintf("붙인 곳 %s %q: 태그 이름 목록이 아니라 뺐습니다", k.name, clip(key, 60)))
+				continue
+			}
+			k.m[key] = names
+		}
 	}
 	return out
 }
@@ -221,20 +337,74 @@ func readTagsImportFile(path string) TagsImportFile {
 	return out
 }
 
-// exportPath fixes up a path from the save dialog: no extension → the tag file
-// extension; Windows' default-extension quirk ("x..chipper-tags.json") undone.
-// appended reports whether we changed the name (the dialog's own "replace?"
-// question then did not cover the final path).
-func exportPath(p string) (string, bool) {
+// exportPath turns the path the save dialog returned into the file written:
+// always <stem>.chipper-tags.json in lower case, whatever was typed — "x",
+// "x.json", ".json", "x..json" (Windows' default-extension quirk),
+// "x.CHIPPER-TAGS.JSON" — and the same on every OS (GTK adds no extension).
+// changed reports that this is not the path the dialog asked about (its own
+// 「replace?」 question then did not cover the final path).
+func exportPath(p string) (final string, changed bool) {
 	dir, base := filepath.Split(p)
-	if i := strings.Index(strings.ToLower(base), "."+tagsExportExt); i >= 0 && strings.EqualFold(base[i+1:], tagsExportExt) {
-		base = base[:i] + base[i+1:]
-		return dir + base, false
+	hasExt := func(s, ext string) bool { return len(s) >= len(ext) && strings.EqualFold(s[len(s)-len(ext):], ext) }
+	stem := base
+	switch {
+	case hasExt(stem, tagsExportExt):
+		stem = stem[:len(stem)-len(tagsExportExt)]
+	case hasExt(stem, ".json"):
+		stem = stem[:len(stem)-len(".json")]
 	}
-	if !strings.HasSuffix(strings.ToLower(base), ".json") {
-		return p + tagsExportExt, true
+	stem = strings.TrimRight(stem, ". ") // Windows drops trailing dots and spaces anyway
+	if stem == "" {
+		stem = "tags"
 	}
-	return p, false
+	final = dir + stem + tagsExportExt
+	return final, final != p
+}
+
+// exportNeedsConfirm: the final path is not the one the dialog asked about,
+// and a file is already there — unless it is the very same file under another
+// spelling (a case-insensitive file system), which the dialog did ask about.
+func exportNeedsConfirm(asked, final string) bool {
+	if asked == final {
+		return false
+	}
+	fst, err := os.Stat(final)
+	if err != nil {
+		return false // nothing there (anything else: the write says so)
+	}
+	if ast, err := os.Stat(asked); err == nil && os.SameFile(ast, fst) {
+		return false
+	}
+	return true
+}
+
+// isTagsStorePath: p is chipper's own tag store (tags.json or a backup of it)
+// in dataDir — never a place to export to.
+func isTagsStorePath(dataDir, p string) bool {
+	if dataDir == "" || p == "" {
+		return false
+	}
+	for _, n := range append([]string{tagsFileName}, tagsBackups...) {
+		if samePath(p, filepath.Join(dataDir, n)) {
+			return true
+		}
+	}
+	return false
+}
+
+// samePath: the same file (when both exist), else the same cleaned path —
+// ignoring case where file names do (Windows, macOS).
+func samePath(a, b string) bool {
+	if as, err := os.Stat(a); err == nil {
+		if bs, err := os.Stat(b); err == nil {
+			return os.SameFile(as, bs)
+		}
+	}
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // writeTagsExportFile checks that data is a tag export file and writes it
@@ -254,9 +424,17 @@ func writeTagsExportFile(path, data string) error {
 	return atomicWrite(path, []byte(data), 0o644)
 }
 
-// ExportTagsDialog asks where to save a tag export file (defaultName is offered)
-// and writes data there. Returns the path written, "" when canceled.
-func (a *App) ExportTagsDialog(defaultName, data string) (string, error) {
+// TagsExportResult: Path written — or, with Confirm, the path that already
+// holds a file the save dialog did not ask about; nothing is written until the
+// frontend asks the user and calls ExportTagsTo(Path, data).
+type TagsExportResult struct {
+	Path    string `json:"path"`
+	Confirm bool   `json:"confirm"`
+}
+
+// ExportTagsDialog asks where to save a tag export file (defaultName is
+// offered) and writes data there. Path "" when canceled.
+func (a *App) ExportTagsDialog(defaultName, data string) (TagsExportResult, error) {
 	path, err := wruntime.SaveFileDialog(a.ctx, wruntime.SaveDialogOptions{
 		Title:                "태그 내보내기",
 		DefaultFilename:      defaultName,
@@ -264,21 +442,33 @@ func (a *App) ExportTagsDialog(defaultName, data string) (string, error) {
 		CanCreateDirectories: true,
 	})
 	if err != nil {
-		return "", err
+		return TagsExportResult{}, err
 	}
 	if path == "" {
-		return "", nil
+		return TagsExportResult{}, nil
 	}
-	final, appended := exportPath(path)
-	if appended {
-		if _, serr := os.Stat(final); serr == nil {
-			return "", fmt.Errorf("「%s」 파일이 이미 있습니다. 다른 이름으로 다시 내보내세요", filepath.Base(final))
-		}
+	return a.exportTags(path, data, false)
+}
+
+// ExportTagsTo writes the export after the user said yes to replacing the
+// file ExportTagsDialog reported (Confirm). Returns the path written.
+func (a *App) ExportTagsTo(path, data string) (string, error) {
+	r, err := a.exportTags(path, data, true)
+	return r.Path, err
+}
+
+func (a *App) exportTags(asked, data string, confirmed bool) (TagsExportResult, error) {
+	if isTagsStorePath(a.dataDir, asked) {
+		return TagsExportResult{}, errors.New("chipper 의 태그 저장소(tags.json)에는 내보낼 수 없습니다 — 다른 곳을 고르세요")
+	}
+	final, _ := exportPath(asked)
+	if !confirmed && exportNeedsConfirm(asked, final) {
+		return TagsExportResult{Path: final, Confirm: true}, nil
 	}
 	if err := writeTagsExportFile(final, data); err != nil {
-		return "", err
+		return TagsExportResult{}, err
 	}
-	return final, nil
+	return TagsExportResult{Path: final}, nil
 }
 
 // ImportTagsDialog lets the user pick tag files (several at once) and returns
