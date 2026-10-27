@@ -8,7 +8,7 @@ import {
 } from "react";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import type { EditorView } from "@codemirror/view";
+import { EditorView } from "@codemirror/view";
 import { undo, redo, selectAll } from "@codemirror/commands";
 import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
@@ -32,6 +32,8 @@ import {
   type TagStore,
 } from "./logTags";
 import TagsDialog from "./TagsDialog";
+import LinesView from "./LinesView";
+import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import "./App.css";
 import {
   OpenFileDialog,
@@ -103,6 +105,13 @@ interface Tab {
   // share names ("messages" ×3), so they read "server1 · messages".
   label: string;
   logColors: "" | "on" | "off"; // log colouring override; "" = auto (log-like plain text)
+  // 「🏷 태그 줄만」 view of this tab (null = never used). While `lines.on` the
+  // tab shows the filtered lines of the file on disk and is not read into the
+  // editor, so a file too big to open can still be looked at this way.
+  lines: LinesState | null;
+  // The encoding was never decided by reading the file (a tab opened straight
+  // into 「태그 줄만」): the filter detects it, the first read auto-detects.
+  encAuto: boolean;
 }
 
 const ENCODINGS: { id: string; label: string }[] = [
@@ -208,6 +217,14 @@ function fmtSize(n: number): string {
   return n + "B";
 }
 const BIG_FILE = 100 << 20; // warn before opening a log this large
+// What to do with a file that big: read it whole, show only its tag lines
+// (「태그 줄만」 — the Go filter reads the file on disk, nothing is loaded), or not.
+type BigChoice = "lines" | "full" | "cancel";
+const BIG_TEXT =
+  "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n" +
+  "「태그 줄만」은 파일을 열지 않고, 태그 규칙에 걸린 줄과 그 위·아래 줄만 바로 보여 줍니다.";
+// .gz cannot be read into the editor, but the line filter reads it.
+const isGz = (p: string) => /\.(gz|tgz)$/i.test(p);
 
 // Columns of the 6-wide grid each pane spans: 1–3 panes sit in one row; 4 is
 // 2×2; 5 is 3 over 2; 6 is 3×2.
@@ -458,6 +475,8 @@ function makeTab(p: Partial<Tab>): Tab {
     loadError: "",
     label: p.label ?? "",
     logColors: p.logColors ?? "",
+    lines: p.lines ?? null,
+    encAuto: p.encAuto ?? false,
   };
 }
 
@@ -488,6 +507,8 @@ function normalizeTab(raw: any): Tab | null {
     needsLoad: !!raw.needsLoad && typeof raw.path === "string" && raw.path !== "",
     label: typeof raw.label === "string" ? raw.label : "",
     logColors: raw.logColors === "on" || raw.logColors === "off" ? raw.logColors : "",
+    lines: normalizeLines(raw.lines),
+    encAuto: raw.encAuto === true && !!raw.needsLoad,
   });
 }
 
@@ -563,6 +584,10 @@ function App() {
   const tagStoreRef = useRef(tagStore);
   tagStoreRef.current = tagStore;
   const [tagsReady, setTagsReady] = useState<boolean>(false);
+  // The tags as last saved (or loaded): 「태그 줄만」 filters by these, so a tag
+  // or assignment change filters again once it is saved — not on every
+  // keystroke in the tag window.
+  const [filterStore, setFilterStore] = useState<TagStore>(tagStore);
   const tagsReadyRef = useRef(false);
   const tagsReadOnlyRef = useRef(false);
   const [tagsNotice, setTagsNotice] = useState<string>(""); // shown in the tag window
@@ -575,6 +600,8 @@ function App() {
   // Bundles opened recently, newest first (for tagsFor; see Session.bundles).
   const bundleHistory = useRef<BundleRef[]>([]);
   const [tagsOpen, setTagsOpen] = useState<string | null>(null); // tag window, with the tag to select
+  // The big-file question (whole / tag lines only / cancel), answered through `resolve`.
+  const [bigAsk, setBigAsk] = useState<{ title: string; text: string; noLines: boolean; resolve: (c: BigChoice) => void } | null>(null);
   const [treeOpen, setTreeOpen] = useState<boolean>(true); // log bundle tree beside the panes
   const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
   const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
@@ -609,9 +636,24 @@ function App() {
   // view; tab.content is refreshed only when the editor goes away (onFlush) or a
   // save writes it, so typing never copies the whole document.
   const viewsRef = useRef(new Map<string, EditorView>());
+  // 「태그 줄만」 → whole file at a line: the line waits for the tab's editor.
+  const pendingJump = useRef(new Map<string, number>());
+  // Where each tab's 「태그 줄만」 was left (top line), to come back to it.
+  const linesAnchor = useRef(new Map<string, number>());
   const setView = useCallback((id: string, v: EditorView | null) => {
     if (v) viewsRef.current.set(id, v);
     else viewsRef.current.delete(id);
+    const ln = v ? pendingJump.current.get(id) : undefined;
+    if (v && ln) {
+      pendingJump.current.delete(id);
+      requestAnimationFrame(() => {
+        if (!v.dom.isConnected) return;
+        const n = Math.min(Math.max(1, ln), v.state.doc.lines);
+        const pos = v.state.doc.line(n).from;
+        v.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+        v.focus();
+      });
+    }
   }, []);
   // The editor commands act on: the active tab's view (the focused pane).
   const getFocusedView = useCallback(
@@ -745,6 +787,7 @@ function App() {
       }
       setTagStore(store);
       tagStoreRef.current = store;
+      setFilterStore(store);
       if (notes.length) {
         setTagsNotice(notes.join(" "));
         if (alarm) alert(notes.join("\n"));
@@ -883,8 +926,12 @@ function App() {
   const saveTagsNow = useCallback((): Promise<void> => {
     window.clearTimeout(tagsTimer.current);
     const run = async () => {
-      if (!tagsReadyRef.current || tagsReadOnlyRef.current) return;
-      const js = serializeTags(tagStoreRef.current);
+      if (!tagsReadyRef.current) return;
+      const store = tagStoreRef.current;
+      // whatever happens to the save, the line filter follows what is shown
+      setFilterStore((f) => (f === store ? f : store));
+      if (tagsReadOnlyRef.current) return;
+      const js = serializeTags(store);
       if (js === lastSavedTags.current) return;
       lastSavedTags.current = js;
       try {
@@ -988,6 +1035,81 @@ function App() {
     setActiveId(tab.id);
   }, []);
 
+  const askBig = useCallback(
+    (title: string, text: string, noLines = false) =>
+      new Promise<BigChoice>((resolve) => setBigAsk({ title, text, noLines, resolve })),
+    []
+  );
+  const answerBig = (c: BigChoice) => {
+    const b = bigAsk;
+    setBigAsk(null);
+    b?.resolve(c);
+  };
+
+  // A tab showing only the tag lines of a file, without reading it (a file too
+  // big to open, or .gz). A tab already open on the file switches to that view.
+  const openLinesOnly = useCallback((path: string, label: string): string => {
+    const existing = tabsRef.current.find((t) => samePath(t.path, path));
+    if (existing) {
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === existing.id ? { ...t, label: t.label || label, lines: { ...(t.lines ?? DEFAULT_LINES), on: true } } : t
+        )
+      );
+      return existing.id;
+    }
+    const tab = makeTab({
+      title: path.split(/[\\/]/).pop() || path,
+      path,
+      lang: "plaintext",
+      view: "editor",
+      needsLoad: true,
+      encAuto: true,
+      label,
+      lines: { ...DEFAULT_LINES, on: true },
+    });
+    setTabs((prev) => (prev.some((t) => samePath(t.path, path)) ? prev : [...prev, tab]));
+    return tab.id;
+  }, []);
+
+  const setLines = useCallback((id: string, f: (l: LinesState) => LinesState) => {
+    setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, lines: f(t.lines ?? DEFAULT_LINES) } : t)));
+  }, []);
+
+  // From 「태그 줄만」 back to the whole file (at `line` when given). A tab that
+  // was never read is read now — after asking when the file is big; .gz can't.
+  const showWhole = useCallback(
+    async (id: string, line = 0): Promise<boolean> => {
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (!t) return false;
+      if (t.needsLoad && t.path) {
+        if (isGz(t.path)) {
+          alert("압축(.gz) 파일은 전체 보기로 열 수 없습니다 — 「태그 줄만」으로만 볼 수 있습니다.\n전체를 보려면 압축을 풀어서 여세요.");
+          return false;
+        }
+        let size = 0;
+        try {
+          const st = await StatFile(t.path);
+          size = st.exists ? st.size : 0;
+        } catch {
+          /* the read will say */
+        }
+        if (size >= BIG_FILE) {
+          const c = await askBig(
+            `큰 파일입니다 (${t.label || t.title} ${fmtSize(size)})`,
+            "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n큰 파일의 그 줄 주변만 여는 기능은 아직 없습니다.",
+            true
+          );
+          if (c !== "full") return false;
+        }
+      }
+      if (line > 0) pendingJump.current.set(id, line);
+      setLines(id, (l) => ({ ...l, on: false }));
+      return true;
+    },
+    [askBig, setLines]
+  );
+
   const doOpen = useCallback(async () => {
     try {
       const res = await OpenFileDialog();
@@ -1081,6 +1203,30 @@ function App() {
     const skipped: string[] = [];
     const ids: string[] = [];
     let lastId = "";
+    // Too big to read whole (or .gz): ask once for all of them — whole / tag lines only.
+    const linesOnly = new Set<string>();
+    const leaveOut = new Set<string>();
+    const big: { path: string; size: number }[] = [];
+    for (const x of paths) {
+      if (!x || seen.has(x)) continue;
+      if (isGz(x)) {
+        linesOnly.add(x);
+        continue;
+      }
+      try {
+        const st = await StatFile(x);
+        if (st.exists && st.size >= BIG_FILE) big.push({ path: x, size: st.size });
+      } catch {
+        /* ReadFile will say */
+      }
+    }
+    if (big.length) {
+      const c = await askBig(
+        `큰 파일입니다 (${big.map((b) => `${b.path.split(/[\\/]/).pop()} ${fmtSize(b.size)}`).join(", ")})`,
+        BIG_TEXT
+      );
+      for (const b of big) (c === "lines" ? linesOnly : c === "cancel" ? leaveOut : new Set<string>()).add(b.path);
+    }
     for (const path of paths) {
       if (!path) continue;
       const existing = tabsRef.current.find((t) => t.path === path);
@@ -1089,7 +1235,14 @@ function App() {
         ids.push(existing.id);
         continue;
       }
-      if (seen.has(path)) continue; // duplicate within this drop batch
+      if (seen.has(path) || leaveOut.has(path)) continue; // duplicate within this drop batch / not wanted
+      if (linesOnly.has(path)) {
+        const id = openLinesOnly(path, "");
+        seen.add(path);
+        lastId = id;
+        ids.push(id);
+        continue;
+      }
       try {
         const res = await ReadFile(path);
         if (!res) continue;
@@ -1122,7 +1275,7 @@ function App() {
       alert("다음 파일은 열 수 없습니다 (텍스트 문서가 아니거나 읽기 실패):\n- " + skipped.join("\n- "));
     }
     return ids;
-  }, []);
+  }, [askBig, openLinesOnly]);
 
   const doSaveAs = useCallback(async () => {
     const t = getActive();
@@ -1211,8 +1364,9 @@ function App() {
     let res: Awaited<ReturnType<typeof ReadFile>> | null = null;
     let err = "";
     try {
-      // Keep the encoding the tab was using; fall back to auto-detection.
-      res = await ReadFileAs(t.path, t.encoding).catch(() => ReadFile(t.path));
+      // Keep the encoding the tab was using; fall back to auto-detection (and
+      // detect when the tab was never read: opened into 「태그 줄만」).
+      res = t.encAuto ? await ReadFile(t.path) : await ReadFileAs(t.path, t.encoding).catch(() => ReadFile(t.path));
       if (res?.binary) {
         res = null;
         err = "텍스트 파일이 아닙니다.";
@@ -1230,6 +1384,7 @@ function App() {
                 ...x,
                 content: res.content,
                 encoding: res.encoding || x.encoding,
+                encAuto: false,
                 mtime: res.modTime,
                 needsLoad: false,
                 loadError: "",
@@ -1241,9 +1396,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (active && active.needsLoad && !active.loadError) loadTabFromDisk(active);
+    if (active && active.needsLoad && !active.loadError && !active.lines?.on) loadTabFromDisk(active);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active?.id, active?.needsLoad, active?.loadError, loadTabFromDisk]);
+  }, [active?.id, active?.needsLoad, active?.loadError, active?.lines?.on, loadTabFromDisk]);
 
   // --- multi view -----------------------------------------------------------
   // The focused pane's tab is the active tab, so the status bar, save, close and
@@ -1400,14 +1555,14 @@ function App() {
       const targets = (only != null ? [only] : Array.from({ length: m.count }, (_, i) => i)).filter((i) => serverOf(i));
       const picks = targets.map((i) => ({ i, server: serverOf(i), file: resolveInServer(scan, serverOf(i), rel) }));
       const big = picks.filter((x) => x.file && !x.file.compressed && x.file.size >= BIG_FILE);
-      if (
-        big.length &&
-        !window.confirm(
-          `큰 파일이 있습니다 (${big.map((x) => `${x.server} ${fmtSize(x.file!.size)}`).join(", ")}).\n` +
-            "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?"
-        )
-      ) {
-        return;
+      let linesOnly = false; // every pane of this switch shows 「태그 줄만」 (side by side alike)
+      if (big.length) {
+        const c = await askBig(
+          `큰 파일이 있습니다 (${big.map((x) => `${x.server} ${fmtSize(x.file!.size)}`).join(", ")})`,
+          BIG_TEXT
+        );
+        if (c === "cancel" || gen !== bundleGen.current) return;
+        linesOnly = c === "lines";
       }
       const base = rel.split("/").pop() || rel;
       const result = new Map<number, { tabId: string; note: string; server: string }>();
@@ -1420,11 +1575,13 @@ function App() {
       for (const x of picks) {
         let r = { tabId: "", note: "", server: x.server };
         if (!x.file) r.note = `${x.server}에는 ${base} 가 없습니다`;
-        else if (x.file.compressed) r.note = `${x.file.rel} 은 압축 파일이라 열 수 없습니다 (풀어서 여세요)`;
         else {
           let id: string | null = null;
+          const fp = bundlePath(root, x.server, x.file.rel);
+          const label = `${x.server} · ${x.file.rel.split("/").pop()}`;
           try {
-            id = await openOne(bundlePath(root, x.server, x.file.rel), `${x.server} · ${x.file.rel.split("/").pop()}`);
+            // .gz can't be read into the editor; its tag lines can be shown
+            id = linesOnly || x.file.compressed ? openLinesOnly(fp, label) : await openOne(fp, label);
           } catch {
             id = null;
           }
@@ -1463,7 +1620,7 @@ function App() {
       activeIdRef.current = focusId;
       setActiveId(focusId);
     },
-    [openOne, scanBundle]
+    [openOne, scanBundle, askBig, openLinesOnly]
   );
 
   // Point a pane at another server of the bundle, keeping the log it shows.
@@ -1585,7 +1742,7 @@ function App() {
     if (!multi.on) return;
     for (const x of multi.slots.slice(0, multi.count)) {
       const t = tabs.find((y) => y.id === x.tabId);
-      if (t && t.needsLoad && !t.loadError) loadTabFromDisk(t);
+      if (t && t.needsLoad && !t.loadError && !t.lines?.on) loadTabFromDisk(t);
     }
   }, [multi, tabs, loadTabFromDisk]);
 
@@ -1648,6 +1805,11 @@ function App() {
     async (enc: string) => {
       const t = getActive();
       if (!t || !t.path) return;
+      if (t.lines?.on && t.needsLoad) {
+        // 「태그 줄만」 of a file not read: just filter it with that encoding
+        setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, encoding: enc, encAuto: false } : x)));
+        return;
+      }
       if (t.dirty && !window.confirm("저장하지 않은 변경사항이 사라집니다.\n다른 인코딩으로 다시 열까요?")) {
         return;
       }
@@ -1675,6 +1837,7 @@ function App() {
                   ...x,
                   content: res.content,
                   encoding: res.encoding,
+                  encAuto: false,
                   dirty: false,
                   mtime: res.modTime,
                   needsLoad: false,
@@ -2425,6 +2588,63 @@ function App() {
     }
     return r;
   };
+  // 「태그 줄만」 of a tab: filtered by the saved tags (filterStore), coloured
+  // like the editor (live tags).
+  const renderLines = (t: Tab, focused: boolean) => {
+    // not before the tags are read: the default rules would start a scan for nothing
+    if (!tagsReady)
+      return (
+        <div className="empty">
+          <div className="empty-title">불러오는 중…</div>
+        </div>
+      );
+    const ap = tagsFor(filterStore, t.path, bundles);
+    const l = t.lines ?? DEFAULT_LINES;
+    const off = l.off.filter((n) => ap.names.includes(n));
+    return (
+      <LinesView
+        key={t.id + "#lines"}
+        path={t.path}
+        encoding={t.encAuto ? "" : t.encoding}
+        rules={filterRules(filterStore, ap.names, off)}
+        ruleTags={ruleOwners(filterStore, ap.names, off)}
+        tagNames={ap.names}
+        off={off}
+        above={l.above}
+        below={l.below}
+        layers={logOn(t) ? layersForTab(t) : null}
+        fontSize={fontSize}
+        dirty={t.dirty}
+        autoFocus={focused}
+        initialLine={linesAnchor.current.get(t.id) ?? 0}
+        onContext={(above, below) => setLines(t.id, (x) => ({ ...x, above, below }))}
+        onToggleTag={(n) =>
+          setLines(t.id, (x) => ({ ...x, off: x.off.includes(n) ? x.off.filter((y) => y !== n) : [...x.off, n] }))
+        }
+        onJump={(line) => void showWhole(t.id, line)}
+        onFull={() => void showWhole(t.id)}
+        onLeave={(line) => linesAnchor.current.set(t.id, line)}
+      />
+    );
+  };
+  // [전체 | 🏷 줄만] switch of a tab with a file.
+  const linesSeg = (t: Tab) => {
+    const on = !!t.lines?.on;
+    return (
+      <span className="lines-seg" role="group" aria-label="보기">
+        <button className={on ? "" : "on"} title="파일 전체 보기" onClick={() => on && void showWhole(t.id)}>
+          전체
+        </button>
+        <button
+          className={on ? "on" : ""}
+          title="🏷 태그 줄만 — 이 파일에 붙은 태그(common 포함)의 「줄만」 규칙에 걸린 줄과 그 위·아래 줄만. 디스크의 파일을 걸러서 큰 파일도 바로 봅니다"
+          onClick={() => !on && setLines(t.id, (x) => ({ ...x, on: true }))}
+        >
+          🏷 줄만
+        </button>
+      </span>
+    );
+  };
   const toggleLogColors = (t: Tab) =>
     setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
 
@@ -2444,7 +2664,7 @@ function App() {
         onMouseDownCapture={() => {
           if (focusSlotRef.current !== i || activeIdRef.current !== slot.tabId) focusPane(i);
         }}
-        onContextMenu={t && !t.needsLoad ? openCtxMenu : undefined}
+        onContextMenu={t && !t.needsLoad && !t.lines?.on ? openCtxMenu : undefined}
         // A file dragged from the bundle tree opens here, taking this pane to
         // the file's server. Capture phase, so CodeMirror never treats it as
         // text being dropped into the document.
@@ -2496,6 +2716,8 @@ function App() {
                 </button>
               </div>
             </div>
+          ) : t.lines?.on && t.path ? (
+            renderLines(t, focused)
           ) : t.needsLoad ? (
             <div className="empty">
               {t.loadError ? (
@@ -2557,6 +2779,7 @@ function App() {
           <span className="mp-title" title={t ? t.path || t.title : ""}>
             {t ? (multi.bundle && slot.server && t.label ? t.title : t.label || t.title) : "빈 칸"}
           </span>
+          {t && t.path && linesSeg(t)}
           {findOpen && t && (
             <span className="mp-count" title={slot.mode === "lock" ? "잠긴 칸은 찾지 않습니다" : "이 칸에서 찾은 개수"}>
               🔍 {slot.mode === "lock" ? "—" : n === undefined ? "…" : n > 2000 ? "2000+" : n}
@@ -2928,7 +3151,7 @@ function App() {
               </button>
             </div>
           </div>
-        ) : active.needsLoad ? (
+        ) : active.needsLoad && !(active.lines?.on && active.path) ? (
           <div className="empty">
             {active.loadError ? (
               <>
@@ -2954,23 +3177,30 @@ function App() {
               <div
                 className="pane editor-pane"
                 style={split ? { flex: `0 0 ${splitRatio * 100}%` } : { flex: "1 1 0" }}
-                onContextMenu={openCtxMenu}
+                onContextMenu={active.lines?.on ? undefined : openCtxMenu}
               >
                 <div className="pane-head">
-                  소스 · 편집
-                  <span className="pane-hint">Alt+드래그 멀티커서 · Ctrl+D 다음 선택 · 우클릭 메뉴</span>
+                  {active.lines?.on && active.path ? "태그 줄만 · 읽기 전용" : "소스 · 편집"}
+                  {!active.lines?.on && (
+                    <span className="pane-hint">Alt+드래그 멀티커서 · Ctrl+D 다음 선택 · 우클릭 메뉴</span>
+                  )}
+                  {active.path && linesSeg(active)}
                 </div>
-                <CodeEditor
-                  key={active.id + "#" + active.reloadSeq}
-                  initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
-                  lang={active.lang}
-                  fontSize={fontSize}
-                  logRules={logOn(active) ? layersForTab(active) : null}
-                  onDocChanged={() => markEdited(active.id)}
-                  onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
-                  onView={(v) => setView(active.id, v)}
-                  onSelectionChange={onSelectionChange}
-                />
+                {active.lines?.on && active.path ? (
+                  renderLines(active, true)
+                ) : (
+                  <CodeEditor
+                    key={active.id + "#" + active.reloadSeq}
+                    initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
+                    lang={active.lang}
+                    fontSize={fontSize}
+                    logRules={logOn(active) ? layersForTab(active) : null}
+                    onDocChanged={() => markEdited(active.id)}
+                    onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
+                    onView={(v) => setView(active.id, v)}
+                    onSelectionChange={onSelectionChange}
+                  />
+                )}
                 {findOpen && (
                   <FindReplace
                     targets={findTargets}
@@ -3077,7 +3307,7 @@ function App() {
                     setCtxMenu(null);
                   }}
                 >
-                  {encLabel(active.encoding)} ▾
+                  {active.encAuto ? "자동 판별" : encLabel(active.encoding)} ▾
                 </button>
                 {encMenu && (
                   <div className="enc-menu" onMouseDown={(e) => e.stopPropagation()}>
@@ -3318,6 +3548,35 @@ function App() {
       )}
 
 
+      {bigAsk && (
+        <div
+          className="big-ask-back"
+          onKeyDown={(e) => {
+            if (e.key === "Escape") {
+              e.stopPropagation();
+              answerBig("cancel");
+            }
+          }}
+        >
+          <div className="big-ask" role="dialog" aria-modal="true" aria-label={bigAsk.title}>
+            <h3>{bigAsk.title}</h3>
+            <p>{bigAsk.text}</p>
+            <div className="ba-actions">
+              {!bigAsk.noLines && (
+                <button className="tb-btn primary" autoFocus onClick={() => answerBig("lines")}>
+                  🏷 태그 줄만 열기
+                </button>
+              )}
+              <button className="tb-btn" autoFocus={bigAsk.noLines} onClick={() => answerBig("full")}>
+                전체 열기
+              </button>
+              <button className="tb-btn" onClick={() => answerBig("cancel")}>
+                취소
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {tagsOpen !== null && (
         <TagsDialog
           store={tagStore}
