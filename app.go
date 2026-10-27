@@ -1149,6 +1149,8 @@ func (a *App) LoadSession() (SessionLoad, error) {
 		res = a.keepBroken(p, raw, c, false)
 	default:
 		a.saveMu.Lock()
+		// 「normal」 the way the frontend sees it: at least one tab it restores
+		// (an empty or all-junk session has nothing worth a backup slot).
 		a.sessionGood = c.tabs > 0
 		a.saveMu.Unlock()
 		res = SessionLoad{Data: string(raw)}
@@ -1292,9 +1294,17 @@ func checkSession(raw []byte) sessionCheck {
 		Tabs    json.RawMessage `json:"tabs"`
 	}
 	if err := json.Unmarshal(raw, &s); err != nil {
-		c := sessionCheck{reason: "파일이 중간에 끊겼거나 형식이 깨져 있습니다"}
-		c.recovered, c.n = recoverSession(raw)
-		return c
+		rec, n, newer := recoverSession(raw)
+		if newer > sessionFormatVersion {
+			// Cut off, but its "version" was read before the cut: a newer
+			// Chipper's session, not ours to move aside or recover from.
+			return sessionCheck{
+				reason:  fmt.Sprintf("더 새 Chipper 의 세션 형식입니다 (버전 %v, 파일 끝이 잘려 있음)", newer),
+				newer:   true,
+				version: newer,
+			}
+		}
+		return sessionCheck{reason: "파일이 중간에 끊겼거나 형식이 깨져 있습니다", recovered: rec, n: n}
 	}
 	var ver float64
 	if len(s.Version) == 0 || json.Unmarshal(s.Version, &ver) != nil {
@@ -1314,9 +1324,24 @@ func checkSession(raw []byte) sessionCheck {
 	if t := bytes.TrimSpace(s.Tabs); len(t) == 0 || t[0] != '[' || json.Unmarshal(t, &tabs) != nil {
 		return sessionCheck{reason: "탭 목록이 없습니다"}
 	}
-	c := sessionCheck{version: ver, tabs: len(tabs)}
-	for _, t := range tabs {
-		if t.Path != "" || t.Dirty {
+	// Count what the frontend restores (normalizeTab in App.tsx: an object
+	// with a text field), not just array entries: a session of junk tabs is
+	// not a 「normal」 session (.bak rotation) and has nothing to load.
+	var elems []json.RawMessage
+	_ = json.Unmarshal(bytes.TrimSpace(s.Tabs), &elems)
+	c := sessionCheck{version: ver}
+	for i, e := range elems {
+		var t struct {
+			Content json.RawMessage `json:"content"`
+		}
+		if e = bytes.TrimSpace(e); len(e) == 0 || e[0] != '{' || json.Unmarshal(e, &t) != nil {
+			continue
+		}
+		if ct := bytes.TrimSpace(t.Content); len(ct) == 0 || ct[0] != '"' {
+			continue
+		}
+		c.tabs++
+		if i < len(tabs) && (tabs[i].Path != "" || tabs[i].Dirty) {
 			c.work++
 		}
 	}
@@ -1327,11 +1352,11 @@ func checkSession(raw []byte) sessionCheck {
 // from what is complete: the whole tabs, and every other top-level field
 // (active tab, split, font size, shortcuts, log colour rules, multi view) that
 // was written out in full before the cut. Nothing is recovered from a session
-// that says it is a newer format.
-func recoverSession(raw []byte) (string, int) {
+// that says it is a newer format: then newer is that version (else 0).
+func recoverSession(raw []byte) (rec string, n int, newer float64) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
-		return "", 0
+		return "", 0, 0
 	}
 	type field struct {
 		key string
@@ -1348,8 +1373,11 @@ read:
 		switch key, _ := kt.(string); key {
 		case "version":
 			var v float64
-			if err := dec.Decode(&v); err != nil || v > sessionFormatVersion {
-				return "", 0
+			if err := dec.Decode(&v); err != nil {
+				return "", 0, 0
+			}
+			if v > sessionFormatVersion {
+				return "", 0, v
 			}
 		case "tabs":
 			if t, err := dec.Token(); err != nil || t != json.Delim('[') {
@@ -1376,7 +1404,7 @@ read:
 		}
 	}
 	if len(tabs) == 0 {
-		return "", 0
+		return "", 0, 0
 	}
 	var b bytes.Buffer
 	fmt.Fprintf(&b, `{"version":%d,"tabs":[`, sessionFormatVersion)
@@ -1395,7 +1423,7 @@ read:
 		b.Write(f.val)
 	}
 	b.WriteByte('}')
-	return b.String(), len(tabs)
+	return b.String(), len(tabs), 0
 }
 
 // keepBrokenSession puts an unreadable session aside as
