@@ -91,3 +91,11 @@ func (a *App) FilterCancel(jobID string) { a.filters().Cancel(jobID) }
 
 // FilterClose forgets a view (and, when no other view uses it, its scan).
 func (a *App) FilterClose(jobID string) { a.filters().Close(jobID) }
+
+// FilterRowOfLine returns the row of the view (for these above/below) showing
+// file line `line`, or the first row after it — to keep the same place of the
+// file when the context sizes change, and to know which rows to fetch again
+// after lines were appended (progress.version went up).
+func (a *App) FilterRowOfLine(jobID string, above, below int, line int64) (int, error) {
+	return a.filters().RowOfLine(jobID, above, below, line)
+}
