@@ -236,6 +236,7 @@ async function main() {
     ok("칸 3개", (await page.$$(".mpane")).length === 3);
     ok("collector 색 없음", (await spansWith(page, "#dd0001")).length === 0);
     ok("칸 태그 표시 없음", (await paneChips(page)).join("|") === "||", await paneChips(page));
+    ok("칸마다 common 옅은 칩은 항상", (await page.$$eval(".mpane .mp-common", (es) => es.map((e) => e.textContent))).join("|") === "common|common|common");
     ok("트리 줄은 Tab 으로 갈 수 있는 줄이 하나(첫 줄 tabIndex 0)", (await page.$$eval('.bt-row[tabindex="0"]', (es) => es.length)) === 1);
 
     console.log("2. 폴더 지정 → 서버 3대 같은 경로 칸 색");
@@ -342,7 +343,7 @@ async function main() {
     });
     await page.click(row("d:s1/modules/zookeeper"));
     ch = await rowChips(page, "d:s1/modules/zookeeper");
-    ok("zookeeper 폴더는 서버 루트에서 물려받음", ch.length === 1 && ch[0].t === "syslog" && ch[0].title === "서버 폴더 전체 에서 물려받음", ch);
+    ok("zookeeper 폴더는 서버 루트에서 물려받음", ch.length === 1 && ch[0].t === "syslog" && ch[0].title === "서버 폴더 전체에서 물려받음", ch);
     ch = await rowChips(page, "d:s1/modules/lizcollector");
     ok("lizcollector 는 자기 지정이 가까워 collector", ch.length === 1 && ch[0].t === "collector", ch);
     ch = await rowChips(page, "f:s1/messages");
@@ -485,7 +486,7 @@ async function main() {
     ({ ctx, page } = await openPage(browser, url, be));
     await sleep(500);
     const p11 = await paneSpans(page, "#dd0001");
-    ok("다시 켜도 collector 색 (3칸)", p11.filter((x) => x.includes("kafka rebalance")).length >= 2, p11);
+    ok("다시 켜도 collector 색 (3칸)", p11.length === 3 && p11.every((x) => x.includes("kafka rebalance")), p11);
     await page.click(row("d:s1/modules"));
     ch = await rowChips(page, "d:s1/modules/lizcollector");
     ok("다시 켜도 트리 칩", ch.length === 1 && ch[0].t === "collector", ch);
