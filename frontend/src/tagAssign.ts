@@ -1,4 +1,4 @@
-import { COMMON, rotationKey, tagsFor, type BundleRef, type TagSource, type TagStore } from "./logTags";
+import { COMMON, addTag, rotationKey, tagsFor, type BundleRef, type TagSource, type TagStore } from "./logTags";
 
 // Assigning tags to places (tree right-click, tab menu, status bar 🏷).
 //
@@ -79,6 +79,49 @@ export function targetForPath(path: string, bundleRel: { rel: string } | null): 
   if (bundleRel) return { kind: "file", key: rotationKey(bundleRel.rel), path };
   const base = path.split(/[\\/]/).pop() || "";
   return base ? { kind: "name", key: rotationKey(base), path } : null;
+}
+
+// Assignment target of the folder an open bundle file lies in ("" = the
+// server folder itself). null outside a bundle or for a tab without a path.
+export function folderTargetForPath(path: string, bundleRel: { rel: string } | null): AssignTarget | null {
+  if (!path || !bundleRel) return null;
+  const cut = bundleRel.rel.lastIndexOf("/");
+  return { kind: "dir", key: cut < 0 ? "" : bundleRel.rel.slice(0, cut), path: path.replace(/[^\\/]*$/, PROBE) };
+}
+
+// What the assign window decided, applied to the store as it is when 확인 is
+// pressed (not to the copy the window opened with): only the new tags it made
+// and this one place change.
+export interface AssignChange {
+  target: AssignTarget;
+  created: string[]; // tags made in the window, in order
+  names: string[] | null; // as setAssign
+}
+export function applyAssignChange(store: TagStore, c: AssignChange, bundle: BundleRef | null | undefined): TagStore {
+  let s = store;
+  for (const n of c.created) if (!s.tags.some((t) => t.name === n)) s = addTag(s, n);
+  return setAssign(s, c.target, bundle, c.names);
+}
+
+// placeTags with a cache for one store + bundle: the tree asks for every
+// line it draws, and the same answer object lets unchanged lines skip redraws.
+export function cachedPlaceTags(store: TagStore, bundle: BundleRef | null | undefined): (t: AssignTarget) => PlaceTags {
+  const cache = new Map<string, PlaceTags>();
+  return (t) => {
+    const k = t.kind + "\u0000" + t.key + "\u0000" + t.path;
+    let v = cache.get(k);
+    if (!v) {
+      v = placeTags(store, t, bundle);
+      cache.set(k, v);
+    }
+    return v;
+  };
+}
+
+// "서버 폴더 전체" → "서버 폴더 전체에서", "modules/x" → "modules/x 에서":
+// the particle sits right after a Korean word, after a space behind a path.
+export function withEseo(phrase: string): string {
+  return /[\uac00-\ud7a3]$/.test(phrase) ? phrase + "에서" : phrase + " 에서";
 }
 
 // "modules/lizcollector/collector.log.*" → "modules/lizcollector/collector.log"

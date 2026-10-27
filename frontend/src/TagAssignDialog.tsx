@@ -1,10 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { COMMON, addTag, normalizeTagName, tagNameProblem, type BundleRef, type TagStore } from "./logTags";
-import { fromWhere, placeTags, setAssign, targetSentence, type AssignTarget } from "./tagAssign";
+import { fromWhere, placeTags, targetSentence, withEseo, type AssignChange, type AssignTarget } from "./tagAssign";
 
 // Small window to put tags on one place: a bundle folder / server root / file
 // series (tree right-click) or a file name outside a bundle (tab menu, status
 // bar 🏷). Applies on 확인; 취소/Esc leaves everything as it was.
+// 확인 hands back only what changed here (new tags + this place), which the
+// app applies to the store as it is then — never this window's old copy.
+// Modal: Tab stays inside; on close the opener gets the focus back (App).
 
 type Mode = "list" | "inherit" | "none";
 
@@ -14,19 +17,25 @@ interface Props {
   title: string; // what was right-clicked ("lizcollector", "collector.log", "s1 서버")
   bundle: BundleRef | null;
   notice: string;
-  onApply: (s: TagStore) => void;
+  onApply: (c: AssignChange) => void;
   onClose: () => void;
   onOpenTags: (name: string) => void; // open the tag window at this tag (after applying)
 }
 
 export default function TagAssignDialog({ store, target, title, bundle, notice, onApply, onClose, onOpenTags }: Props) {
   const cur = useMemo(() => placeTags(store, target, bundle), [store, target, bundle]);
-  const [draft, setDraft] = useState<TagStore>(store);
   const [mode, setMode] = useState<Mode>(cur.direct === undefined ? "inherit" : cur.direct.length ? "list" : "none");
   const [checked, setChecked] = useState<string[]>(cur.direct ?? []);
+  const [created, setCreated] = useState<string[]>([]); // tags made here
+  // the live store plus the tags made here (applied only on 확인)
+  const draft = useMemo(
+    () => created.reduce<TagStore>((s, n) => (s.tags.some((t) => t.name === n) ? s : addTag(s, n)), store),
+    [store, created]
+  );
   const [newName, setNewName] = useState("");
   const [err, setErr] = useState("");
   const boxRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
 
   const others = draft.tags.filter((t) => t.name !== COMMON);
   const kindWord = target.kind === "dir" ? (target.key === "" ? "이 서버 폴더" : "이 폴더") : target.kind === "file" ? "이 파일" : "이 이름";
@@ -38,6 +47,19 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
     const el = boxRef.current?.querySelector<HTMLElement>(".ta-tag input, .ta-new input");
     el?.focus();
   }, []);
+  // focus that lands outside the window (it is modal) goes back inside
+  useEffect(() => {
+    const back = (e: FocusEvent) => {
+      const box = boxRef.current;
+      if (box && e.target instanceof Node && !box.contains(e.target)) tabbables()[0]?.focus();
+    };
+    document.addEventListener("focusin", back);
+    return () => document.removeEventListener("focusin", back);
+  }, []);
+  const tabbables = () =>
+    [...(boxRef.current?.querySelectorAll<HTMLElement>("input:not(:disabled), button:not(:disabled), select, textarea, [tabindex]:not([tabindex='-1'])") ?? [])].filter(
+      (el) => !(el instanceof HTMLInputElement && el.type === "radio" && !el.checked) && el.offsetParent !== null
+    );
 
   const result = (): string[] | null => {
     if (mode === "none") return [];
@@ -45,7 +67,7 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
     return null; // nothing checked = follow the folder above
   };
   const apply = (thenOpen?: string) => {
-    onApply(setAssign(draft, target, bundle, result()));
+    onApply({ target, created, names: result() });
     onClose();
     if (thenOpen) onOpenTags(thenOpen);
   };
@@ -55,6 +77,17 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
       e.preventDefault();
       e.stopPropagation();
       onClose();
+    } else if (e.key === "Tab") {
+      // keep Tab inside the window: wrap at both ends
+      const els = tabbables();
+      if (!els.length) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      const at = document.activeElement;
+      if (e.shiftKey ? at === first || !boxRef.current?.contains(at) : at === last) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
     } else if (e.key === "Enter" && !(e.target as HTMLElement).closest(".ta-new") && (e.target as HTMLElement).tagName !== "BUTTON") {
       e.preventDefault();
       apply();
@@ -73,7 +106,7 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
       setErr(p);
       return;
     }
-    setDraft(addTag(draft, name));
+    setCreated([...created, name]);
     setChecked([...checked, name]);
     setMode("list");
     setNewName("");
@@ -83,11 +116,11 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
   const now =
     cur.direct === undefined
       ? cur.inherited
-        ? `지금: ${fromWhere(cur.from)} 에서 물려받는 중 — ${cur.effective.join(", ") || "(태그 없음)"}`
+        ? `지금: ${withEseo(fromWhere(cur.from))} 물려받는 중 — ${cur.effective.join(", ") || "(태그 없음)"}`
         : "지금: 붙은 태그 없음 (common 만)"
       : cur.direct.length
         ? `지금: ${kindWord}에 직접 지정 — ${cur.direct.join(", ")}`
-        : `지금: ${kindTopic} 태그 없음으로 지정 (위 폴더 태그를 물려받지 않음)`;
+        : `지금: ${kindTopic} 태그 없음으로 지정 (위 폴더 태그를 물려받지 않음, common 은 그대로 적용)`;
   const inheritedNames = cur.direct === undefined ? cur.effective : [];
   const parentTags = target.kind === "file" ? (cur.direct === undefined ? cur.effective : cur.overrides) : [];
 
@@ -97,11 +130,12 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
         ref={boxRef}
         className="keys-dialog tag-assign"
         role="dialog"
-        aria-label="태그 지정"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onMouseDown={(e) => e.stopPropagation()}
         onKeyDown={onKey}
       >
-        <div className="chips-title">🏷 태그 지정 — {title}</div>
+        <div className="chips-title" id={titleId}>🏷 태그 지정 — {title}</div>
         <div className="ta-where">{targetSentence(target)}</div>
         <div className="ta-now">{now}</div>
         {target.kind === "file" && parentTags.length > 0 && (
@@ -114,7 +148,7 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
           <label className="ta-row ta-common" title="common 은 모든 로그에 항상 쓰여 고를 필요가 없습니다">
             <input type="checkbox" checked disabled />
             <span className="ta-name">common</span>
-            <span className="ta-note">항상 적용</span>
+            <span className="ta-note">항상 적용 — 「태그 없음」이어도 남습니다</span>
           </label>
           {others.length === 0 && <div className="tags-place dim">아직 만든 태그가 없습니다. 아래에서 새 태그를 만드세요.</div>}
           {others.map((t) => (
@@ -182,7 +216,9 @@ export default function TagAssignDialog({ store, target, title, bundle, notice, 
               }}
             />
             {kindTopic} 태그 없음
-            <span className="ta-note">{target.kind === "name" ? " (common 만)" : " (위 폴더 태그를 물려받지 않음, common 만)"}</span>
+            <span className="ta-note">
+              {target.kind === "name" ? " (common 은 그대로 적용)" : " (위 폴더 태그를 물려받지 않음 — common 은 그대로 적용)"}
+            </span>
           </label>
         </div>
         <div className="chips-sub">여러 태그를 고르면 목록 위쪽 태그가 먼저 칠합니다(같은 글자에 걸리면 위쪽이 이김).</div>

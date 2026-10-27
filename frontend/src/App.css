@@ -1420,6 +1420,58 @@
   border-color: #d19a3a;
   color: #d19a3a;
 }
+/* every line has the same height: a big tree draws only the lines in view
+   (ROW_H in BundleTree.tsx) */
+.bundle-tree .bt-row {
+  height: 21px;
+  box-sizing: border-box;
+  flex: none;
+}
+.bt-gap {
+  flex: none;
+}
+/* common applies everywhere: a faint chip, so what is in effect is visible */
+.bt-common {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: normal;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  opacity: 0.55;
+}
+.mp-common {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 8px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+.mp-common:hover {
+  opacity: 1;
+  color: var(--text);
+}
+.bt-save-warn {
+  color: var(--danger);
+}
+.st-tags-warn {
+  background: none;
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  color: var(--danger);
+  font-size: 11px;
+  padding: 0 5px;
+  margin-left: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
 .mp-tags {
   flex: 0 0.3 auto; /* keeps the first tag readable; the file name gives way first */
   min-width: 0;

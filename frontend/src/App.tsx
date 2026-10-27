@@ -34,7 +34,16 @@ import {
 } from "./logTags";
 import TagsDialog from "./TagsDialog";
 import TagAssignDialog from "./TagAssignDialog";
-import { placeTags, targetForPath, fromWhere, type AssignTarget } from "./tagAssign";
+import TagMenu from "./TagMenu";
+import {
+  applyAssignChange,
+  cachedPlaceTags,
+  folderTargetForPath,
+  fromWhere,
+  targetForPath,
+  withEseo,
+  type AssignTarget,
+} from "./tagAssign";
 import "./App.css";
 import {
   OpenFileDialog,
@@ -632,6 +641,7 @@ function App() {
   const [assign, setAssign] = useState<{ target: AssignTarget; title: string } | null>(null);
   const assignReturn = useRef<HTMLElement | null>(null);
   const [tagMenu, setTagMenu] = useState<{ x: number; y: number; tabId: string; fromKey: boolean } | null>(null);
+  const tagMenuReturn = useRef<HTMLElement | null>(null); // what opened the 🏷 menu (tab / status bar 🏷)
   const [canInClause, setCanInClause] = useState<boolean>(false);
   const onSelectionChange = useCallback((text: string) => {
     setCanInClause(tokenizeList(text).ok);
@@ -2459,6 +2469,7 @@ function App() {
   // bundle, else its file name. null for a tab without a path.
   const assignTargetOf = (t: Tab): AssignTarget | null => targetForPath(t.path, bundleRel(t.path, multi.bundle));
   const openAssign = (target: AssignTarget, title: string, returnFocus: HTMLElement | null) => {
+    if (!tagsReadyRef.current) return; // tags.json not read yet
     assignReturn.current = returnFocus;
     setTagMenu(null);
     setAssign({ target, title });
@@ -2470,21 +2481,41 @@ function App() {
     if (el && el.isConnected) requestAnimationFrame(() => el.focus());
   };
   // The 🏷 menu of a tab (tab right-click, status bar 🏷).
-  const openTagMenu = (tabId: string, x: number, y: number, fromKey = false) => {
+  const openTagMenu = (tabId: string, x: number, y: number, fromKey: boolean, opener: HTMLElement | null) => {
+    tagMenuReturn.current = opener;
     setCtxMenu(null);
     setEncMenu(false);
     setTagMenu({ tabId, fromKey, x: Math.max(0, Math.min(x, window.innerWidth - 300)), y: Math.max(0, Math.min(y, window.innerHeight - 140)) });
   };
-  const tagMenuTitle = (t: Tab, target: AssignTarget | null) =>
-    !target ? "" : target.kind === "file" ? `이 파일(회전 파일 포함)에 태그 지정…` : `이 이름(${t.title})의 파일에 태그…`;
+  const closeTagMenu = (refocus: boolean) => {
+    setTagMenu(null);
+    const el = tagMenuReturn.current;
+    if (refocus && el && el.isConnected) el.focus();
+  };
+  // Why the last tag change is not on disk ("" = saved): shown in the status
+  // bar and above the tree, since the assign window closes on 확인.
+  const tagsSaveProblem = tagsNotice.startsWith("태그 저장 실패")
+    ? "태그 저장 실패 — 바꾼 태그·지정이 파일에 저장되지 않았습니다 (다시 켜면 사라짐)"
+    : tagsReadOnlyRef.current && tagsReady
+      ? "태그 파일에 저장하지 않는 중 — 바꾼 태그·지정은 다시 켜면 사라집니다"
+      : "";
+  const treeTagsOf = useMemo(() => cachedPlaceTags(tagStore, multi.bundle), [tagStore, multi.bundle]);
   const paneTagChips = (t: Tab) => {
     const ap = appliedTags(t);
     const own = ap.names.filter((n) => n !== COMMON);
-    if (!own.length) return null;
-    const from = fromWhere(ap.source);
+    const from = own.length ? `${withEseo(fromWhere(ap.source))} + common` : "붙은 태그 없음, common 만";
     return (
-      <span className={logOn(t) ? "mp-tags" : "mp-tags off"} title={`이 칸의 로그 색 태그 — ${from} 에서 (common 은 항상). 눌러서 태그 창`}>
+      <span className={logOn(t) ? "mp-tags" : "mp-tags off"} title={`이 칸의 로그 색 태그 — ${from} (common 은 항상 적용). 눌러서 태그 창`}>
         🏷
+        <button
+          className="mp-common"
+          data-tag={COMMON}
+          title="common — 모든 로그에 항상 적용"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={() => setTagsOpen(COMMON)}
+        >
+          {COMMON}
+        </button>
         {own.map((n) => (
           <button
             key={n}
@@ -2925,10 +2956,11 @@ function App() {
           <div
             key={t.id}
             className={t.id === activeId ? "tab active" : "tab"}
+            tabIndex={-1}
             onClick={() => setActiveId(t.id)}
             onContextMenu={(e) => {
               e.preventDefault();
-              openTagMenu(t.id, e.clientX, e.clientY);
+              openTagMenu(t.id, e.clientX, e.clientY, false, e.currentTarget);
             }}
             onAuxClick={(e) => {
               if (e.button === 1) {
@@ -2988,8 +3020,10 @@ function App() {
                 fmtSize={fmtSize}
                 bigFile={BIG_FILE}
                 pathOf={(server, rel) => bundlePath(bundleScan.root, server, rel)}
-                tagsOf={(target) => placeTags(tagStore, target, multi.bundle)}
+                tagsOf={treeTagsOf}
                 onAssign={openAssign}
+                canAssign={tagsReady}
+                saveProblem={tagsSaveProblem}
               />
             ) : (
               <button className="bt-show" title="로그 묶음 트리 펼치기" onClick={() => setTreeOpen(true)}>
@@ -3145,19 +3179,32 @@ function App() {
                           return;
                         }
                         const r = e.currentTarget.getBoundingClientRect();
-                        openTagMenu(active.id, r.left, r.top - 130);
+                        openTagMenu(active.id, r.left, r.top - 160, false, e.currentTarget);
                       }}
                       onKeyDown={(e) => {
                         if (e.key !== "Enter" && e.key !== " ") return;
                         e.preventDefault();
+                        if (e.repeat || tagMenu) return;
                         const r = e.currentTarget.getBoundingClientRect();
-                        openTagMenu(active.id, r.left, r.top - 130, true);
+                        openTagMenu(active.id, r.left, r.top - 160, true, e.currentTarget);
                       }}
                     >
                       🏷 {ap.names.join(" + ")}
                     </button>
                   );
                 })()}
+                {tagsSaveProblem && (
+                  <button
+                    className="st-tags-warn"
+                    title={tagsNotice || tagsSaveProblem}
+                    onMouseDown={(e) => {
+                      e.stopPropagation();
+                      setTagsOpen(COMMON);
+                    }}
+                  >
+                    ⚠ {tagsSaveProblem.startsWith("태그 저장 실패") ? "태그 저장 실패" : "태그 저장 안 함"}
+                  </button>
+                )}
               </span>
               <span className="st-lang">{langLabel(active.lang)}</span>
               <span className="st-enc-wrap">
@@ -3415,38 +3462,56 @@ function App() {
         (() => {
           const t = tabs.find((x) => x.id === tagMenu.tabId);
           if (!t) return null;
+          const br = bundleRel(t.path, multi.bundle);
           const target = assignTargetOf(t);
+          const folder = folderTargetForPath(t.path, br);
           const ap = appliedTags(t);
+          const notReady = tagsReady ? undefined : "태그 파일을 읽는 중입니다";
+          const items = [
+            {
+              label: !target
+                ? "🏷 이 파일에 태그 지정…"
+                : target.kind === "file"
+                  ? "🏷 이 파일(회전 파일 포함)에 태그 지정…"
+                  : `🏷 이 이름(${t.title})의 파일에 태그…`,
+              disabled: !target || !tagsReady,
+              title: target ? notReady : "저장한 적 없는 새 파일은 태그를 붙일 수 없습니다",
+              onSelect: () => {
+                if (target) openAssign(target, t.title, tagMenuReturn.current);
+              },
+            },
+            ...(folder && br
+              ? [
+                  {
+                    label: folder.key === "" ? "🏷 이 서버 폴더 전체에 태그 지정…" : `🏷 이 폴더(${folder.key})에 태그 지정…`,
+                    disabled: !tagsReady,
+                    title: notReady ?? `모든 서버의 ${folder.key === "" ? "서버 폴더 전체" : folder.key + " 폴더"}에 걸립니다`,
+                    onSelect: () =>
+                      openAssign(
+                        folder,
+                        folder.key === "" ? `${br.server} 서버 폴더 전체` : folder.key.slice(folder.key.lastIndexOf("/") + 1),
+                        tagMenuReturn.current
+                      ),
+                  },
+                ]
+              : []),
+            {
+              label: "태그 창 열기 (규칙 고치기)",
+              onSelect: () => {
+                setTagMenu(null);
+                setTagsOpen(ap.names.find((n) => n !== COMMON) ?? COMMON);
+              },
+            },
+          ];
           return (
-            <div
-              className="ctx-menu tag-menu"
-              style={{ left: tagMenu.x, top: tagMenu.y }}
-              onMouseDown={(e) => e.stopPropagation()}
-              ref={(el) => {
-                if (el && tagMenu.fromKey && !el.contains(document.activeElement)) el.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
-              }}
-            >
-              <div className="menu-head">🏷 {ap.names.join(" + ")} — {t.title}</div>
-              <button
-                className="menu-item"
-                disabled={!target}
-                title={target ? undefined : "저장한 적 없는 새 파일은 태그를 붙일 수 없습니다"}
-                onClick={() => {
-                  if (target) openAssign(target, t.title, document.querySelector<HTMLElement>(".st-tags"));
-                }}
-              >
-                🏷 {target ? tagMenuTitle(t, target) : "이 파일에 태그 지정…"}
-              </button>
-              <button
-                className="menu-item"
-                onClick={() => {
-                  setTagMenu(null);
-                  setTagsOpen(ap.names.find((n) => n !== COMMON) ?? COMMON);
-                }}
-              >
-                태그 창 열기 (규칙 고치기)
-              </button>
-            </div>
+            <TagMenu
+              x={tagMenu.x}
+              y={tagMenu.y}
+              head={`🏷 ${ap.names.join(" + ")} — ${t.title}`}
+              items={items}
+              fromKey={tagMenu.fromKey}
+              onClose={closeTagMenu}
+            />
           );
         })()}
 
@@ -3457,7 +3522,11 @@ function App() {
           title={assign.title}
           bundle={multi.bundle}
           notice={tagsNotice}
-          onApply={setTagStore}
+          onApply={(c) => {
+            const next = applyAssignChange(tagStoreRef.current, c, multi.bundle);
+            setTagStore(next);
+            void saveTagsWith(next); // now, so a failure shows at once
+          }}
           onClose={closeAssign}
           onOpenTags={(n) => setTagsOpen(n)}
         />
