@@ -50,6 +50,10 @@ export function LoadSession() {
   return window['go']['main']['App']['LoadSession']();
 }
 
+export function LoadTags() {
+  return window['go']['main']['App']['LoadTags']();
+}
+
 export function MarkReleaseNotesSeen() {
   return window['go']['main']['App']['MarkReleaseNotesSeen']();
 }
@@ -92,6 +96,10 @@ export function SaveFileDialog(arg1, arg2, arg3) {
 
 export function SaveSession(arg1) {
   return window['go']['main']['App']['SaveSession'](arg1);
+}
+
+export function SaveTags(arg1) {
+  return window['go']['main']['App']['SaveTags'](arg1);
 }
 
 export function ScanBundle(arg1) {

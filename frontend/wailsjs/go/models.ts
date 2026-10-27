@@ -162,6 +162,28 @@ export namespace main {
 	        this.size = source["size"];
 	    }
 	}
+	export class TagsLoad {
+	    data: string;
+	    exists: boolean;
+	    restored: boolean;
+	    broken: string;
+	    problem: string;
+	    newer: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new TagsLoad(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.data = source["data"];
+	        this.exists = source["exists"];
+	        this.restored = source["restored"];
+	        this.broken = source["broken"];
+	        this.problem = source["problem"];
+	        this.newer = source["newer"];
+	    }
+	}
 
 }
 
