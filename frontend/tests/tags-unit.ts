@@ -68,6 +68,8 @@ const risky = [
   "(foo|f)+",
   "(A|a)+", // case-insensitive overlap counts too
   "x(a|aa){3,}y",
+  "(a+){5}",
+  "((\\d{1,3}\\.){3})+",
   "((a|aa))+", // ambiguous alternation nested in a repeated group
   "((ab|a)c)+", // not actually slow, but refused on the safe side
 ];
@@ -86,6 +88,9 @@ const safe = [
   "x{",
   "(error|warn)\\b",
   "(?<=x)(a|b)+",
+  "\\b(\\d{1,3}\\.){3}\\d{1,3}\\b", // IP address: small bounded repeat
+  "(a|aa){3}",
+  "(\\w+\\s){1,4}",
 ];
 for (const p of safe) eq(`riskyRegex(${p}) safe`, riskyRegex(p), false);
 for (const r of DEFAULT_LOG_RULES) eq(`default rule ${r.id} not risky`, riskyRegex(r.pattern), false);

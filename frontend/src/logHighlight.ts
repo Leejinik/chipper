@@ -104,7 +104,9 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 //   - it contains a repeat:            (a+)+  (\w*)*  (x|y+){2,}
 //   - or its alternatives can overlap: (a|aa)+$  (a|ab)*  (.|x)+  (a?b|b)+
 // Colouring runs on the UI thread with no way to interrupt a regex, so such
-// rules are refused. Overlap is judged on each alternative's first token and
+// rules are refused. A small bounded repeat of the group ({2}, {1,4}) can't
+// blow up and is allowed — IP addresses are written (\d{1,3}\.){3}\d{1,3}.
+// Overlap is judged on each alternative's first token and
 // errs on the safe side: a class, ".", an escape class like \d, a nested group,
 // an optional first token or an empty alternative counts as overlapping.
 export function riskyRegex(src: string): boolean {
@@ -134,19 +136,20 @@ export function riskyRegex(src: string): boolean {
       }
     return false;
   };
-  // Quantifier at src[i]: [its length, can repeat more than once] or null.
-  const quant = (i: number): [number, boolean] | null => {
+  // Quantifier at src[i]: [its length, most repeats] or null.
+  const quant = (i: number): [number, number] | null => {
     const c = src[i];
-    if (c === "*" || c === "+") return [1, true];
-    if (c === "?") return [1, false];
+    if (c === "*" || c === "+") return [1, Infinity];
+    if (c === "?") return [1, 1];
     if (c === "{") {
       const m = /^\{(\d*)(,?)(\d*)\}/.exec(src.slice(i));
       if (!m || (m[1] === "" && m[3] === "")) return null; // a literal "{"
       const max = m[2] ? (m[3] === "" ? Infinity : Number(m[3])) : Number(m[1]);
-      return [m[0].length, max > 1];
+      return [m[0].length, max];
     }
     return null;
   };
+  const SMALL_BOUND = 4; // (..){n,m} with m <= this backtracks at most k^4 ways
   for (let i = 0; i < src.length; i++) {
     const c = src[i];
     if (c === "\\") {
@@ -189,9 +192,9 @@ export function riskyRegex(src: string): boolean {
       if (!f) continue;
       f.firsts.push(f.cur ?? "any");
       const q = quant(i + 1);
-      const repeated = !!q && q[1];
+      const repeated = !!q && q[1] > 1;
       const ambiguous = f.firsts.length > 1 && overlap(f.firsts);
-      if (repeated && (f.inner || ambiguous)) return true;
+      if (q && q[1] > SMALL_BOUND && (f.inner || ambiguous)) return true;
       const p = top();
       if (p) {
         // an ambiguous alternation inside a repeated group, ((a|aa))+, is as
@@ -209,7 +212,7 @@ export function riskyRegex(src: string): boolean {
     if (q) {
       const f = top();
       if (f) {
-        if (q[1]) f.inner = true;
+        if (q[1] > 1) f.inner = true;
         if (f.justFirst) f.cur = "any"; // optional / repeated first token
         f.justFirst = false;
       }
