@@ -166,6 +166,7 @@ export namespace main {
 	    data: string;
 	    exists: boolean;
 	    restored: boolean;
+	    restoredFrom: string;
 	    broken: string;
 	    problem: string;
 	    newer: boolean;
@@ -179,6 +180,7 @@ export namespace main {
 	        this.data = source["data"];
 	        this.exists = source["exists"];
 	        this.restored = source["restored"];
+	        this.restoredFrom = source["restoredFrom"];
 	        this.broken = source["broken"];
 	        this.problem = source["problem"];
 	        this.newer = source["newer"];
