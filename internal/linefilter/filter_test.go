@@ -764,7 +764,12 @@ func TestValidate(t *testing.T) {
 		t.Fatalf("%+v", is)
 	}
 	for _, i := range is {
-		if !strings.HasPrefix(i.Reason, "줄만 보기에서 쓸 수 없음: ") {
+		// the plan's wording; a text rule is not a regex
+		want := "줄만 보기에서는 쓸 수 없는 정규식: "
+		if i.Index == 2 {
+			want = "줄만 보기에서는 쓸 수 없는 규칙: "
+		}
+		if !strings.HasPrefix(i.Reason, want) {
 			t.Fatalf("reason %q", i.Reason)
 		}
 		if strings.Contains(i.Reason, "error parsing") {

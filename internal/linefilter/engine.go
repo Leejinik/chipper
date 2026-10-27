@@ -68,6 +68,13 @@ type StartResult struct {
 }
 
 // Progress is the "linefilter:progress" event payload and FilterStatus result.
+//
+// Changed contract: a change is noticed from the file's size and modification
+// time (then a fingerprint of its head and end). A rewrite that keeps both the
+// size and the modification time (a tool that restores the time stamp, or a
+// file system with a coarse clock rewriting within one tick) is NOT reported;
+// the rows then mix old line positions with new bytes. Such a file has to be
+// filtered again by the caller.
 type Progress struct {
 	JobID        string  `json:"jobId"`
 	Phase        string  `json:"phase"`        // "scan" | "append" (filtering lines added to the file) | "done"
@@ -83,7 +90,7 @@ type Progress struct {
 	Done         bool    `json:"done"`
 	Truncated    bool    `json:"truncated"` // stopped at MaxRows+1 matched lines; the rest of the file was not scanned
 	Canceled     bool    `json:"canceled"`
-	Changed      bool    `json:"changed"` // the file's content changed (not just appended): start again
+	Changed      bool    `json:"changed"` // the file's content changed (not just appended): start again (limit: see above)
 	Error        string  `json:"error,omitempty"`
 	TotalLines   int64   `json:"totalLines"`          // lines in the file (editor count); 0 until known (done and not truncated)
 	SlowRules    []int   `json:"slowRules,omitempty"` // request rule indexes too complex for the fast matcher (state explosion): judged by the slow standard regexp
@@ -296,6 +303,7 @@ type job struct {
 	scannedOff   int64
 	scannedLines int64
 	hits         []hit
+	ext          []uint64 // arena of hits' rules past the 64th (hit.ext); append only, replaced when cut
 	ruleHits     []int64
 	longs        []longLine
 	invalid      int64
@@ -477,7 +485,7 @@ func (e *Engine) dropLocked(j *job) {
 			j.cond.Wait()
 		}
 		tmp := j.tempFile
-		j.hits, j.longs = nil, nil
+		j.hits, j.ext, j.longs = nil, nil, nil
 		if j.evSignal != nil && !j.evClosed {
 			j.evClosed = true
 			close(j.evSignal)
@@ -645,7 +653,9 @@ func (e *Engine) ensureWatcher() {
 
 // checkFile compares the file with the state the job was scanned at. Growth
 // with the same head and old end is an append: the new tail is filtered and
-// the version goes up. Anything else is a change.
+// the version goes up. Anything else is a change — except that the same size
+// and modification time count as "unchanged" without reading the file (see
+// Progress).
 func (j *job) checkFile(force bool) {
 	j.mu.Lock()
 	if !force && time.Since(j.lastCheck) < 200*time.Millisecond {
@@ -784,11 +794,9 @@ func (j *job) progressLocked() Progress {
 	if j.gz {
 		p.Compressed = "gzip"
 	}
-	if s := j.m.slow.Load(); s != 0 {
-		for _, r := range j.m.rules {
-			if s&r.bit != 0 {
-				p.SlowRules = append(p.SlowRules, r.index)
-			}
+	for k := range j.m.slow {
+		if j.m.slow[k].Load() {
+			p.SlowRules = append(p.SlowRules, j.m.rules[k].index)
 		}
 	}
 	p.ScannedBytes = j.srcOffsetLocked(j.scannedOff)
@@ -941,7 +949,19 @@ func (j *job) scanGzip(f *os.File, size int64) (*scanRun, error) {
 	}
 	enc := j.reqEnc
 	if enc == "" {
-		enc = detectEncoding(g.head, -1, nil)
+		var extErr error
+		more := func() [][]byte {
+			b, err := g.extendHead(gzipSniffMax)
+			extErr = err
+			if len(b) == 0 {
+				return nil
+			}
+			return [][]byte{b}
+		}
+		enc = detectEncoding(g.head, -1, more)
+		if extErr != nil {
+			return nil, extErr
+		}
 	}
 	enc, ds := dataStartFor(enc, g.head)
 	need := gzipSizeHint(f, size)
@@ -988,14 +1008,20 @@ func (j *job) runAppend(st fileState, fp fingerprint) {
 	keep := sort.Search(len(j.hits), func(i int) bool { return j.hits[i].line >= rp.line })
 	nh := make([]hit, keep, keep+1024)
 	copy(nh, j.hits[:keep])
-	for _, h := range j.hits[keep:] {
-		for ri := range j.m.rules {
-			if h.mask&j.m.rules[ri].bit != 0 {
-				j.ruleHits[j.m.rules[ri].index]--
-			}
+	keepExt := 0
+	for _, h := range j.hits[:keep] {
+		if h.ext != 0 {
+			keepExt = int(h.ext) // entries are in hit order
 		}
 	}
+	for _, h := range j.hits[keep:] {
+		j.m.eachRule(h, j.ext, func(k int) { j.ruleHits[j.m.rules[k].index]-- })
+	}
 	j.hits = nh
+	if j.ext != nil {
+		// a new slice: rows being read may still look at the dropped entries
+		j.ext = append([]uint64(nil), j.ext[:keepExt*j.m.extWords]...)
+	}
 	kl := sort.Search(len(j.longs), func(i int) bool { return j.longs[i].line >= rp.line })
 	j.longs = append([]longLine(nil), j.longs[:kl]...)
 	kc := sort.Search(len(j.commits), func(i int) bool { return j.commits[i].tmpEnd > rp.tmp })

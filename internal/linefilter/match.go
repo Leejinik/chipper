@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math/bits"
 	"regexp"
 	"slices"
 	"strings"
@@ -19,8 +20,13 @@ type hit struct {
 	line  int64
 	start int64 // offset in the scanned file of the line's first byte
 	end   int64 // offset just past the line's text (before its line break)
-	mask  uint64
-	col   int32 // UTF-16 column of the first match (editor units); -1 unknown
+	// mask: the matching rules — bit k = matcher.rules[k] for k < 64. With more
+	// rules, ext (when not 0) is the 1-based entry of the rules' other words
+	// (k ≥ 64) in the hit list's ext arena: words [(ext-1)*W, ext*W) with
+	// W = matcher.extWords. ext fits in the struct's padding.
+	mask uint64
+	col  int32 // UTF-16 column of the first match (editor units); -1 unknown
+	ext  uint32
 }
 
 // longLine records a line of at least LongLineMin bytes so readers can jump
@@ -59,26 +65,44 @@ type matcher struct {
 	groups   [][]int
 	progs    []*progInfo // per rule (nil: the rule always uses the stdlib)
 
+	// extWords: words per hit beyond the first 64 rules (0 with ≤ 64 rules).
+	extWords int
+
 	mu     sync.Mutex
 	gprogs map[string]*progInfo
-	slow   atomic.Uint64 // rules whose DFA gave up somewhere (bit per rule)
+	slow   []atomic.Bool // per rule: its DFA gave up somewhere
 }
 
 // noteSlow records rules that fell back to the (much slower) stdlib.
 func (m *matcher) noteSlow(rules []int) {
 	for _, ri := range rules {
-		b := m.rules[ri].bit
-		for {
-			old := m.slow.Load()
-			if old&b != 0 || m.slow.CompareAndSwap(old, old|b) {
-				break
-			}
+		m.slow[ri].Store(true)
+	}
+}
+
+// eachRule calls fn with the position (in m.rules) of every rule of hit h;
+// ext is the arena h.ext points into.
+func (m *matcher) eachRule(h hit, ext []uint64, fn func(k int)) {
+	for b := h.mask; b != 0; b &= b - 1 {
+		fn(bits.TrailingZeros64(b))
+	}
+	if h.ext == 0 {
+		return
+	}
+	w := m.extWords
+	for i, x := range ext[int(h.ext-1)*w : int(h.ext)*w] {
+		for b := x; b != 0; b &= b - 1 {
+			fn(64*(i+1) + bits.TrailingZeros64(b))
 		}
 	}
 }
 
 func newMatcher(rules []compiledRule) *matcher {
 	m := &matcher{rules: rules, gprogs: map[string]*progInfo{}}
+	m.slow = make([]atomic.Bool, len(rules))
+	if len(rules) > 64 {
+		m.extWords = (len(rules) - 1) / 64
+	}
 	m.progs = make([]*progInfo, len(rules))
 	for i := range rules {
 		if pi, err := newProgInfo(rules[i].dfaSrc); err == nil {
@@ -158,11 +182,59 @@ type wstate struct {
 	gLimit int
 	rLimit int
 	ends   [64]int32
+	// Rules past the 64th: the line being judged sets their bits in hi (hiSet
+	// says one is set); addHit moves them into ext, this region's arena.
+	hi    []uint64
+	hiSet bool
+	ext   []uint64
+}
+
+// setRule marks rule k (position in m.rules) as matching the current line:
+// in *mask for the first 64 rules, in ws.hi for the others.
+func (ws *wstate) setRule(mask *uint64, k int) {
+	if k < 64 {
+		*mask |= 1 << uint(k)
+		return
+	}
+	ws.hi[k/64-1] |= 1 << uint(k%64)
+	ws.hiSet = true
+}
+
+// hasRule: rule k is already marked for the current line.
+func (ws *wstate) hasRule(mask uint64, k int) bool {
+	if k < 64 {
+		return mask&(1<<uint(k)) != 0
+	}
+	return ws.hi[k/64-1]&(1<<uint(k%64)) != 0
+}
+
+// lineHit: the current line matched at least one rule.
+func (ws *wstate) lineHit(mask uint64) bool { return mask != 0 || ws.hiSet }
+
+// clearHi forgets the current line's bits past the 64th rule.
+func (ws *wstate) clearHi() {
+	if ws.hiSet {
+		clear(ws.hi)
+		ws.hiSet = false
+	}
+}
+
+// addHit appends h (whose rules are mask plus ws.hi) to out.
+func (ws *wstate) addHit(out []hit, h hit) []hit {
+	if ws.hiSet {
+		ws.ext = append(ws.ext, ws.hi...)
+		h.ext = uint32(len(ws.ext) / len(ws.hi))
+		ws.clearHi()
+	}
+	return append(out, h)
 }
 
 // newWState: mem is this worker's DFA memory budget.
 func newWState(m *matcher, mem int) *wstate {
 	ws := &wstate{m: m}
+	if m.extWords > 0 {
+		ws.hi = make([]uint64, m.extWords)
+	}
 	n := len(m.rules)
 	ws.rd, ws.ad = make([]*dfa, n), make([]*dfa, n)
 	ws.rstd, ws.astd = make([]bool, n), make([]bool, n)
@@ -400,6 +472,7 @@ func (ws *wstate) wordAdjust(ri int, line []byte, s int) int {
 
 // lineHitDFA decides one line in the DFA path. Returns the rule mask and the
 // byte offset of the first match.
+// Rules past the 64th go to ws.hi (see lineHit).
 func (ws *wstate) lineHitDFA(line []byte) (uint64, int) {
 	var mask uint64
 	best := len(line) + 1
@@ -414,7 +487,7 @@ func (ws *wstate) lineHitDFA(line []byte) (uint64, int) {
 				continue
 			}
 			if ok, s := ws.ruleStart(ri, line, best, int(ws.ends[k])); ok {
-				mask |= ws.m.rules[ri].bit
+				ws.setRule(&mask, ri)
 				if s < best {
 					best = s
 				}
@@ -639,8 +712,8 @@ func (ws *wstate) scanBuf(data []byte, base int64, out []hit, lineBase int64, ca
 		for pos := 0; pos < len(data); idx++ {
 			le, next := lineEnd(data, pos, hasCR)
 			line := data[pos:le]
-			if mask, s := ws.lineHitDFA(line); mask != 0 {
-				out = append(out, hit{line: lineBase + idx, start: base + int64(pos), end: base + int64(le), mask: mask, col: utf16Col(line, s)})
+			if mask, s := ws.lineHitDFA(line); ws.lineHit(mask) {
+				out = ws.addHit(out, hit{line: lineBase + idx, start: base + int64(pos), end: base + int64(le), mask: mask, col: utf16Col(line, s)})
 				if len(out) >= capHits {
 					return out, nlines, true
 				}
@@ -690,13 +763,12 @@ func (ws *wstate) scanBuf(data []byte, base int64, out []hit, lineBase int64, ca
 		var need []int
 		for k < len(cands) && int(cands[k].pos) < lim {
 			e := &m.lits[cands[k].entry]
-			r := &m.rules[e.rule]
 			if e.verify {
 				if !slices.Contains(need, e.rule) {
 					need = append(need, e.rule)
 				}
-			} else if got&r.bit == 0 {
-				got |= r.bit
+			} else if !ws.hasRule(got, e.rule) {
+				ws.setRule(&got, e.rule)
 				if s := int(cands[k].pos) - ls; s < best {
 					best = s
 				}
@@ -705,14 +777,14 @@ func (ws *wstate) scanBuf(data []byte, base int64, out []hit, lineBase int64, ca
 		}
 		for _, ri := range need {
 			if ok, s := ws.ruleStart(ri, line, best, -1); ok {
-				got |= m.rules[ri].bit
+				ws.setRule(&got, ri)
 				if s < best {
 					best = s
 				}
 			}
 		}
-		if got != 0 {
-			out = append(out, hit{line: lineBase + idx, start: base + int64(ls), end: base + int64(curEnd), mask: got, col: utf16Col(line, best)})
+		if ws.lineHit(got) {
+			out = ws.addHit(out, hit{line: lineBase + idx, start: base + int64(ls), end: base + int64(curEnd), mask: got, col: utf16Col(line, best)})
 			if len(out) >= capHits {
 				return out, nlines, true
 			}

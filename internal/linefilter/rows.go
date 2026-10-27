@@ -220,6 +220,7 @@ func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
 	j.lastUse = time.Now()
 	lay := j.layoutLocked(A, B)
 	hits := j.hits[:lay.nh:lay.nh]
+	ext := j.ext[:len(j.ext):len(j.ext)]
 	longs := j.longs[:len(j.longs):len(j.longs)]
 	readPath, dataStart, size := j.readPath, j.dataStart, j.size
 	bm := j.marks[[2]int64{A, B}]
@@ -237,7 +238,7 @@ func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
 
 	j.content.RLock()
 	defer j.content.RUnlock()
-	rd := &rowReader{j: j, lay: lay, hits: hits, longs: longs, path: readPath, dataStart: dataStart, size: size, maxText: e.opt.MaxLineDisplay}
+	rd := &rowReader{j: j, lay: lay, hits: hits, ext: ext, longs: longs, path: readPath, dataStart: dataStart, size: size, maxText: e.opt.MaxLineDisplay}
 	defer rd.close()
 
 	bm.mu.Lock()
@@ -322,6 +323,7 @@ type rowReader struct {
 	j         *job
 	lay       *layout
 	hits      []hit
+	ext       []uint64
 	longs     []longLine
 	path      string
 	dataStart int64
@@ -513,7 +515,7 @@ func (rd *rowReader) readLines(out []Row, iv *interval, x, n int64) ([]Row, erro
 				return nil, errInternal
 			}
 			row.Hit = true
-			row.Rules = rd.j.maskRules(hits[hp].mask)
+			row.Rules = rd.j.hitRules(hits[hp], rd.ext)
 			row.Col = hits[hp].col
 			hp++
 		}
@@ -522,13 +524,11 @@ func (rd *rowReader) readLines(out []Row, iv *interval, x, n int64) ([]Row, erro
 	return out, nil
 }
 
-func (j *job) maskRules(m uint64) []int {
+// hitRules: the request rule indexes of hit h, ascending (ext: the job's
+// arena snapshot taken with the hits).
+func (j *job) hitRules(h hit, ext []uint64) []int {
 	var out []int
-	for _, r := range j.m.rules {
-		if m&r.bit != 0 {
-			out = append(out, r.index)
-		}
-	}
+	j.m.eachRule(h, ext, func(k int) { out = append(out, j.m.rules[k].index) })
 	return out
 }
 
