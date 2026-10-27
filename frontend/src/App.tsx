@@ -14,13 +14,19 @@ import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
 import { runSyncedNav, syncedNavCommand } from "./syncNav";
 import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
+import { looksLikeLog, type LogRule } from "./logHighlight";
 import {
-  DEFAULT_LOG_RULES,
-  looksLikeLog,
-  ruleProblem,
-  normalizeLogRules,
-  type LogRule,
-} from "./logHighlight";
+  COMMON,
+  migratedStore,
+  normalizeTagStore,
+  rotationKey,
+  rulesFor,
+  serializeTags,
+  tagsFor,
+  type AppliedTags,
+  type TagStore,
+} from "./logTags";
+import TagsDialog from "./TagsDialog";
 import "./App.css";
 import {
   OpenFileDialog,
@@ -34,6 +40,8 @@ import {
   SaveSession,
   CloseWithSession,
   LoadSession,
+  LoadTags,
+  SaveTags,
   StatFile,
   TypeChips,
   CancelChips,
@@ -188,14 +196,6 @@ function resolveInServer(scan: main.Bundle, server: string, rel: string): main.B
   return same.length === 1 ? same[0] : null;
 }
 
-// Rotated logs ("controller.log.2026-10-21-06", "messages-20261011",
-// "app.log.3") share a series key so the picker can fold them into one row.
-function rotationKey(rel: string): string {
-  return rel
-    .replace(/([._-])\d{4}-?\d{2}-?\d{2}([-_T.]?\d{1,2}){0,3}(_\d+)?$/, "$1*")
-    .replace(/\.\d{1,3}$/, ".*");
-}
-
 function fmtSize(n: number): string {
   if (n >= 1 << 30) return (n / (1 << 30)).toFixed(1) + "GB";
   if (n >= 1 << 20) return (n / (1 << 20)).toFixed(1) + "MB";
@@ -231,7 +231,9 @@ interface Session {
   splitRatio: number;
   fontSize?: number; // editor font size (px); optional so older sessions still load
   keybindings?: Record<string, string>; // per-command combo overrides
-  logRules?: LogRule[];
+  // Log colour rules from before tags (now the `common` tag in tags.json). Only
+  // read, to build common on first run; written back only until tags.json exists.
+  logRules?: unknown;
   multi?: MultiState;
 }
 
@@ -239,6 +241,7 @@ interface Session {
 // restoring those tabs as empty files that a save would then write back.
 const SESSION_VERSION = 3;
 const AUTOSAVE_MS = 400;
+const TAGS_SAVE_MS = 400;
 const PREVIEW_MS = 120;
 
 // Editor font size (Ctrl+wheel to zoom, Ctrl+0 to reset). Bounds keep it usable.
@@ -544,10 +547,20 @@ function App() {
   const [fontSize, setFontSize] = useState<number>(DEFAULT_FONT_SIZE);
   const [keybinds, setKeybinds] = useState<Record<CmdId, string>>(DEFAULT_KEYBINDS);
   const [keysOpen, setKeysOpen] = useState<boolean>(false); // keybinding settings modal
-  const [logRules, setLogRules] = useState<LogRule[]>(DEFAULT_LOG_RULES);
-  const logRulesRef = useRef(logRules);
-  logRulesRef.current = logRules;
-  const [rulesOpen, setRulesOpen] = useState<boolean>(false); // log colour rules dialog
+  // Log colour tags (~/.chipper/tags.json). tagsReady: loaded (or migrated);
+  // tagsReadOnlyRef: written by a newer chipper (or unreadable), never saved over.
+  const [tagStore, setTagStore] = useState<TagStore>(() => migratedStore(undefined));
+  const tagStoreRef = useRef(tagStore);
+  tagStoreRef.current = tagStore;
+  const [tagsReady, setTagsReady] = useState<boolean>(false);
+  const tagsReadyRef = useRef(false);
+  const tagsReadOnlyRef = useRef(false);
+  const [tagsNotice, setTagsNotice] = useState<string>(""); // shown in the tag window
+  // The old session's logRules, carried in the session only until tags.json
+  // has been written once — so a failed first tag save loses nothing.
+  const legacyRulesRef = useRef<unknown>(undefined);
+  const lastSavedTags = useRef(""); // tags.json text last written (or loaded)
+  const [tagsOpen, setTagsOpen] = useState<string | null>(null); // tag window, with the tag to select
   const [treeOpen, setTreeOpen] = useState<boolean>(true); // log bundle tree beside the panes
   const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
   const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
@@ -652,7 +665,7 @@ function App() {
       splitRatio: ratioRef.current,
       fontSize: fontSizeRef.current,
       keybindings: keybindsRef.current,
-      logRules: logRulesRef.current,
+      ...(legacyRulesRef.current !== undefined ? { logRules: legacyRulesRef.current } : {}),
       multi: multiRef.current,
     };
     return JSON.stringify(s);
@@ -663,11 +676,55 @@ function App() {
   useEffect(() => {
     if (didInit.current) return; // guard StrictMode double-invoke in dev
     didInit.current = true;
+    // Tags: tags.json when there is one; otherwise (first run, or a broken file
+    // with no usable .bak) common is built from the old session rules and saved.
+    const initTags = async (legacy: unknown) => {
+      let store: TagStore | null = null;
+      const notes: string[] = [];
+      let alarm = false;
+      try {
+        const r = await LoadTags();
+        if (r.broken) {
+          alarm = true;
+          notes.push(`태그 파일이 깨져 있어 ${r.broken} 로 옮겨 두었습니다 (${r.problem}).`);
+        }
+        if (r.exists && r.data) {
+          store = normalizeTagStore(JSON.parse(r.data));
+          // what is on disk counts as saved: no rewrite (and no .bak turnover)
+          // at every start just because normalizing changed the formatting
+          if (!r.restored) lastSavedTags.current = serializeTags(store);
+          if (r.restored) notes.push("직전 태그 파일(tags.json.bak)로 되살렸습니다.");
+          if (r.newer) {
+            tagsReadOnlyRef.current = true;
+            notes.push("더 새 버전의 chipper 가 만든 태그 파일이라, 여기서 바꾼 내용은 저장되지 않습니다.");
+          }
+        } else if (r.broken) notes.push("기본 규칙으로 다시 시작합니다.");
+      } catch (e) {
+        console.error("태그 불러오기 실패", e);
+        alarm = true;
+        notes.push("태그 파일을 읽지 못해 이번에는 저장하지 않습니다: " + String(e));
+        tagsReadOnlyRef.current = true; // don't overwrite a file we couldn't read
+      }
+      if (!store) {
+        store = migratedStore(legacy);
+        if (Array.isArray(legacy)) legacyRulesRef.current = legacy;
+      }
+      setTagStore(store);
+      tagStoreRef.current = store;
+      if (notes.length) {
+        setTagsNotice(notes.join(" "));
+        if (alarm) alert(notes.join("\n"));
+      }
+      tagsReadyRef.current = true;
+      setTagsReady(true);
+    };
     (async () => {
+      let legacy: unknown = undefined;
       try {
         const raw = await LoadSession();
         if (raw) {
           const s = JSON.parse(raw);
+          legacy = s?.logRules;
           // A recognized session is honored verbatim — including an empty tab
           // list — so "no tabs open" is faithfully restored, not re-welcomed.
           if (s && typeof s.version === "number" && s.version <= SESSION_VERSION && Array.isArray(s.tabs)) {
@@ -689,8 +746,8 @@ function App() {
               setFontSize(clampFont(s.fontSize));
             }
             setKeybinds(normalizeKeybinds(s.keybindings));
-            setLogRules(normalizeLogRules(s.logRules));
             setMulti(normalizeMulti(s.multi, new Set(restored.map((t) => t.id))));
+            await initTags(legacy);
             setLoaded(true);
             return;
           }
@@ -699,6 +756,7 @@ function App() {
         console.error("세션 복원 실패", e);
       }
       // First run or unrecognized/corrupt session → welcome document.
+      if (!tagsReadyRef.current) await initTags(legacy);
       const w = makeTab({
         title: "환영합니다.md",
         content: WELCOME_MD,
@@ -776,18 +834,55 @@ function App() {
   useEffect(() => {
     if (!loaded) return;
     scheduleAutosave();
-  }, [tabs, activeId, splitRatio, fontSize, keybinds, multi, logRules, loaded, scheduleAutosave]);
+  }, [tabs, activeId, splitRatio, fontSize, keybinds, multi, loaded, scheduleAutosave]);
+
+  // --- tags: debounced save, like the session --------------------------------
+  const tagsTimer = useRef<number | undefined>(undefined);
+  const saveTagsNow = useCallback(async (): Promise<void> => {
+    window.clearTimeout(tagsTimer.current);
+    if (!tagsReadyRef.current || tagsReadOnlyRef.current) return;
+    const js = serializeTags(tagStoreRef.current);
+    if (js === lastSavedTags.current) return;
+    lastSavedTags.current = js;
+    try {
+      await SaveTags(js);
+      setTagsNotice((n) => (n.startsWith("태그 저장 실패") ? "" : n));
+      if (legacyRulesRef.current !== undefined) {
+        legacyRulesRef.current = undefined; // common lives in tags.json from now on
+        scheduleAutosave();
+      }
+    } catch (e) {
+      lastSavedTags.current = ""; // retry on the next change
+      console.error("태그 저장 실패", e);
+      setTagsNotice("태그 저장 실패: " + String(e));
+    }
+  }, [scheduleAutosave]);
+  useEffect(() => {
+    if (!tagsReady) return;
+    window.clearTimeout(tagsTimer.current);
+    // the first run's migrated common is written at once
+    const wait = legacyRulesRef.current !== undefined || !lastSavedTags.current ? 0 : TAGS_SAVE_MS;
+    tagsTimer.current = window.setTimeout(() => void saveTagsNow(), wait);
+  }, [tagStore, tagsReady, saveTagsNow]);
 
   useEffect(() => {
     const off = EventsOn("chipper:flush-before-close", () => {
-      CloseWithSession(loadedRef.current ? snapshot() : "").catch(() => {});
+      // tags first: once they are on disk the session can drop the old logRules
+      saveTagsNow()
+        .catch(() => {})
+        .finally(() => {
+          CloseWithSession(loadedRef.current ? snapshot() : "").catch(() => {});
+        });
     });
     return off;
-  }, [snapshot]);
+  }, [snapshot, saveTagsNow]);
 
   // --- flush on focus loss / hide (extra insurance) -------------------------
   useEffect(() => {
-    const flush = saveSessionNow;
+    const flush = () => {
+      void saveTagsNow();
+      saveSessionNow();
+    };
     window.addEventListener("blur", flush);
     window.addEventListener("pagehide", flush);
     window.addEventListener("beforeunload", flush);
@@ -798,7 +893,7 @@ function App() {
       window.removeEventListener("beforeunload", flush);
       document.removeEventListener("visibilitychange", flush);
     };
-  }, [saveSessionNow]);
+  }, [saveSessionNow, saveTagsNow]);
 
   // --- window title ---------------------------------------------------------
   useEffect(() => {
@@ -2235,6 +2330,20 @@ function App() {
   // Log colouring: on for log-looking plain text unless the tab says otherwise.
   const logOn = (t: Tab) =>
     t.logColors === "on" || (t.logColors === "" && t.lang === "plaintext" && looksLikeLog(t.title));
+  // Tags applied to a tab, and their merged rules. Rule lists are cached per
+  // tag combination so editors only reconfigure when the rules really change.
+  const ruleCache = useMemo(() => new Map<string, LogRule[]>(), [tagStore]);
+  const appliedTags = (t: Tab): AppliedTags => tagsFor(tagStore, t.path, multi.bundle);
+  const rulesForTab = (t: Tab): LogRule[] => {
+    const names = appliedTags(t).names;
+    const key = names.join("\u0000");
+    let r = ruleCache.get(key);
+    if (!r) {
+      r = rulesFor(tagStore, names);
+      ruleCache.set(key, r);
+    }
+    return r;
+  };
   const toggleLogColors = (t: Tab) =>
     setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
 
@@ -2334,7 +2443,7 @@ function App() {
               fontSize={fontSize}
               mode={slot.mode}
               autoFocus={focused}
-              logRules={logOn(t) ? logRules : null}
+              logRules={logOn(t) ? rulesForTab(t) : null}
               onDocChanged={() => markEdited(t.id)}
               onFlush={(text) => flushContent(t.id, t.reloadSeq, text)}
               onView={(v) => setView(t.id, v)}
@@ -2775,7 +2884,7 @@ function App() {
                   initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
                   lang={active.lang}
                   fontSize={fontSize}
-                  logRules={logOn(active) ? logRules : null}
+                  logRules={logOn(active) ? rulesForTab(active) : null}
                   onDocChanged={() => markEdited(active.id)}
                   onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
                   onView={(v) => setView(active.id, v)}
@@ -2849,16 +2958,32 @@ function App() {
                 >
                   🎨 {logOn(active) ? "로그 색" : "로그 색 꺼짐"}
                 </button>
-                <button
-                  className="st-log"
-                  title="로그 색 규칙 고치기"
-                  onMouseDown={(e) => {
-                    e.stopPropagation();
-                    setRulesOpen(true);
-                  }}
-                >
-                  ⚙
-                </button>
+                {(() => {
+                  const ap = appliedTags(active);
+                  const src = ap.source;
+                  const from =
+                    src.kind === "file"
+                      ? `파일 ${src.key} 에 직접 붙은 태그`
+                      : src.kind === "dir"
+                        ? src.key === ""
+                          ? "서버 폴더 전체에 붙은 태그"
+                          : `폴더 ${src.key} 에 붙은 태그`
+                        : src.kind === "name"
+                          ? `이름 「${src.key}」 에 붙은 태그`
+                          : "붙은 태그 없음 (common 만)";
+                  return (
+                    <button
+                      className={logOn(active) ? "st-log st-tags on" : "st-log st-tags"}
+                      title={`이 탭의 로그 색 태그 — ${from}. 눌러서 태그·규칙 고치기`}
+                      onMouseDown={(e) => {
+                        e.stopPropagation();
+                        setTagsOpen(ap.names.find((n) => n !== COMMON) ?? COMMON);
+                      }}
+                    >
+                      🏷 {ap.names.join(" + ")}
+                    </button>
+                  );
+                })()}
               </span>
               <span className="st-lang">{langLabel(active.lang)}</span>
               <span className="st-enc-wrap">
@@ -3112,124 +3237,15 @@ function App() {
       )}
 
 
-      {rulesOpen && (
-        <div className="chips-overlay" onMouseDown={() => setRulesOpen(false)}>
-          <div
-            className="keys-dialog rules-dialog"
-            onMouseDown={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setRulesOpen(false);
-            }}
-          >
-            <div className="chips-title">🎨 로그 색 규칙</div>
-            <div className="chips-sub">
-              위에서부터 차례로 칠합니다. 「단어」는 그 글자가 단어로 따로 있을 때만, 「정규식」은 JavaScript 정규식입니다.
-              바꾸면 열린 모든 로그에 바로 적용되고, 세션에 저장됩니다.
-            </div>
-            <div className="rules-list">
-              {logRules.map((r, i) => {
-                const problem = ruleProblem(r);
-                const bad = !!problem;
-                const upd = (patch: Partial<LogRule>) =>
-                  setLogRules((prev) => prev.map((x) => (x.id === r.id ? { ...x, ...patch } : x)));
-                return (
-                  <div className={r.on ? "rule-row" : "rule-row off"} key={r.id}>
-                    <input type="checkbox" checked={r.on} title="이 규칙 켜기" onChange={(e) => upd({ on: e.target.checked })} />
-                    <input
-                      className="rule-label"
-                      value={r.label}
-                      placeholder="이름"
-                      onChange={(e) => upd({ label: e.target.value })}
-                    />
-                    <input
-                      className={bad ? "rule-pattern bad" : "rule-pattern"}
-                      value={r.pattern}
-                      placeholder={r.regex ? "정규식 (예: \\bTIMEOUT\\b)" : "단어 (예: timeout)"}
-                      title={
-                        problem === "slow"
-                          ? "반복 안에 반복이 겹친 정규식(예: (a+)+)은 화면을 멈출 수 있어 쓰지 않습니다"
-                          : problem === "invalid"
-                            ? "정규식이 잘못됐거나 빈 문자열에 맞습니다 — 이 규칙은 쓰이지 않습니다"
-                            : r.pattern
-                      }
-                      style={{ color: r.color }}
-                      onChange={(e) => upd({ pattern: e.target.value })}
-                    />
-                    <select value={r.regex ? "re" : "word"} onChange={(e) => upd({ regex: e.target.value === "re" })}>
-                      <option value="word">단어</option>
-                      <option value="re">정규식</option>
-                    </select>
-                    <label title="대소문자 구분">
-                      <input type="checkbox" checked={r.caseSensitive} onChange={(e) => upd({ caseSensitive: e.target.checked })} />
-                      Aa
-                    </label>
-                    <input type="color" value={r.color} title="글자색" onChange={(e) => upd({ color: e.target.value })} />
-                    <label title="줄 전체에 옅은 배경색">
-                      <input type="checkbox" checked={r.line} onChange={(e) => upd({ line: e.target.checked })} />
-                      줄
-                    </label>
-                    <button
-                      className="mp-x"
-                      title="위로"
-                      disabled={i === 0}
-                      onClick={() =>
-                        setLogRules((prev) => {
-                          const n = [...prev];
-                          [n[i - 1], n[i]] = [n[i], n[i - 1]];
-                          return n;
-                        })
-                      }
-                    >
-                      ↑
-                    </button>
-                    <button
-                      className="mp-x"
-                      title="이 규칙 지우기"
-                      onClick={() => setLogRules((prev) => prev.filter((x) => x.id !== r.id))}
-                    >
-                      🗑
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="chips-actions">
-              <button
-                className="tb-btn"
-                onClick={() =>
-                  setLogRules((prev) => [
-                    ...prev,
-                    {
-                      id: newId(),
-                      on: true,
-                      label: "",
-                      pattern: "",
-                      regex: false,
-                      caseSensitive: false,
-                      color: "#c678dd",
-                      line: false,
-                    },
-                  ])
-                }
-              >
-                ＋ 규칙 추가
-              </button>
-              <button
-                className="tb-btn"
-                onClick={() => {
-                  if (window.confirm("로그 색 규칙을 기본값으로 되돌릴까요? 추가하거나 고친 규칙은 사라집니다.")) {
-                    setLogRules(DEFAULT_LOG_RULES);
-                  }
-                }}
-              >
-                기본값으로
-              </button>
-              <button className="tb-btn primary" onClick={() => setRulesOpen(false)}>
-                닫기
-              </button>
-            </div>
-          </div>
-        </div>
+      {tagsOpen !== null && (
+        <TagsDialog
+          store={tagStore}
+          onChange={setTagStore}
+          onClose={() => setTagsOpen(null)}
+          initial={tagsOpen}
+          applied={active ? appliedTags(active).names : [COMMON]}
+          notice={tagsNotice}
+        />
       )}
 
       {keysOpen && (
