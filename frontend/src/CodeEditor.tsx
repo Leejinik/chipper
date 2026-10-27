@@ -24,7 +24,7 @@ import { markdown } from "@codemirror/lang-markdown";
 import { html } from "@codemirror/lang-html";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { columnSelection } from "./columnSelection";
-import { logHighlighter, type LogRule } from "./logHighlight";
+import { logHighlighter, type LogRule, type RuleLayers } from "./logHighlight";
 
 export type EditorLang = "markdown" | "html" | "plaintext";
 
@@ -105,7 +105,7 @@ interface Props {
   onSelectionChange: (text: string) => void;
   mode?: PaneMode;
   autoFocus?: boolean; // false for multi-view panes that mount without focus
-  logRules?: LogRule[] | null; // log colouring rules; null = off
+  logRules?: LogRule[] | RuleLayers | null; // log colouring rules (flat = one layer, or layers: tags then common); null = off
 }
 
 // CodeEditor wraps a CodeMirror 6 EditorView. The parent remounts it per tab
