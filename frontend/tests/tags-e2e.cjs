@@ -149,6 +149,13 @@ const rgb = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 1
 const spansWith = (page, color) =>
   page.$$eval(`.cm-content span[style*="color: ${rgb(color)}"]`, (els) => els.map((e) => e.textContent));
 const statusTags = (page) => page.$eval(".st-tags", (e) => e.textContent.trim()).catch(() => null);
+// 4단계: 상태 표시줄 🏷 는 작은 메뉴를 연다 → 「태그 창 열기」
+async function openTagWindow(page) {
+  await page.dispatchEvent(".st-tags", "mousedown");
+  await page.waitForSelector(".tag-menu");
+  await page.click(".tag-menu >> text=태그 창 열기");
+  await page.waitForSelector(".tags-dialog");
+}
 const savedTags = (be) => (be.st.tags ? JSON.parse(be.st.tags) : null);
 const tagNames = (be) => savedTags(be)?.tags.map((t) => t.name);
 
@@ -189,8 +196,7 @@ async function main() {
       ok("옛 형식: regex 참/거짓 · kind 없음", lr && lr.map((x) => x.regex).join() === "true,false,false" && lr.every((x) => !("kind" in x)), lr);
       ok("옛 형식: 패턴·색·줄 그대로", lr && lr[0].pattern === "\\bERROR\\b" && lr[0].color === "#aa0001" && lr[0].line === true, lr && lr[0]);
       // a change in the tag window reaches the session's old-format copy too
-      await page.dispatchEvent(".st-tags", "mousedown");
-      await page.waitForSelector(".tags-dialog");
+      await openTagWindow(page);
       await page.click(".rule-add");
       const rowsL = await page.$$(".tags-dialog .rule-row");
       await (await rowsL[rowsL.length - 1].$(".rule-pattern")).fill("a.b");
@@ -279,7 +285,7 @@ async function main() {
       ok("상태 표시줄 🏷 common", (await statusTags(page)) === "🏷 common", await statusTags(page));
 
       // open tag window from the status bar
-      await page.dispatchEvent(".st-tags", "mousedown");
+      await openTagWindow(page);
       await page.waitForSelector(".tags-dialog");
       ok("태그 창 열림 · common 선택", (await page.$eval(".tag-item.sel .tag-name", (e) => e.textContent)) === "common");
 
@@ -463,7 +469,7 @@ async function main() {
       ok("파일에 직접 붙은 태그만 (admin, collector 아님)", (await statusTags(page)) === "🏷 common + admin", await statusTags(page));
       ok("admin 색", (await spansWith(page, "#dd0002")).includes("login"));
       // tag window from here selects admin and lists where it is attached
-      await page.dispatchEvent(".st-tags", "mousedown");
+      await openTagWindow(page);
       await page.waitForSelector(".tags-dialog");
       ok("태그 창이 적용 태그(admin)를 선택", (await page.$eval(".tag-item.sel .tag-name", (e) => e.textContent)) === "admin");
       const where = await page.$$eval(".tags-place", (es) => es.map((e) => e.textContent));
@@ -516,7 +522,7 @@ async function main() {
       be.st.session = session([tab("t1", "D:\\logs\\z.log")], "t1");
       const { ctx, page } = await openPage(browser, url, be);
       await sleep(400);
-      await page.dispatchEvent(".st-tags", "mousedown");
+      await openTagWindow(page);
       await page.waitForSelector(".tags-dialog");
       await page.click("text=＋ 새 태그");
       await page.fill(".tag-rename", "last-minute");
@@ -535,8 +541,7 @@ async function main() {
       be2.st.loadTags = { data: JSON.stringify({ version: 2, tags: [{ name: "common", rules: [] }, { name: "future", rules: [] }] }), exists: true, restored: false, broken: "", problem: "", newer: true };
       const r2 = await openPage(browser, url, be2);
       await sleep(600);
-      await r2.page.dispatchEvent(".st-tags", "mousedown");
-      await r2.page.waitForSelector(".tags-dialog");
+      await openTagWindow(r2.page);
       ok("새 버전 안내 표시", ((await r2.page.$eval(".tags-notice", (e) => e.textContent).catch(() => "")) || "").includes("더 새 버전"));
       // really change something: a tag and a rule
       await r2.page.click("text=＋ 새 태그");
@@ -559,8 +564,7 @@ async function main() {
       const r5 = await openPage(browser, url, be5);
       await sleep(400);
       be5.st.failSave = "[TAGS_NEWER_ON_DISK] 디스크의 태그 파일이 더 새 버전의 chipper 가 만든 것이라 덮어쓰지 않았습니다";
-      await r5.page.dispatchEvent(".st-tags", "mousedown");
-      await r5.page.waitForSelector(".tags-dialog");
+      await openTagWindow(r5.page);
       await r5.page.click("text=＋ 새 태그");
       await r5.page.press(".tag-rename", "Enter");
       await sleep(900);
@@ -580,8 +584,7 @@ async function main() {
       const r4 = await openPage(browser, url, be4);
       await sleep(500);
       be4.st.saveDelay = 600;
-      await r4.page.dispatchEvent(".st-tags", "mousedown");
-      await r4.page.waitForSelector(".tags-dialog");
+      await openTagWindow(r4.page);
       await r4.page.click("text=＋ 새 태그");
       await r4.page.fill(".tag-rename", "in-flight");
       await r4.page.press(".tag-rename", "Enter");
@@ -607,7 +610,7 @@ async function main() {
       const r3 = await openPage(browser, url, be3);
       await sleep(500);
       ok("깨진 파일 알림", r3.page.__dialogs.some((d) => d.includes("tags.broken-20261027-093005.json") && d.includes(".bak")), r3.page.__dialogs);
-      await r3.page.dispatchEvent(".st-tags", "mousedown");
+      await openTagWindow(r3.page);
       ok("되살린 태그 보임", (await r3.page.$$eval(".tag-item .tag-name", (es) => es.map((e) => e.textContent))).includes("fromBak"));
       await r3.ctx.close();
     }
