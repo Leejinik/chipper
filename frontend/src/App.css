@@ -1283,3 +1283,63 @@
 .st-eol.mixed {
   color: #f3c969;
 }
+
+/* v1.2.1 rework — notice actions, stored sessions, big edited tabs, status flash */
+.notice-bar .tb-btn {
+  flex: none;
+}
+.notice-detail {
+  display: block;
+  margin-top: 4px;
+  font-family: Consolas, monospace;
+  color: #d8c58f;
+}
+button.autosave {
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+button.autosave:hover {
+  border-color: var(--border);
+}
+.autosave.off {
+  color: #f3c969;
+}
+.restore-menu {
+  width: min(640px, 92vw);
+}
+.restore-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.restore-name {
+  flex: 1;
+}
+.restore-sub {
+  color: var(--text-dim);
+  word-break: break-all;
+}
+.restore-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+.unkept,
+.st-unkept {
+  color: #f3c969;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.st-flash {
+  color: #f3c969;
+  margin-left: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

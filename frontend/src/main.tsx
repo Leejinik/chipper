@@ -11,7 +11,7 @@ const root = createRoot(container!)
 root.render(
     <React.StrictMode>
         {/* last resort: errors inside App are caught by its own boundaries first */}
-        <ErrorBoundary what="Chipper 화면">
+        <ErrorBoundary what="Chipper 화면" top>
             <App/>
         </ErrorBoundary>
     </React.StrictMode>

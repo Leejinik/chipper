@@ -18,6 +18,10 @@ export function CancelChips() {
   return window['go']['main']['App']['CancelChips']();
 }
 
+export function CancelClose() {
+  return window['go']['main']['App']['CancelClose']();
+}
+
 export function CheckForUpdate() {
   return window['go']['main']['App']['CheckForUpdate']();
 }
@@ -44,6 +48,10 @@ export function GetPendingReleaseNotes() {
 
 export function GetPlatform() {
   return window['go']['main']['App']['GetPlatform']();
+}
+
+export function HoldClose() {
+  return window['go']['main']['App']['HoldClose']();
 }
 
 export function LoadSession() {
@@ -78,12 +86,20 @@ export function ReadFileAs(arg1, arg2) {
   return window['go']['main']['App']['ReadFileAs'](arg1, arg2);
 }
 
+export function ReadSessionBackup(arg1) {
+  return window['go']['main']['App']['ReadSessionBackup'](arg1);
+}
+
 export function RegisterFileTypes(arg1) {
   return window['go']['main']['App']['RegisterFileTypes'](arg1);
 }
 
 export function SaveFile(arg1, arg2, arg3) {
   return window['go']['main']['App']['SaveFile'](arg1, arg2, arg3);
+}
+
+export function SaveFileAs(arg1, arg2, arg3) {
+  return window['go']['main']['App']['SaveFileAs'](arg1, arg2, arg3);
 }
 
 export function SaveFileDialog(arg1, arg2, arg3) {
@@ -96,6 +112,10 @@ export function SaveSession(arg1) {
 
 export function ScanBundle(arg1) {
   return window['go']['main']['App']['ScanBundle'](arg1);
+}
+
+export function SessionBackups() {
+  return window['go']['main']['App']['SessionBackups']();
 }
 
 export function ShowUpdateModeNoticeOnce() {

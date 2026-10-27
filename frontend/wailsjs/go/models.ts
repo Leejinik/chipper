@@ -69,6 +69,7 @@ export namespace main {
 	export class Bundle {
 	    root: string;
 	    servers: BundleServer[];
+	    rootFiles: BundleFile[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Bundle(source);
@@ -78,6 +79,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.root = source["root"];
 	        this.servers = this.convertValues(source["servers"], BundleServer);
+	        this.rootFiles = this.convertValues(source["rootFiles"], BundleFile);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -173,8 +175,10 @@ export namespace main {
 	export class SaveOptions {
 	    encoding: string;
 	    eol: string;
+	    eolMixed: boolean;
 	    noBom: boolean;
 	    force: boolean;
+	    allowTooBig: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new SaveOptions(source);
@@ -184,13 +188,41 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.encoding = source["encoding"];
 	        this.eol = source["eol"];
+	        this.eolMixed = source["eolMixed"];
 	        this.noBom = source["noBom"];
 	        this.force = source["force"];
+	        this.allowTooBig = source["allowTooBig"];
+	    }
+	}
+	export class SessionBackup {
+	    name: string;
+	    kind: string;
+	    modTime: number;
+	    tabs: number;
+	    work: number;
+	    note: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionBackup(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.kind = source["kind"];
+	        this.modTime = source["modTime"];
+	        this.tabs = source["tabs"];
+	        this.work = source["work"];
+	        this.note = source["note"];
 	    }
 	}
 	export class SessionLoad {
 	    data: string;
 	    notice: string;
+	    detail: string;
+	    blocked: boolean;
+	    legacy?: SessionBackup;
+	    backup?: SessionBackup;
 	
 	    static createFrom(source: any = {}) {
 	        return new SessionLoad(source);
@@ -200,7 +232,29 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.data = source["data"];
 	        this.notice = source["notice"];
+	        this.detail = source["detail"];
+	        this.blocked = source["blocked"];
+	        this.legacy = this.convertValues(source["legacy"], SessionBackup);
+	        this.backup = this.convertValues(source["backup"], SessionBackup);
 	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
 	}
 
 }

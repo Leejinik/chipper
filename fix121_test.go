@@ -193,7 +193,7 @@ func TestSession_BrokenSessionIsKeptAndReported(t *testing.T) {
 		{"truncated", full[:cut], 2},
 		{"empty", "", 0},
 		{"not-json", "이건 JSON 이 아닙니다 {{{", 0},
-		{"future-version", strings.Replace(full, `"version":3`, `"version":99`, 1), 0},
+		// version 99 (a newer Chipper) is no longer "broken": see TestSessionR_NewerFormatIsLeftAlone
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

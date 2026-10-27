@@ -92,7 +92,7 @@ func TestSave_EditedBackToOriginalIsNotWritten(t *testing.T) {
 	writeOld(t, p, orig)
 	a := &App{}
 	doc, _ := a.ReadFile(p)
-	res, err := a.SaveFile(p, cmNormalize(doc.Content), SaveOptions{Encoding: doc.Encoding, EOL: doc.EOL})
+	res, err := a.SaveFile(p, cmNormalize(doc.Content), SaveOptions{Encoding: doc.Encoding, EOL: doc.EOL, EOLMixed: doc.EOLMixed})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,15 +131,15 @@ func TestSession_BrokenLegacyIsCopiedNotTouched(t *testing.T) {
 // The frontend writes "version" first; a newer format cut off mid-way must
 // not be half-imported.
 func TestSession_TruncatedNewerFormatIsNotRecovered(t *testing.T) {
-	reason, rec, n := checkSession([]byte(`{"version":7,"tabs":[{"id":"a","content":"x"},{"id":"b"`))
-	if reason == "" || rec != "" || n != 0 {
-		t.Errorf("reason=%q rec=%q n=%d", reason, rec, n)
+	c := checkSession([]byte(`{"version":7,"tabs":[{"id":"a","content":"x"},{"id":"b"`))
+	if c.reason == "" || c.recovered != "" || c.n != 0 {
+		t.Errorf("reason=%q rec=%q n=%d", c.reason, c.recovered, c.n)
 	}
-	reason, rec, n = checkSession([]byte(`{"version":3,"tabs":[{"id":"a","content":"x"},{"id":"b"`))
-	if reason == "" || n != 1 || !strings.Contains(rec, `"id":"a"`) {
-		t.Errorf("v3 cut off: reason=%q rec=%q n=%d", reason, rec, n)
+	c = checkSession([]byte(`{"version":3,"tabs":[{"id":"a","content":"x"},{"id":"b"`))
+	if c.reason == "" || c.n != 1 || !strings.Contains(c.recovered, `"id":"a"`) {
+		t.Errorf("v3 cut off: reason=%q rec=%q n=%d", c.reason, c.recovered, c.n)
 	}
-	if reason, _, _ := checkSession([]byte(sessionWithTabs(2))); reason != "" {
-		t.Errorf("a good session was rejected: %s", reason)
+	if c := checkSession([]byte(sessionWithTabs(2))); c.reason != "" {
+		t.Errorf("a good session was rejected: %s", c.reason)
 	}
 }

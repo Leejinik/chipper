@@ -21,7 +21,7 @@ func primarySessionName() string { return sessionFileName }
 // What App.tsx doSave sends: the tab remembers the file's line-break kind and
 // BOM from when it was read.
 func saveLikeFrontend(a *App, path string, doc FileDoc, content string, force bool) (FileDoc, error) {
-	return a.SaveFile(path, content, SaveOptions{Encoding: doc.Encoding, EOL: doc.EOL, NoBOM: !doc.BOM, Force: force})
+	return a.SaveFile(path, content, SaveOptions{Encoding: doc.Encoding, EOL: doc.EOL, EOLMixed: doc.EOLMixed, NoBOM: !doc.BOM, Force: force})
 }
 
 // What App.tsx saveWithEncoding sends: an explicit conversion (BOM only kept

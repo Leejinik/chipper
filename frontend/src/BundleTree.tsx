@@ -7,7 +7,9 @@ export const TREE_DRAG_TYPE = "application/x-chipper-bundle-file";
 // Explorer-style tree of a log bundle: server folders → sub-folders → files.
 // Clicking a file shows it in that server's pane; "⇉" shows the same log in
 // every pane. Rotated logs (3+ files differing only by date/number) fold into
-// one node.
+// one node. Files lying in the bundle root itself come first under
+// 「(묶음 루트)」 (server ""), and a server folder with no files says so — every
+// file of the bundle is somewhere in the tree.
 
 interface Node {
   key: string;
@@ -25,6 +27,7 @@ interface Props {
   shown: Map<string, number[]>; // "server\u0000rel" → panes (0-based) showing it
   paneOfServer: Map<string, number[]>; // server → panes following it
   onOpen: (server: string, rel: string) => void;
+  onOpenRoot: (rel: string) => void; // a file in the bundle root
   onOpenAll: (rel: string) => void;
   onHide: () => void;
   rotationKey: (rel: string) => string;
@@ -91,12 +94,30 @@ function buildServer(srv: main.BundleServer, rotationKey: (rel: string) => strin
 
 export default function BundleTree(p: Props) {
   const [filter, setFilter] = useState("");
-  const [open, setOpen] = useState<Set<string>>(() => new Set((p.scan.servers ?? []).map((s) => "s:" + s.name)));
-  const q = filter.trim().toLowerCase();
-  const tree = useMemo(
-    () => (p.scan.servers ?? []).map((s) => buildServer(s, p.rotationKey, q)),
-    [p.scan, p.rotationKey, q]
+  const [open, setOpen] = useState<Set<string>>(
+    () => new Set(["root:", ...(p.scan.servers ?? []).map((s) => "s:" + s.name)])
   );
+  const q = filter.trim().toLowerCase();
+  const tree = useMemo(() => {
+    const out = (p.scan.servers ?? []).map((s) => buildServer(s, p.rotationKey, q));
+    const rootFiles = (p.scan.rootFiles ?? []).filter((f) => !q || f.rel.toLowerCase().includes(q));
+    if ((p.scan.rootFiles ?? []).length) {
+      out.unshift({
+        key: "root:",
+        name: "(묶음 루트)",
+        server: "",
+        children: rootFiles.map((f) => ({
+          key: "f:/" + f.rel,
+          name: f.rel,
+          server: "",
+          rel: f.rel,
+          size: f.size,
+          compressed: f.compressed,
+        })),
+      });
+    }
+    return out;
+  }, [p.scan, p.rotationKey, q]);
   const toggle = (k: string) =>
     setOpen((prev) => {
       const n = new Set(prev);
@@ -117,14 +138,16 @@ export default function BundleTree(p: Props) {
           title={
             n.compressed
               ? "압축 파일은 열 수 없습니다"
-              : `${n.server}/${n.rel} — 눌러서 ${n.server} 칸에 열기, 또는 원하는 칸으로 끌어다 놓기`
+              : n.server
+                ? `${n.server}/${n.rel} — 눌러서 ${n.server} 칸에 열기, 또는 원하는 칸으로 끌어다 놓기`
+                : `${n.rel} (묶음 루트) — 눌러서 지금 칸에 열기, 또는 원하는 칸으로 끌어다 놓기`
           }
           draggable={!n.compressed}
           onDragStart={(e) => {
             e.dataTransfer.setData(TREE_DRAG_TYPE, JSON.stringify({ server: n.server, rel: n.rel }));
             e.dataTransfer.effectAllowed = "copy";
           }}
-          onClick={() => !n.compressed && p.onOpen(n.server, n.rel!)}
+          onClick={() => !n.compressed && (n.server ? p.onOpen(n.server, n.rel!) : p.onOpenRoot(n.rel!))}
         >
           <span className="bt-name">{n.name}</span>
           {panes.map((i) => (
@@ -132,7 +155,7 @@ export default function BundleTree(p: Props) {
               {i + 1}
             </span>
           ))}
-          {!n.compressed && (
+          {!n.compressed && n.server && (
             <button
               className="bt-all"
               title="모든 서버의 칸에서 같은 로그 열기"
@@ -152,7 +175,8 @@ export default function BundleTree(p: Props) {
     }
     if (q && n.children && n.children.length === 0) return null; // filtered away
     const isOpen = q ? true : open.has(n.key);
-    const isServer = n.key.startsWith("s:");
+    const isServer = n.key.startsWith("s:") || n.key === "root:";
+    const empty = isServer && !q && n.children!.length === 0;
     const panes = isServer ? p.paneOfServer.get(n.server) ?? [] : [];
     return (
       <div key={n.key}>
@@ -165,6 +189,7 @@ export default function BundleTree(p: Props) {
           <span className="bt-name">
             {isOpen ? "▾" : "▸"} {n.name}
             {n.series ? ` (${n.children!.length})` : ""}
+            {empty ? " (파일 없음)" : ""}
           </span>
           {panes.map((i) => (
             <span key={i} className="bt-pane server">
