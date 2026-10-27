@@ -26,6 +26,10 @@ export function CloseWithSession(arg1) {
   return window['go']['main']['App']['CloseWithSession'](arg1);
 }
 
+export function ExportTagsDialog(arg1, arg2) {
+  return window['go']['main']['App']['ExportTagsDialog'](arg1, arg2);
+}
+
 export function FileAssociationSupported() {
   return window['go']['main']['App']['FileAssociationSupported']();
 }
@@ -64,6 +68,14 @@ export function GetPendingReleaseNotes() {
 
 export function GetPlatform() {
   return window['go']['main']['App']['GetPlatform']();
+}
+
+export function ImportTagsDialog() {
+  return window['go']['main']['App']['ImportTagsDialog']();
+}
+
+export function ImportTagsFiles(arg1) {
+  return window['go']['main']['App']['ImportTagsFiles'](arg1);
 }
 
 export function LoadSession() {

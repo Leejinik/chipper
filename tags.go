@@ -115,18 +115,21 @@ func trimBOM(b []byte) []byte { return bytes.TrimPrefix(b, utf8BOM) }
 // value: anything after it but white space is an error. A second Decode must
 // hit io.EOF — json.Decoder.More() is no such test at the top level (it says
 // "nothing more" before a stray "}" or "]"). Shared by tags.json loading and
-// the import of an exported tag file (stage 5).
+// the import of an exported tag file (stage 5). The decode error is wrapped
+// (errors.As finds *json.SyntaxError etc.); trailing content is errJSONTrailing.
 func decodeOneJSON(data []byte, v any) error {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	if err := dec.Decode(v); err != nil {
-		return fmt.Errorf("JSON 형식이 아닙니다: %v", err)
+		return fmt.Errorf("JSON 형식이 아닙니다: %w", err)
 	}
 	var extra json.RawMessage
 	if err := dec.Decode(&extra); err != io.EOF {
-		return errors.New("JSON 뒤에 다른 내용이 붙어 있습니다")
+		return errJSONTrailing
 	}
 	return nil
 }
+
+var errJSONTrailing = errors.New("JSON 뒤에 다른 내용이 붙어 있습니다")
 
 // normalizeTagName returns name in the form tags.json keeps (Unicode NFC) —
 // the frontend's normalizeTagName. tagNameProblem refuses names not in it.

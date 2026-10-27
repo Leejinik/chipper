@@ -888,12 +888,15 @@ function App() {
   // Saves run one after another: a call made while a save is in flight waits
   // for it, then writes the latest store — so closing the window right after a
   // debounced save started still gets the last change on disk.
-  const saveTagsNow = useCallback((): Promise<void> => {
+  // Resolves to "" when saved (or nothing to save), otherwise why it wasn't.
+  const saveTagsNow = useCallback((): Promise<string> => {
     window.clearTimeout(tagsTimer.current);
-    const run = async () => {
-      if (!tagsReadyRef.current || tagsReadOnlyRef.current) return;
+    const run = async (): Promise<string> => {
+      if (!tagsReadyRef.current) return "";
+      if (tagsReadOnlyRef.current)
+        return "태그 파일이 더 새 버전의 chipper 가 만든 것이거나 읽지 못한 파일이라, 이번 실행에서는 저장하지 않습니다";
       const js = serializeTags(tagStoreRef.current);
-      if (js === lastSavedTags.current) return;
+      if (js === lastSavedTags.current) return "";
       lastSavedTags.current = js;
       try {
         await SaveTags(js);
@@ -902,22 +905,36 @@ function App() {
           legacyRulesRef.current = undefined; // common lives in tags.json from now on
           scheduleAutosave();
         }
+        return "";
       } catch (e) {
         console.error("태그 저장 실패", e);
         if (tagsErrorCode(e) === TAGS_ERR.NEWER_ON_DISK) {
           // a newer chipper wrote tags.json meanwhile: stop saving over it
           tagsReadOnlyRef.current = true;
           setTagsNotice("더 새 버전의 chipper 가 태그 파일을 바꿔, 여기서 바꾼 내용은 저장되지 않습니다. 다시 켜면 그 내용을 읽습니다.");
-          return;
+          return String(e);
         }
         lastSavedTags.current = ""; // retry on the next change
         setTagsNotice("태그 저장 실패: " + String(e));
+        return String(e);
       }
     };
     const p = tagsSaving.current.then(run, run);
-    tagsSaving.current = p.catch(() => {});
+    tagsSaving.current = p.then(
+      () => {},
+      () => {}
+    );
     return p;
   }, [scheduleAutosave]);
+  // for the tag window around an import: `next` is written before React has
+  // re-rendered with it
+  const saveTagsWith = useCallback(
+    (next?: TagStore) => {
+      if (next) tagStoreRef.current = next;
+      return saveTagsNow();
+    },
+    [saveTagsNow]
+  );
   useEffect(() => {
     if (!tagsReady) return;
     window.clearTimeout(tagsTimer.current);
@@ -3454,6 +3471,7 @@ function App() {
           initial={tagsOpen}
           applied={active ? appliedTags(active).names : [COMMON]}
           notice={tagsNotice}
+          onSaveNow={saveTagsWith}
         />
       )}
 

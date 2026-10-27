@@ -1,17 +1,16 @@
-// Bundles the unit test files with esbuild (from vite's node_modules) and runs it in node.
+// Bundles each tests/*-unit.ts with esbuild (from vite's node_modules) and runs it in node.
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { execFileSync } = require("child_process");
 const esbuild = require(path.join(__dirname, "..", "node_modules", "esbuild"));
 
-// tags-unit.ts (stage 3) and assign-unit.ts (stage 4)
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "chipper-unit-"));
 let failed = false;
-for (const name of ["tags-unit", "assign-unit"]) {
-  const out = path.join(dir, name + ".cjs");
+for (const f of fs.readdirSync(__dirname).filter((f) => f.endsWith("-unit.ts")).sort()) {
+  const out = path.join(dir, f.replace(/\.ts$/, ".cjs"));
   esbuild.buildSync({
-    entryPoints: [path.join(__dirname, name + ".ts")],
+    entryPoints: [path.join(__dirname, f)],
     bundle: true,
     platform: "node",
     format: "cjs",
