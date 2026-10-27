@@ -45,7 +45,9 @@ function buildServer(srv: main.BundleServer, rotationKey: (rel: string) => strin
     dirs.set(path, n);
     return n;
   };
-  for (const f of srv.files) {
+  // An empty server folder came as files: null before v1.2.1 and blanked the
+  // whole window ("t.files is not iterable").
+  for (const f of srv.files ?? []) {
     if (q && !f.rel.toLowerCase().includes(q)) continue;
     const cut = f.rel.lastIndexOf("/");
     dirOf(cut < 0 ? "" : f.rel.slice(0, cut)).children!.push({
@@ -89,10 +91,10 @@ function buildServer(srv: main.BundleServer, rotationKey: (rel: string) => strin
 
 export default function BundleTree(p: Props) {
   const [filter, setFilter] = useState("");
-  const [open, setOpen] = useState<Set<string>>(() => new Set(p.scan.servers.map((s) => "s:" + s.name)));
+  const [open, setOpen] = useState<Set<string>>(() => new Set((p.scan.servers ?? []).map((s) => "s:" + s.name)));
   const q = filter.trim().toLowerCase();
   const tree = useMemo(
-    () => p.scan.servers.map((s) => buildServer(s, p.rotationKey, q)),
+    () => (p.scan.servers ?? []).map((s) => buildServer(s, p.rotationKey, q)),
     [p.scan, p.rotationKey, q]
   );
   const toggle = (k: string) =>
@@ -185,15 +187,15 @@ export default function BundleTree(p: Props) {
           ◀
         </button>
       </div>
-      {p.scan.servers.some((x) => x.truncated || x.unreadable > 0) && (
+      {(p.scan.servers ?? []).some((x) => x.truncated || x.unreadable > 0) && (
         <div className="bt-warn">
-          {p.scan.servers
+          {(p.scan.servers ?? [])
             .filter((x) => x.truncated || x.unreadable > 0)
             .map(
               (x) =>
                 `${x.name}: ` +
                 [
-                  x.truncated ? `파일이 너무 많아 앞의 ${x.files.length.toLocaleString()}개만 보입니다` : "",
+                  x.truncated ? `파일이 너무 많아 앞의 ${(x.files ?? []).length.toLocaleString()}개만 보입니다` : "",
                   x.unreadable > 0 ? `읽을 수 없는 항목 ${x.unreadable}개(권한 등)는 빠졌습니다` : "",
                 ]
                   .filter(Boolean)

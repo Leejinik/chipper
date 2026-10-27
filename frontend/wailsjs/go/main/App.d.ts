@@ -25,13 +25,13 @@ export function GetPendingReleaseNotes():Promise<updater.PendingNotes>;
 
 export function GetPlatform():Promise<string>;
 
-export function LoadSession():Promise<string>;
+export function LoadSession():Promise<main.SessionLoad>;
 
 export function MarkReleaseNotesSeen():Promise<void>;
 
 export function OpenDefaultAppsSettings():Promise<void>;
 
-export function OpenFileDialog():Promise<main.FileDoc>;
+export function OpenFileDialog():Promise<string>;
 
 export function OpenFilesDialog():Promise<Array<string>>;
 
@@ -43,9 +43,9 @@ export function ReadFileAs(arg1:string,arg2:string):Promise<main.FileDoc>;
 
 export function RegisterFileTypes(arg1:Array<string>):Promise<void>;
 
-export function SaveFile(arg1:string,arg2:string,arg3:string):Promise<main.FileDoc>;
+export function SaveFile(arg1:string,arg2:string,arg3:main.SaveOptions):Promise<main.FileDoc>;
 
-export function SaveFileDialog(arg1:string,arg2:string,arg3:string):Promise<main.FileDoc>;
+export function SaveFileDialog(arg1:string,arg2:string,arg3:main.SaveOptions):Promise<main.FileDoc>;
 
 export function SaveSession(arg1:string):Promise<void>;
 

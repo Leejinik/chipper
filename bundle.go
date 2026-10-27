@@ -63,7 +63,10 @@ func (a *App) ScanBundle(root string) (Bundle, error) {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 			continue
 		}
-		srv := BundleServer{Name: e.Name()}
+		// Files starts as [] so an empty server folder reaches the frontend as an
+		// empty list, not JSON null (null crashed the whole UI: "t.files is not
+		// iterable").
+		srv := BundleServer{Name: e.Name(), Files: []BundleFile{}}
 		base := filepath.Join(root, e.Name())
 		walkErr := filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
 			if err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,6 +34,12 @@ type App struct {
 	pending     string      // latest session snapshot, flushed synchronously on close
 	closing     atomic.Bool // close requested; the frontend is flushing its final snapshot
 	chipsCancel atomic.Bool // set by CancelChips to stop an in-flight TypeChips run
+
+	// sessionBacked: this run already copied the previous session to .bak
+	// (guarded by saveMu). sessionBlocked: an unreadable session could not be
+	// kept aside, so this run must not write over it.
+	sessionBacked  bool
+	sessionBlocked atomic.Bool
 
 	// File-open delivery (double-click an associated file). openMu guards both
 	// fields. pendingOpen buffers paths that arrive before the frontend has
@@ -243,11 +250,29 @@ func (a *App) onSecondInstanceLaunch(data options.SecondInstanceData) {
 	a.deliverOpenPaths(paths)
 }
 
+// The session lives in session.v3.json. v1.1 (session format 2) reads and
+// rewrites session.json, and on meeting a v3 session there it replaced it with
+// its welcome document — so v1.2.1+ keeps its own file and never writes
+// session.json. session.json is still read once, as the starting point, when
+// session.v3.json does not exist yet (upgrade from v1.1 / v1.2.0).
+const (
+	sessionFileName       = "session.v3.json"
+	legacySessionFileName = "session.json"
+	sessionFormatVersion  = 3 // must match SESSION_VERSION in App.tsx
+)
+
 func (a *App) sessionPath() string {
 	if a.dataDir == "" {
 		return ""
 	}
-	return filepath.Join(a.dataDir, "session.json")
+	return filepath.Join(a.dataDir, sessionFileName)
+}
+
+func (a *App) legacySessionPath() string {
+	if a.dataDir == "" {
+		return ""
+	}
+	return filepath.Join(a.dataDir, legacySessionFileName)
 }
 
 // FileDoc is a single document handed to / from the frontend.
@@ -260,6 +285,96 @@ type FileDoc struct {
 	Encoding string `json:"encoding"` // detected/used text encoding
 	Binary   bool   `json:"binary"`   // true when the file looks like binary (not a text document)
 	Canceled bool   `json:"canceled"`
+	// The editor turns every line break into LF, so the file's own kind is
+	// remembered here and restored on save. "" = the file has no line break.
+	EOL      string `json:"eol"`      // "lf" | "crlf" | "cr" (for a mixed file: the most common kind)
+	EOLMixed bool   `json:"eolMixed"` // more than one kind of line break
+	BOM      bool   `json:"bom"`      // the file starts with a byte-order mark
+	// SaveFile only: the text equals what is on disk, so nothing was written.
+	Unchanged bool `json:"unchanged"`
+}
+
+// maxOpenBytes is the largest file chipper reads. Files are read whole and held
+// several times over (bytes, decoded string, editor document); past ~450MB the
+// WebView died in the v1.2.0 tests, so the limit keeps a margin below that.
+const maxOpenBytes int64 = 384 << 20 // 402,653,184 bytes
+
+func mib(n int64) string { return fmt.Sprintf("%.1fMB", float64(n)/(1<<20)) }
+
+// openSizeError refuses a file over maxOpenBytes before any of it is read.
+func openSizeError(path string) error {
+	info, err := os.Stat(path)
+	if err != nil || info.IsDir() || info.Size() <= maxOpenBytes {
+		return nil // let the read itself report a missing file etc.
+	}
+	return fmt.Errorf("이 파일은 너무 커서 열 수 없습니다 (%s). %s 까지만 열 수 있습니다. 다음 버전의 『태그 줄만 보기』로 걸린 줄만 볼 수 있습니다", mib(info.Size()), mib(maxOpenBytes))
+}
+
+// detectEOL reports the line-break kind of s: the most common one when several
+// are mixed (ties prefer CRLF, then LF), "" when there is none.
+func detectEOL(s string) (eol string, mixed bool) {
+	var crlf, lf, cr int
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\r':
+			if i+1 < len(s) && s[i+1] == '\n' {
+				crlf++
+				i++
+			} else {
+				cr++
+			}
+		case '\n':
+			lf++
+		}
+	}
+	kinds := 0
+	for _, n := range []int{crlf, lf, cr} {
+		if n > 0 {
+			kinds++
+		}
+	}
+	switch {
+	case kinds == 0:
+		return "", false
+	case crlf >= lf && crlf >= cr:
+		return "crlf", kinds > 1
+	case lf >= cr:
+		return "lf", kinds > 1
+	default:
+		return "cr", kinds > 1
+	}
+}
+
+// normalizeEOL turns every CRLF / CR into LF — what the editor does to a document.
+func normalizeEOL(s string) string {
+	if !strings.Contains(s, "\r") {
+		return s
+	}
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\r", "\n")
+}
+
+// applyEOL writes the editor's LF line breaks back as the file's own kind.
+func applyEOL(content, eol string) string {
+	switch eol {
+	case "crlf":
+		return strings.ReplaceAll(normalizeEOL(content), "\n", "\r\n")
+	case "cr":
+		return strings.ReplaceAll(normalizeEOL(content), "\n", "\r")
+	}
+	return content
+}
+
+// hasBOM reports whether data starts with the byte-order mark of enc.
+func hasBOM(data []byte, enc string) bool {
+	switch enc {
+	case "utf-8", "utf-8-bom", "":
+		return bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF})
+	case "utf-16le":
+		return bytes.HasPrefix(data, []byte{0xFF, 0xFE})
+	case "utf-16be":
+		return bytes.HasPrefix(data, []byte{0xFE, 0xFF})
+	}
+	return false
 }
 
 // looksBinary reports whether the data appears to be a binary (non-text) file,
@@ -330,20 +445,14 @@ func dialogPattern(p string) string {
 	return strings.Join(out, ";")
 }
 
-// OpenFileDialog shows a native open dialog and returns the chosen file's
-// content. FileDoc.Canceled is true when the user dismisses the dialog.
-func (a *App) OpenFileDialog() (FileDoc, error) {
-	path, err := wruntime.OpenFileDialog(a.ctx, wruntime.OpenDialogOptions{
+// OpenFileDialog shows a native open dialog and returns the chosen path ("" when
+// dismissed). It does not read the file: the frontend reads every file through
+// one path that checks its size first (big-file confirm, too-big refusal).
+func (a *App) OpenFileDialog() (string, error) {
+	return wruntime.OpenFileDialog(a.ctx, wruntime.OpenDialogOptions{
 		Title:   "파일 열기",
 		Filters: fileFilters,
 	})
-	if err != nil {
-		return FileDoc{}, err
-	}
-	if path == "" {
-		return FileDoc{Canceled: true}, nil
-	}
-	return a.readDoc(path)
 }
 
 // OpenFilesDialog lets the user pick several files at once (filling multi-view
@@ -459,8 +568,16 @@ func decodeWith(data []byte, enc string) (string, error) {
 	}
 }
 
-// encodeText encodes a UTF-8 string into bytes using the given encoding.
-func encodeText(content string, enc string) ([]byte, error) {
+// encodeText encodes a UTF-8 string into bytes using the given encoding. The
+// editor's LF line breaks are written as eol ("lf" / "crlf" / "cr"; "" = LF).
+// bom only matters for UTF-16: false writes no byte-order mark (a BOM-less
+// UTF-16 file stays BOM-less). For UTF-8 the id itself says it (utf-8-bom).
+func encodeText(content string, enc string, eol string, bom bool) ([]byte, error) {
+	content = applyEOL(content, eol)
+	utf16BOM := unicode.IgnoreBOM
+	if bom {
+		utf16BOM = unicode.UseBOM
+	}
 	switch enc {
 	case "utf-8", "":
 		return []byte(content), nil
@@ -469,15 +586,26 @@ func encodeText(content string, enc string) ([]byte, error) {
 	case "cp949":
 		return korean.EUCKR.NewEncoder().Bytes([]byte(content))
 	case "utf-16le":
-		return unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewEncoder().Bytes([]byte(content))
+		return unicode.UTF16(unicode.LittleEndian, utf16BOM).NewEncoder().Bytes([]byte(content))
 	case "utf-16be":
-		return unicode.UTF16(unicode.BigEndian, unicode.UseBOM).NewEncoder().Bytes([]byte(content))
+		return unicode.UTF16(unicode.BigEndian, utf16BOM).NewEncoder().Bytes([]byte(content))
 	default:
 		return []byte(content), nil
 	}
 }
 
+// fillFormat records the file's line-break kind and BOM on doc.
+func fillFormat(doc *FileDoc, data []byte, content string) {
+	doc.EOL, doc.EOLMixed = detectEOL(content)
+	doc.BOM = hasBOM(data, doc.Encoding)
+}
+
+// readDoc is the one place a file is read for the editor. A file over
+// maxOpenBytes is refused before any of it is read.
 func (a *App) readDoc(path string) (FileDoc, error) {
+	if err := openSizeError(path); err != nil {
+		return FileDoc{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return FileDoc{}, err
@@ -486,12 +614,16 @@ func (a *App) readDoc(path string) (FileDoc, error) {
 	doc := a.docWithStat(path, content)
 	doc.Encoding = enc
 	doc.Binary = looksBinary([]byte(content))
+	fillFormat(&doc, data, content)
 	return doc, nil
 }
 
 // ReadFileAs re-reads a file decoding it with an explicit encoding (used by
 // "다른 인코딩으로 다시 열기").
 func (a *App) ReadFileAs(path string, enc string) (FileDoc, error) {
+	if err := openSizeError(path); err != nil {
+		return FileDoc{}, err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return FileDoc{}, err
@@ -503,6 +635,7 @@ func (a *App) ReadFileAs(path string, enc string) (FileDoc, error) {
 	doc := a.docWithStat(path, content)
 	doc.Encoding = enc
 	doc.Binary = looksBinary([]byte(content))
+	fillFormat(&doc, data, content)
 	return doc, nil
 }
 
@@ -556,9 +689,68 @@ func atomicWrite(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// SaveOptions says how a document is written back.
+type SaveOptions struct {
+	Encoding string `json:"encoding"`
+	// Line-break kind to write the editor's LF as: "lf" | "crlf" | "cr". ""
+	// means not known (a tab from an older session): keep the kind — and, for
+	// UTF-16, the BOM — of the file currently on disk (LF/BOM for a new file).
+	EOL string `json:"eol"`
+	// UTF-16 only: write without a byte-order mark (the file had none).
+	NoBOM bool `json:"noBom"`
+	// Write even when the text equals the file's (an explicit encoding change).
+	Force bool `json:"force"`
+}
+
+// prepareSave encodes content for path. old is the file's current bytes (nil
+// when it does not exist).
+func prepareSave(old []byte, content string, opt SaveOptions) (data []byte, eol string, bom bool, err error) {
+	eol, bom = opt.EOL, !opt.NoBOM
+	if eol == "" {
+		eol, bom = "lf", true
+		if old != nil {
+			if txt, derr := decodeWith(old, opt.Encoding); derr == nil {
+				if e, _ := detectEOL(txt); e != "" {
+					eol = e
+				}
+			}
+			if opt.Encoding == "utf-16le" || opt.Encoding == "utf-16be" {
+				bom = hasBOM(old, opt.Encoding)
+			}
+		}
+	}
+	data, err = encodeText(content, opt.Encoding, eol, bom)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("%s 인코딩으로 저장할 수 없는 문자가 있습니다", opt.Encoding)
+	}
+	return data, eol, bom, nil
+}
+
+// sameAsDisk: writing data would not change the text of the file (same bytes, or
+// the same text once line breaks are set aside — a mixed-line-break file that
+// was not really edited keeps its own line breaks).
+func sameAsDisk(old, data []byte, content, enc string) bool {
+	if old == nil {
+		return false
+	}
+	if bytes.Equal(old, data) {
+		return true
+	}
+	txt, err := decodeWith(old, enc)
+	return err == nil && normalizeEOL(txt) == normalizeEOL(content)
+}
+
+func (a *App) savedDoc(path, content, enc, eol string, bom bool) FileDoc {
+	doc := a.docWithStat(path, content)
+	doc.Encoding = enc
+	doc.EOL = eol
+	doc.BOM = bom && (enc == "utf-16le" || enc == "utf-16be") || enc == "utf-8-bom"
+	return doc
+}
+
 // SaveFileDialog shows a native "save as" dialog and writes content atomically
 // to the chosen path. Returns the resulting FileDoc (Canceled when dismissed).
-func (a *App) SaveFileDialog(defaultName string, content string, enc string) (FileDoc, error) {
+func (a *App) SaveFileDialog(defaultName string, content string, opt SaveOptions) (FileDoc, error) {
 	path, err := wruntime.SaveFileDialog(a.ctx, wruntime.SaveDialogOptions{
 		Title:                "다른 이름으로 저장",
 		DefaultFilename:      defaultName,
@@ -571,35 +763,47 @@ func (a *App) SaveFileDialog(defaultName string, content string, enc string) (Fi
 	if path == "" {
 		return FileDoc{Canceled: true}, nil
 	}
-	data, eerr := encodeText(content, enc)
-	if eerr != nil {
-		return FileDoc{}, fmt.Errorf("%s 인코딩으로 저장할 수 없는 문자가 있습니다", enc)
+	var old []byte
+	if b, rerr := os.ReadFile(path); rerr == nil {
+		old = b
+	}
+	data, eol, bom, perr := prepareSave(old, content, opt)
+	if perr != nil {
+		return FileDoc{}, perr
 	}
 	if err := atomicWrite(path, data, 0o644); err != nil {
 		return FileDoc{}, err
 	}
-	doc := a.docWithStat(path, content)
-	doc.Encoding = enc
-	return doc, nil
+	return a.savedDoc(path, content, opt.Encoding, eol, bom), nil
 }
 
-// SaveFile writes content atomically to an already-known path (Ctrl+S), encoding
-// it with enc. Returns the updated FileDoc (fresh mtime/size) so the frontend
-// can keep its external-change token current.
-func (a *App) SaveFile(path string, content string, enc string) (FileDoc, error) {
+// SaveFile writes content atomically to an already-known path (Ctrl+S). The
+// file keeps its line-break kind and BOM (opt). When the text equals what is on
+// disk nothing is written (FileDoc.Unchanged) unless opt.Force. Returns the
+// FileDoc with a fresh mtime so the frontend keeps its external-change token
+// current.
+func (a *App) SaveFile(path string, content string, opt SaveOptions) (FileDoc, error) {
 	if path == "" {
 		return FileDoc{}, fmt.Errorf("빈 파일 경로")
 	}
-	data, eerr := encodeText(content, enc)
-	if eerr != nil {
-		return FileDoc{}, fmt.Errorf("%s 인코딩으로 저장할 수 없는 문자가 있습니다", enc)
+	var old []byte
+	if b, rerr := os.ReadFile(path); rerr == nil {
+		old = b
+	}
+	data, eol, bom, perr := prepareSave(old, content, opt)
+	if perr != nil {
+		return FileDoc{}, perr
+	}
+	if !opt.Force && sameAsDisk(old, data, content, opt.Encoding) {
+		// The file is left exactly as it is (line breaks, BOM, mtime).
+		doc := a.savedDoc(path, content, opt.Encoding, eol, bom)
+		doc.Unchanged = true
+		return doc, nil
 	}
 	if err := atomicWrite(path, data, 0o644); err != nil {
 		return FileDoc{}, err
 	}
-	doc := a.docWithStat(path, content)
-	doc.Encoding = enc
-	return doc, nil
+	return a.savedDoc(path, content, opt.Encoding, eol, bom), nil
 }
 
 // SaveSession persists the session blob to disk (debounced autosave) and also
@@ -611,31 +815,194 @@ func (a *App) SaveSession(data string) error {
 	return a.writeSession(data)
 }
 
+// writeSession writes the session file. The first write of each run first
+// copies the previous run's session to <session>.bak, so a run that came up
+// with the wrong session (and autosaved it within seconds) can be undone.
 func (a *App) writeSession(data string) error {
 	p := a.sessionPath()
 	if p == "" {
 		return fmt.Errorf("데이터 디렉터리를 사용할 수 없습니다")
 	}
+	if a.sessionBlocked.Load() {
+		return fmt.Errorf("이전 세션 파일을 보관하지 못해 이번 실행에서는 세션을 저장하지 않습니다")
+	}
 	a.saveMu.Lock()
 	defer a.saveMu.Unlock()
+	if !a.sessionBacked {
+		a.sessionBacked = true
+		if prev, err := os.ReadFile(p); err == nil && len(prev) > 0 {
+			_ = atomicWrite(p+".bak", prev, 0o600)
+		}
+	}
 	return atomicWrite(p, []byte(data), 0o600)
 }
 
-// LoadSession returns the persisted session blob, or "" when no session exists
-// yet (first run).
-func (a *App) LoadSession() (string, error) {
+// SessionLoad is what LoadSession hands the frontend: the session to restore
+// ("" = none: first run, or nothing could be recovered) and, when the stored
+// session could not be read, a notice for the user.
+type SessionLoad struct {
+	Data   string `json:"data"`
+	Notice string `json:"notice"`
+}
+
+// LoadSession returns the persisted session. A session that cannot be read
+// (cut off, empty, not JSON, a format this build does not know) is never just
+// dropped: the file is kept as session.broken-<time>.json before anything can
+// overwrite it, the tabs that are still whole are recovered where possible, and
+// the user is told where the original went.
+func (a *App) LoadSession() (SessionLoad, error) {
 	p := a.sessionPath()
 	if p == "" {
-		return "", nil
+		return SessionLoad{}, nil
 	}
-	data, err := os.ReadFile(p)
-	if err != nil {
+	src, legacy := p, false
+	raw, err := os.ReadFile(p)
+	if os.IsNotExist(err) {
+		// Upgrade from v1.1 / v1.2.0: start from session.json, never write it.
+		src, legacy = a.legacySessionPath(), true
+		raw, err = os.ReadFile(src)
 		if os.IsNotExist(err) {
-			return "", nil
+			return SessionLoad{}, nil // first run
 		}
+	}
+	if err != nil {
+		if !legacy {
+			a.sessionBlocked.Store(true) // could not even read it: do not write over it
+		}
+		return SessionLoad{Notice: fmt.Sprintf("이전 세션 파일을 읽지 못했습니다 (%s).\n%s\n이번 실행에서 연 탭은 다음 실행 때 복원되지 않을 수 있습니다.", err, src)}, nil
+	}
+	reason, recovered, n := checkSession(raw)
+	if reason == "" {
+		return SessionLoad{Data: string(raw)}, nil
+	}
+	kept, kerr := keepBrokenSession(a.dataDir, src, raw, !legacy)
+	var b strings.Builder
+	fmt.Fprintf(&b, "이전 세션 파일(%s)을 읽지 못했습니다 — %s.\n", filepath.Base(src), reason)
+	if kerr != nil {
+		if !legacy {
+			a.sessionBlocked.Store(true)
+		}
+		fmt.Fprintf(&b, "원본을 따로 보관하지 못해(%s), 덮어쓰지 않도록 이번 실행에서는 세션을 저장하지 않습니다.\n원본: %s", kerr, src)
+	} else {
+		fmt.Fprintf(&b, "원본은 %s 에 그대로 보관했습니다.", kept)
+	}
+	if n > 0 {
+		fmt.Fprintf(&b, "\n깨지지 않은 탭 %d개는 되살렸습니다.", n)
+	} else {
+		b.WriteString("\n되살릴 수 있는 탭이 없어 새로 시작합니다.")
+	}
+	return SessionLoad{Data: recovered, Notice: b.String()}, nil
+}
+
+// checkSession mirrors the frontend's acceptance test (a number version no
+// newer than ours, and a tabs array). reason is "" for a good session;
+// otherwise it says why, and recovered holds the tabs that are still whole (n
+// of them) wrapped in a minimal session, or "".
+func checkSession(raw []byte) (reason, recovered string, n int) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "파일이 비어 있습니다", "", 0
+	}
+	var s struct {
+		Version json.RawMessage `json:"version"`
+		Tabs    json.RawMessage `json:"tabs"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		tabs := recoverTabs(raw)
+		reason = "파일이 중간에 끊겼거나 형식이 깨져 있습니다"
+		if len(tabs) == 0 {
+			return reason, "", 0
+		}
+		var b bytes.Buffer
+		fmt.Fprintf(&b, `{"version":%d,"tabs":[`, sessionFormatVersion)
+		for i, t := range tabs {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			b.Write(t)
+		}
+		b.WriteString(`]}`)
+		return reason, b.String(), len(tabs)
+	}
+	var ver float64
+	if len(s.Version) == 0 || json.Unmarshal(s.Version, &ver) != nil {
+		return "세션 버전 정보가 없습니다", "", 0
+	}
+	if ver > sessionFormatVersion {
+		return fmt.Sprintf("이 Chipper 가 모르는 세션 형식입니다 (버전 %v — 더 새 Chipper 가 저장한 것일 수 있습니다)", ver), "", 0
+	}
+	if t := bytes.TrimSpace(s.Tabs); len(t) == 0 || t[0] != '[' {
+		return "탭 목록이 없습니다", "", 0
+	}
+	return "", "", 0
+}
+
+// recoverTabs reads a cut-off session as far as it goes and returns the tab
+// objects that are complete. Nothing is recovered from a session that says it
+// is a newer format.
+func recoverTabs(raw []byte) []json.RawMessage {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil
+	}
+	var out []json.RawMessage
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return out
+		}
+		switch key, _ := kt.(string); key {
+		case "version":
+			var v float64
+			if err := dec.Decode(&v); err != nil || v > sessionFormatVersion {
+				return nil
+			}
+		case "tabs":
+			if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+				return out
+			}
+			for dec.More() {
+				var m json.RawMessage
+				if err := dec.Decode(&m); err != nil {
+					return out
+				}
+				if len(m) > 0 && m[0] == '{' {
+					out = append(out, m)
+				}
+			}
+			if _, err := dec.Token(); err != nil { // the closing ]
+				return out
+			}
+		default:
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// keepBrokenSession puts an unreadable session aside as
+// session.broken-<time>.json in dir: moved when it is our own file (so it can
+// never be overwritten), copied when it is session.json (left untouched).
+func keepBrokenSession(dir, src string, raw []byte, move bool) (string, error) {
+	stamp := time.Now().Format("20060102-150405")
+	dst := filepath.Join(dir, "session.broken-"+stamp+".json")
+	for i := 2; ; i++ {
+		if _, err := os.Lstat(dst); os.IsNotExist(err) {
+			break
+		}
+		dst = filepath.Join(dir, fmt.Sprintf("session.broken-%s-%d.json", stamp, i))
+	}
+	if move {
+		if err := os.Rename(src, dst); err == nil {
+			return dst, nil
+		}
+	}
+	if err := atomicWrite(dst, raw, 0o600); err != nil {
 		return "", err
 	}
-	return string(data), nil
+	return dst, nil
 }
 
 // --- Auto-update --------------------------------------------------------

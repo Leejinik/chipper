@@ -129,6 +129,10 @@ export namespace main {
 	    encoding: string;
 	    binary: boolean;
 	    canceled: boolean;
+	    eol: string;
+	    eolMixed: boolean;
+	    bom: boolean;
+	    unchanged: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new FileDoc(source);
@@ -144,6 +148,10 @@ export namespace main {
 	        this.encoding = source["encoding"];
 	        this.binary = source["binary"];
 	        this.canceled = source["canceled"];
+	        this.eol = source["eol"];
+	        this.eolMixed = source["eolMixed"];
+	        this.bom = source["bom"];
+	        this.unchanged = source["unchanged"];
 	    }
 	}
 	export class FileStat {
@@ -160,6 +168,38 @@ export namespace main {
 	        this.exists = source["exists"];
 	        this.modTime = source["modTime"];
 	        this.size = source["size"];
+	    }
+	}
+	export class SaveOptions {
+	    encoding: string;
+	    eol: string;
+	    noBom: boolean;
+	    force: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new SaveOptions(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.encoding = source["encoding"];
+	        this.eol = source["eol"];
+	        this.noBom = source["noBom"];
+	        this.force = source["force"];
+	    }
+	}
+	export class SessionLoad {
+	    data: string;
+	    notice: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new SessionLoad(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.data = source["data"];
+	        this.notice = source["notice"];
 	    }
 	}
 

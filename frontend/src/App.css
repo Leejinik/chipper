@@ -1240,3 +1240,46 @@
 .bt-row.file[draggable="true"] {
   cursor: grab;
 }
+
+/* v1.2.1 — session notice, render-error boundary, line-break label */
+.notice-bar {
+  flex: none;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 8px 14px;
+  background: #3a2f14;
+  border-bottom: 1px solid #806a2c;
+  color: #f3e2b3;
+  font-size: 12px;
+}
+.notice-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+.render-error {
+  margin: auto;
+  max-width: 520px;
+  padding: 16px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+.render-error-title {
+  color: var(--danger);
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.render-error-msg {
+  font-family: Consolas, monospace;
+  word-break: break-all;
+  margin-bottom: 8px;
+}
+.render-error-sub {
+  margin-bottom: 12px;
+}
+.st-eol.mixed {
+  color: #f3c969;
+}

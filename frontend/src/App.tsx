@@ -14,6 +14,7 @@ import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
 import { runSyncedNav, syncedNavCommand } from "./syncNav";
 import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
+import ErrorBoundary from "./ErrorBoundary";
 import {
   DEFAULT_LOG_RULES,
   looksLikeLog,
@@ -90,6 +91,22 @@ interface Tab {
   // share names ("messages" ×3), so they read "server1 · messages".
   label: string;
   logColors: "" | "on" | "off"; // log colouring override; "" = auto (log-like plain text)
+  // The editor turns every line break into LF; the file's own kind and BOM are
+  // remembered from the read and written back on save (Go SaveOptions).
+  eol: "" | "lf" | "crlf" | "cr"; // "" = unknown / no line break (Go then follows the file on disk)
+  eolMixed: boolean; // the file mixes line-break kinds (saving makes them all `eol`)
+  noBom: boolean; // UTF-16 read without a BOM: write it back without one
+  // Deferred read paused: the file is big (bytes) and waits for 「열기」. Not persisted.
+  bigSize: number;
+}
+
+type FileFormat = Pick<Tab, "eol" | "eolMixed" | "noBom">;
+function formatOf(doc: { eol?: string; eolMixed?: boolean; bom?: boolean }): FileFormat {
+  const eol = doc.eol === "lf" || doc.eol === "crlf" || doc.eol === "cr" ? doc.eol : "";
+  return { eol, eolMixed: !!doc.eolMixed, noBom: !doc.bom };
+}
+function eolName(eol: string): string {
+  return eol === "crlf" ? "CRLF" : eol === "cr" ? "CR" : "LF";
 }
 
 const ENCODINGS: { id: string; label: string }[] = [
@@ -176,15 +193,16 @@ function underRoot(p: string, root: string): boolean {
 // Names compare case-insensitively: bundles come from Windows copies as often
 // as from Linux servers.
 function resolveInServer(scan: main.Bundle, server: string, rel: string): main.BundleFile | null {
-  const srv = scan.servers.find((x) => x.name === server);
+  const srv = (scan.servers ?? []).find((x) => x.name === server);
   if (!srv) return null;
-  const exact = srv.files.find((f) => f.rel === rel);
+  const files = srv.files ?? []; // an empty folder came as null before v1.2.1
+  const exact = files.find((f) => f.rel === rel);
   if (exact) return exact;
   const lower = rel.toLowerCase();
-  const folded = srv.files.find((f) => f.rel.toLowerCase() === lower);
+  const folded = files.find((f) => f.rel.toLowerCase() === lower);
   if (folded) return folded;
   const base = lower.split("/").pop();
-  const same = srv.files.filter((f) => f.rel.toLowerCase().split("/").pop() === base);
+  const same = files.filter((f) => f.rel.toLowerCase().split("/").pop() === base);
   return same.length === 1 ? same[0] : null;
 }
 
@@ -203,6 +221,19 @@ function fmtSize(n: number): string {
   return n + "B";
 }
 const BIG_FILE = 100 << 20; // warn before opening a log this large
+// Never read a file larger than this (Go readDoc refuses it too): 500MB+ crashed
+// the WebView in the v1.2.0 tests. 384MB = 402,653,184 bytes.
+const TOO_BIG_FILE = 384 << 20;
+const baseName = (p: string) => p.split(/[\\/]/).pop() || p;
+function tooBigText(files: { name: string; size: number }[]): string {
+  return (
+    (files.length === 1
+      ? `"${files[0].name}" 은(는) 너무 커서 열 수 없습니다 (${fmtSize(files[0].size)}).`
+      : "다음 파일은 너무 커서 열 수 없습니다:\n" + files.map((f) => `- ${f.name} (${fmtSize(f.size)})`).join("\n")) +
+    `\n${fmtSize(TOO_BIG_FILE)} 까지만 열 수 있습니다. 다음 버전의 『태그 줄만 보기』로 걸린 줄만 볼 수 있습니다.`
+  );
+}
+const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?";
 
 // Columns of the 6-wide grid each pane spans: 1–3 panes sit in one row; 4 is
 // 2×2; 5 is 3 over 2; 6 is 3×2.
@@ -445,6 +476,10 @@ function makeTab(p: Partial<Tab>): Tab {
     loadError: "",
     label: p.label ?? "",
     logColors: p.logColors ?? "",
+    eol: p.eol ?? "",
+    eolMixed: p.eolMixed ?? false,
+    noBom: p.noBom ?? false,
+    bigSize: 0,
   };
 }
 
@@ -475,6 +510,7 @@ function normalizeTab(raw: any): Tab | null {
     needsLoad: !!raw.needsLoad && typeof raw.path === "string" && raw.path !== "",
     label: typeof raw.label === "string" ? raw.label : "",
     logColors: raw.logColors === "on" || raw.logColors === "off" ? raw.logColors : "",
+    ...formatOf({ eol: raw.eol, eolMixed: raw.eolMixed, bom: !raw.noBom }),
   });
 }
 
@@ -575,6 +611,8 @@ function App() {
   focusSlotRef.current = focusSlot;
   const [paneCounts, setPaneCounts] = useState<Record<string, number>>({});
   const [bundleScan, setBundleScan] = useState<main.Bundle | null>(null);
+  // Why the stored session could not be restored as it was (shown as a bar).
+  const [sessionNotice, setSessionNotice] = useState<string>("");
   const bundleScanRef = useRef(bundleScan);
   bundleScanRef.current = bundleScan;
   // --- live editors ---------------------------------------------------------
@@ -645,8 +683,8 @@ function App() {
       version: SESSION_VERSION,
       tabs: tabsRef.current.map((t) =>
         t.path && !t.dirty
-          ? { ...t, content: "", needsLoad: true, loadError: "" }
-          : { ...t, content: liveContent(t) }
+          ? { ...t, content: "", needsLoad: true, loadError: "", bigSize: 0 }
+          : { ...t, content: liveContent(t), bigSize: 0 }
       ),
       activeId: activeIdRef.current,
       splitRatio: ratioRef.current,
@@ -665,7 +703,11 @@ function App() {
     didInit.current = true;
     (async () => {
       try {
-        const raw = await LoadSession();
+        // Go keeps an unreadable session aside (session.broken-<time>.json),
+        // hands over whatever tabs could be recovered and says what happened.
+        const res = await LoadSession();
+        if (res?.notice) setSessionNotice(res.notice);
+        const raw = res?.data ?? "";
         if (raw) {
           const s = JSON.parse(raw);
           // A recognized session is honored verbatim — including an empty tab
@@ -840,36 +882,121 @@ function App() {
     setActiveId(tab.id);
   }, []);
 
+  // --- size gate -------------------------------------------------------------
+  // The one size check every way of opening a file goes through, right before
+  // the file is read: 📂 열기, the multi-file dialog (탭 고르기 「📂 파일 열기…」,
+  // an empty pane), Explorer drag & drop, a second launch (-Open) / associated
+  // file, the bundle tree (click, ⇉, drag). The deferred read of tabs restored
+  // from the session (loadTabFromDisk) applies the same two limits but asks
+  // inside the pane instead of a dialog. Files over TOO_BIG_FILE are
+  // refused (one message for all of them); files of BIG_FILE or more need one
+  // confirm for the whole batch. `size` may be given (the bundle scan knows it);
+  // otherwise the file is stat'ed.
+  const gateSizes = useCallback(
+    async (
+      items: { path: string; size?: number; name?: string }[]
+    ): Promise<{ allowed: Set<string>; tooBig: Set<string>; declined: boolean }> => {
+      const sized = await Promise.all(
+        items.map(async (x) => {
+          let size = typeof x.size === "number" ? x.size : 0;
+          if (typeof x.size !== "number") {
+            try {
+              const st = await StatFile(x.path);
+              size = st?.exists ? st.size : 0;
+            } catch {
+              size = 0; // the read itself will report the problem
+            }
+          }
+          return { path: x.path, name: x.name || baseName(x.path), size };
+        })
+      );
+      const tooBig = sized.filter((x) => x.size > TOO_BIG_FILE);
+      const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
+      if (tooBig.length) alert(tooBigText(tooBig));
+      const declined =
+        big.length > 0 &&
+        !window.confirm(
+          `큰 파일이 있습니다 (${big.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")}).\n` + BIG_CONFIRM_TAIL
+        );
+      return {
+        allowed: new Set(sized.filter((x) => x.size <= TOO_BIG_FILE && !(declined && x.size >= BIG_FILE)).map((x) => x.path)),
+        tooBig: new Set(tooBig.map((x) => x.path)),
+        declined,
+      };
+    },
+    []
+  );
+
+  // Open one or more files by absolute path (📂 열기, the multi-file dialog,
+  // drag & drop, a second launch). Dedupes against already-open tabs and within
+  // the batch, checks sizes (gateSizes), skips binaries, and focuses the last
+  // one opened.
+  // Returns the ids of the tabs (opened or already open) in path order; pass
+  // activate=false when the caller places them itself (multi-view panes).
+  const openPaths = useCallback(async (paths: string[], activate = true): Promise<string[]> => {
+    const fresh = paths.filter(
+      (p, i) => p && paths.indexOf(p) === i && !tabsRef.current.some((t) => t.path === p)
+    );
+    const gate = fresh.length ? await gateSizes(fresh.map((path) => ({ path }))) : null;
+    const seen = new Set(tabsRef.current.filter((t) => t.path).map((t) => t.path));
+    const skipped: string[] = [];
+    const ids: string[] = [];
+    let lastId = "";
+    for (const path of paths) {
+      if (!path) continue;
+      const existing = tabsRef.current.find((t) => t.path === path);
+      if (existing) {
+        lastId = existing.id;
+        ids.push(existing.id);
+        continue;
+      }
+      if (seen.has(path)) continue; // duplicate within this drop batch
+      if (gate && !gate.allowed.has(path)) continue; // too big (told) or big and declined
+      try {
+        const res = await ReadFile(path);
+        if (!res) continue;
+        if (res.binary) {
+          skipped.push((res.name || baseName(path)) + " (텍스트 문서가 아님)");
+          continue;
+        }
+        const lang = langFromPath(res.path);
+        const tab = makeTab({
+          title: res.name,
+          path: res.path,
+          content: res.content,
+          lang,
+          dirty: false,
+          view: defaultView(lang),
+          mtime: res.modTime,
+          encoding: res.encoding,
+          ...formatOf(res),
+        });
+        seen.add(path);
+        setTabs((prev) => (prev.some((t) => t.path === tab.path) ? prev : [...prev, tab]));
+        lastId = tab.id;
+        ids.push(tab.id);
+      } catch (e) {
+        skipped.push(baseName(path) + " — " + String(e));
+        console.error("파일 열기 실패", path, e);
+      }
+    }
+    if (activate && lastId) setActiveId(lastId);
+    if (skipped.length) {
+      alert("다음 파일은 열 수 없습니다:\n- " + skipped.join("\n- "));
+    }
+    return ids;
+  }, [gateSizes]);
+
   const doOpen = useCallback(async () => {
     try {
-      const res = await OpenFileDialog();
-      if (!res || res.canceled) return;
-      if (res.binary) {
-        alert(`"${res.name}"은(는) 텍스트 문서가 아니어서 열 수 없습니다.`);
-        return;
-      }
-      const existing = tabsRef.current.find((t) => t.path && t.path === res.path);
-      if (existing) {
-        setActiveId(existing.id);
-        return;
-      }
-      const lang = langFromPath(res.path);
-      const tab = makeTab({
-        title: res.name,
-        path: res.path,
-        content: res.content,
-        lang,
-        dirty: false,
-        view: defaultView(lang),
-        mtime: res.modTime,
-        encoding: res.encoding,
-      });
-      setTabs((prev) => [...prev, tab]);
-      setActiveId(tab.id);
+      // The dialog only picks the path; reading goes through openPaths so the
+      // size check applies here too.
+      const path = await OpenFileDialog();
+      if (path) await openPaths([path]);
     } catch (e) {
       alert("파일을 열지 못했습니다:\n" + String(e));
     }
-  }, []);
+  }, [openPaths]);
 
   // --- file association ("파일 연결") handlers ------------------------------
   // Opens the modal, loading platform support + per-extension current status.
@@ -923,65 +1050,29 @@ function App() {
     }
   }, [assocTypes, assocChecked]);
 
-  // Open one or more files by absolute path (used by drag & drop). Dedupes
-  // against already-open tabs and within the batch, skips binaries, and focuses
-  // the last one opened.
-  // Returns the ids of the tabs (opened or already open) in path order; pass
-  // activate=false when the caller places them itself (multi-view panes).
-  const openPaths = useCallback(async (paths: string[], activate = true): Promise<string[]> => {
-    const seen = new Set(tabsRef.current.filter((t) => t.path).map((t) => t.path));
-    const skipped: string[] = [];
-    const ids: string[] = [];
-    let lastId = "";
-    for (const path of paths) {
-      if (!path) continue;
-      const existing = tabsRef.current.find((t) => t.path === path);
-      if (existing) {
-        lastId = existing.id;
-        ids.push(existing.id);
-        continue;
-      }
-      if (seen.has(path)) continue; // duplicate within this drop batch
-      try {
-        const res = await ReadFile(path);
-        if (!res) continue;
-        if (res.binary) {
-          skipped.push(res.name || path);
-          continue;
-        }
-        const lang = langFromPath(res.path);
-        const tab = makeTab({
-          title: res.name,
-          path: res.path,
-          content: res.content,
-          lang,
-          dirty: false,
-          view: defaultView(lang),
-          mtime: res.modTime,
-          encoding: res.encoding,
-        });
-        seen.add(path);
-        setTabs((prev) => (prev.some((t) => t.path === tab.path) ? prev : [...prev, tab]));
-        lastId = tab.id;
-        ids.push(tab.id);
-      } catch (e) {
-        skipped.push((path.split(/[\\/]/).pop() || path) + " (열기 실패)");
-        console.error("드롭 파일 열기 실패", path, e);
-      }
-    }
-    if (activate && lastId) setActiveId(lastId);
-    if (skipped.length) {
-      alert("다음 파일은 열 수 없습니다 (텍스트 문서가 아니거나 읽기 실패):\n- " + skipped.join("\n- "));
-    }
-    return ids;
+  // 📖 read-only and 🔒 locked panes never write the file they show: 「💾 저장」,
+  // Ctrl+S and 「인코딩하여 저장」 are off there (「다른 이름으로」 still works).
+  const saveLockedMode = useCallback((): PaneMode | null => {
+    const m = multiRef.current;
+    if (!m.on) return null;
+    const mode = m.slots.slice(0, m.count).find((x) => x.tabId === activeIdRef.current)?.mode;
+    return mode === "read" || mode === "lock" ? mode : null;
   }, []);
+
+  // How a tab is written back: its encoding, line breaks and BOM (Go SaveOptions).
+  const saveOpts = (t: Tab, enc: string, force: boolean) => ({
+    encoding: enc,
+    eol: t.eol,
+    noBom: enc === t.encoding ? t.noBom : false, // an encoding change writes the usual BOM
+    force,
+  });
 
   const doSaveAs = useCallback(async () => {
     const t = getActive();
     if (!t || t.needsLoad) return; // content not read yet — never write ""
     const savedContent = liveContent(t); // exactly what we hand to disk
     try {
-      const res = await SaveFileDialog(suggestName(t), savedContent, t.encoding);
+      const res = await SaveFileDialog(suggestName(t), savedContent, saveOpts(t, t.encoding, true));
       if (!res || res.canceled) return;
       const lang = langFromPath(res.path);
       setTabs((prev) => {
@@ -997,6 +1088,7 @@ function App() {
                 // stay dirty if the user typed while the dialog was open
                 dirty: liveContent(x) !== savedContent,
                 view: lang === "plaintext" && x.view === "split" ? "editor" : x.view,
+                ...formatOf(res),
               }
             : x
         );
@@ -1011,28 +1103,51 @@ function App() {
     }
   }, [getActive, liveContent]);
 
+  // Save writes the file only when there is something to write: a tab nobody
+  // edited is never written (its file keeps its bytes and mtime — a log is
+  // evidence), and Go skips the write too when the edited text ended up equal
+  // to the file's (typed and undone). A real save keeps the file's line breaks
+  // and BOM.
   const doSave = useCallback(async () => {
     const t = getActive();
     if (!t || t.needsLoad) return; // content not read yet — never write ""
+    if (saveLockedMode()) return; // 📖 / 🔒 pane
     if (!t.path) {
       await doSaveAs();
+      return;
+    }
+    if (!t.dirty) return; // nothing edited
+    if (
+      t.eolMixed &&
+      !window.confirm(
+        `"${t.title}" 은(는) 줄바꿈 종류(CRLF·LF·CR)가 섞여 있습니다.\n` +
+          `저장하면 줄바꿈이 모두 가장 많은 ${eolName(t.eol)} 로 맞춰집니다. 저장할까요?`
+      )
+    ) {
       return;
     }
     const savedContent = liveContent(t);
     if (!(await confirmOverwriteIfChanged(t))) return;
     try {
-      const doc = await SaveFile(t.path, savedContent, t.encoding);
+      const doc = await SaveFile(t.path, savedContent, saveOpts(t, t.encoding, false));
       setTabs((prev) =>
         prev.map((x) =>
           x.id === t.id
-            ? { ...x, content: savedContent, dirty: liveContent(x) !== savedContent, mtime: doc.modTime }
+            ? {
+                ...x,
+                content: savedContent,
+                dirty: liveContent(x) !== savedContent,
+                mtime: doc.modTime,
+                // unchanged: the file was left as it was, mixed line breaks and all
+                ...(doc.unchanged ? {} : formatOf(doc)),
+              }
             : x
         )
       );
     } catch (e) {
       alert("저장하지 못했습니다:\n" + String(e));
     }
-  }, [getActive, doSaveAs, confirmOverwriteIfChanged, liveContent]);
+  }, [getActive, doSaveAs, confirmOverwriteIfChanged, liveContent, saveLockedMode]);
 
   const doCloseTab = useCallback((id: string) => {
     const prev = tabsRef.current;
@@ -1057,11 +1172,35 @@ function App() {
   // Only the tab being looked at is read, so a session full of big logs starts
   // fast and holds in memory just what has actually been opened.
   const loadingIds = useRef(new Set<string>());
+  // Big restored tabs the user agreed to read (「열기」 in the pane).
+  const bigApproved = useRef(new Set<string>());
   const loadTabFromDisk = useCallback(async (t: Tab) => {
     if (loadingIds.current.has(t.id)) return;
     loadingIds.current.add(t.id);
     let res: Awaited<ReturnType<typeof ReadFile>> | null = null;
     let err = "";
+    // Same size rule as gateSizes, but asked inside the pane: a restored session
+    // may hold several big tabs, and a stack of dialogs at start-up would block
+    // the whole window.
+    if (!bigApproved.current.has(t.id)) {
+      let size = 0;
+      try {
+        const st = await StatFile(t.path);
+        size = st?.exists ? st.size : 0;
+      } catch {
+        size = 0;
+      }
+      if (size >= BIG_FILE) {
+        loadingIds.current.delete(t.id);
+        const tooBig = size > TOO_BIG_FILE ? tooBigText([{ name: t.title, size }]) : "";
+        setTabs((prev) =>
+          prev.map((x) =>
+            x.id !== t.id || !x.needsLoad ? x : tooBig ? { ...x, loadError: tooBig } : { ...x, bigSize: size }
+          )
+        );
+        return;
+      }
+    }
     try {
       // Keep the encoding the tab was using; fall back to auto-detection.
       res = await ReadFileAs(t.path, t.encoding).catch(() => ReadFile(t.path));
@@ -1082,9 +1221,11 @@ function App() {
                 ...x,
                 content: res.content,
                 encoding: res.encoding || x.encoding,
+                ...formatOf(res),
                 mtime: res.modTime,
                 needsLoad: false,
                 loadError: "",
+                bigSize: 0,
                 reloadSeq: x.reloadSeq + 1,
               }
             : { ...x, loadError: err || "파일을 읽지 못했습니다." }
@@ -1092,10 +1233,16 @@ function App() {
     );
   }, []);
 
+  // 「열기」 on a big restored tab: read it now.
+  const approveBig = useCallback((id: string) => {
+    bigApproved.current.add(id);
+    setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, bigSize: 0 } : x)));
+  }, []);
+
   useEffect(() => {
-    if (active && active.needsLoad && !active.loadError) loadTabFromDisk(active);
+    if (active && active.needsLoad && !active.loadError && !active.bigSize) loadTabFromDisk(active);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active?.id, active?.needsLoad, active?.loadError, loadTabFromDisk]);
+  }, [active?.id, active?.needsLoad, active?.loadError, active?.bigSize, loadTabFromDisk]);
 
   // --- multi view -----------------------------------------------------------
   // The focused pane's tab is the active tab, so the status bar, save, close and
@@ -1176,6 +1323,7 @@ function App() {
       view: defaultView(lang),
       mtime: res.modTime,
       encoding: res.encoding,
+      ...formatOf(res),
       label,
     });
     setTabs((prev) => (prev.some((t) => samePath(t.path, tab.path)) ? prev : [...prev, tab]));
@@ -1251,16 +1399,23 @@ function App() {
       const serverOf = (i: number) => (serverFor && serverFor.slot === i ? serverFor.server : m.slots[i]?.server ?? "");
       const targets = (only != null ? [only] : Array.from({ length: m.count }, (_, i) => i)).filter((i) => serverOf(i));
       const picks = targets.map((i) => ({ i, server: serverOf(i), file: resolveInServer(scan, serverOf(i), rel) }));
-      const big = picks.filter((x) => x.file && !x.file.compressed && x.file.size >= BIG_FILE);
-      if (
-        big.length &&
-        !window.confirm(
-          `큰 파일이 있습니다 (${big.map((x) => `${x.server} ${fmtSize(x.file!.size)}`).join(", ")}).\n` +
-            "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?"
-        )
-      ) {
-        return;
-      }
+      // Size check (shared gateSizes) for the files this switch would read.
+      const toRead = picks.filter(
+        (x) =>
+          x.file &&
+          !x.file.compressed &&
+          !tabsRef.current.some((t) => samePath(t.path, bundlePath(root, x.server, x.file!.rel)))
+      );
+      const gate = await gateSizes(
+        toRead.map((x) => ({
+          path: bundlePath(root, x.server, x.file!.rel),
+          size: x.file!.size,
+          name: `${x.server} ${x.file!.rel.split("/").pop()}`,
+        }))
+      );
+      // Declined the big-file confirm, or the one file asked for is too big:
+      // leave the panes as they are.
+      if (gate.declined || (picks.length === 1 && gate.tooBig.size === 1)) return;
       const base = rel.split("/").pop() || rel;
       const result = new Map<number, { tabId: string; note: string; server: string }>();
       // tab id → visible pane showing it. Panes outside this switch keep theirs;
@@ -1273,6 +1428,8 @@ function App() {
         let r = { tabId: "", note: "", server: x.server };
         if (!x.file) r.note = `${x.server}에는 ${base} 가 없습니다`;
         else if (x.file.compressed) r.note = `${x.file.rel} 은 압축 파일이라 열 수 없습니다 (풀어서 여세요)`;
+        else if (gate.tooBig.has(bundlePath(root, x.server, x.file.rel)))
+          r.note = `${x.file.rel} 은 너무 커서 열 수 없습니다 (${fmtSize(x.file.size)}, ${fmtSize(TOO_BIG_FILE)} 까지)`;
         else {
           let id: string | null = null;
           try {
@@ -1315,7 +1472,7 @@ function App() {
       activeIdRef.current = focusId;
       setActiveId(focusId);
     },
-    [openOne, scanBundle]
+    [openOne, scanBundle, gateSizes]
   );
 
   // Point a pane at another server of the bundle, keeping the log it shows.
@@ -1427,7 +1584,7 @@ function App() {
     if (!multi.on) return;
     for (const x of multi.slots.slice(0, multi.count)) {
       const t = tabs.find((y) => y.id === x.tabId);
-      if (t && t.needsLoad && !t.loadError) loadTabFromDisk(t);
+      if (t && t.needsLoad && !t.loadError && !t.bigSize) loadTabFromDisk(t);
     }
   }, [multi, tabs, loadTabFromDisk]);
 
@@ -1465,16 +1622,25 @@ function App() {
         setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, encoding: enc } : x)));
         return;
       }
+      if (saveLockedMode()) return; // 📖 / 🔒 pane: never rewrite the file
       if (!(await confirmOverwriteIfChanged(t))) return;
       try {
         // Commit the encoding ONLY after the write succeeds, so a failed re-encode
         // (e.g. CP949 with unsupported chars) leaves the tab on its working encoding.
+        // An explicit conversion writes even when the text is unchanged (force).
         const text = liveContent(t);
-        const doc = await SaveFile(t.path, text, enc);
+        const doc = await SaveFile(t.path, text, saveOpts(t, enc, true));
         setTabs((prev) =>
           prev.map((x) =>
             x.id === t.id
-              ? { ...x, content: text, encoding: enc, dirty: liveContent(x) !== text, mtime: doc.modTime }
+              ? {
+                  ...x,
+                  content: text,
+                  encoding: enc,
+                  dirty: liveContent(x) !== text,
+                  mtime: doc.modTime,
+                  ...formatOf(doc),
+                }
               : x
           )
         );
@@ -1482,7 +1648,7 @@ function App() {
         alert("저장하지 못했습니다:\n" + String(e));
       }
     },
-    [getActive, confirmOverwriteIfChanged, liveContent]
+    [getActive, confirmOverwriteIfChanged, liveContent, saveLockedMode]
   );
 
   // Re-read the file from disk decoding it with a different encoding.
@@ -1517,6 +1683,7 @@ function App() {
                   ...x,
                   content: res.content,
                   encoding: res.encoding,
+                  ...formatOf(res),
                   dirty: false,
                   mtime: res.modTime,
                   needsLoad: false,
@@ -2238,8 +2405,32 @@ function App() {
   const toggleLogColors = (t: Tab) =>
     setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
 
+  // A restored tab whose file is big waits for 「열기」 (the size confirm, asked
+  // in the pane instead of a dialog).
+  const bigPrompt = (t: Tab) => (
+    <>
+      <div className="empty-title">큰 파일입니다 ({fmtSize(t.bigSize)})</div>
+      <div className="empty-sub">{t.path}</div>
+      <div className="empty-sub">{BIG_CONFIRM_TAIL}</div>
+      <div className="empty-actions">
+        <button className="tb-btn" onClick={() => approveBig(t.id)}>
+          열기
+        </button>
+        <button className="tb-btn" onClick={() => doCloseTab(t.id)}>
+          × 탭 닫기
+        </button>
+      </div>
+    </>
+  );
+
   // --- multi-view panes ------------------------------------------------------
   const visibleSlots = multi.slots.slice(0, multi.count);
+  // 📖 / 🔒: the pane showing the active tab must not write its file.
+  const activePaneMode = multi.on ? visibleSlots.find((x) => x.tabId === activeId)?.mode : undefined;
+  const saveLocked = activePaneMode === "read" || activePaneMode === "lock";
+  const saveLockedTip = saveLocked
+    ? `${activePaneMode === "read" ? "📖 읽기 전용" : "🔒 잠금"} 칸이라 원본 파일에 저장하지 않습니다 — 고쳐 저장하려면 칸을 ✏️ 편집으로 바꾸거나 「다른 이름으로」 저장하세요`
+    : "";
   const renderPane = (slot: Slot, i: number) => {
     const t = slot.tabId ? tabs.find((x) => x.id === slot.tabId) : undefined;
     const focused = i === focusSlot;
@@ -2286,6 +2477,7 @@ function App() {
         }}
       >
         <div className="mpane-body">
+          <ErrorBoundary what={`${i + 1}번 칸`} resetKey={t ? t.id + "#" + t.reloadSeq : ""}>
           {!t ? (
             <div className="empty">
               <div className="empty-title">{slot.server ? slot.server : "빈 칸"}</div>
@@ -2322,6 +2514,8 @@ function App() {
                     </button>
                   </div>
                 </>
+              ) : t.bigSize ? (
+                bigPrompt(t)
               ) : (
                 <div className="empty-title">불러오는 중…</div>
               )}
@@ -2341,6 +2535,7 @@ function App() {
               onSelectionChange={focused ? onSelectionChange : noop}
             />
           )}
+          </ErrorBoundary>
         </div>
         <div className="mpane-foot">
           <span className="mp-num">{i + 1}</span>
@@ -2521,8 +2716,8 @@ function App() {
           <button
             className="tb-btn"
             onClick={doSave}
-            title={`저장 (${keyHint("save")})`}
-            disabled={!active}
+            title={saveLocked ? saveLockedTip : `저장 (${keyHint("save")}) — 고친 것이 없으면 파일을 쓰지 않습니다`}
+            disabled={!active || saveLocked}
           >
             💾 저장
           </button>
@@ -2644,6 +2839,15 @@ function App() {
         </div>
       </div>
 
+      {sessionNotice && (
+        <div className="notice-bar" role="alert">
+          <span className="notice-text">⚠ {sessionNotice}</span>
+          <button className="tb-btn" onClick={() => setSessionNotice("")}>
+            닫기
+          </button>
+        </div>
+      )}
+
       <div className="tabbar" ref={tabBarRef}>
         {tabsOverflow && (
           <button
@@ -2707,18 +2911,20 @@ function App() {
         {multi.on ? (
           <>
             {multi.bundle && bundleScan && bundleScan.root === multi.bundle.root && (treeOpen ? (
-              <BundleTree
-                key={bundleScan.root}
-                scan={bundleScan}
-                shown={treeShown}
-                paneOfServer={paneOfServer}
-                onOpen={openFromTree}
-                onOpenAll={(rel) => switchBundleLog(rel, null)}
-                onHide={() => setTreeOpen(false)}
-                rotationKey={rotationKey}
-                fmtSize={fmtSize}
-                bigFile={BIG_FILE}
-              />
+              <ErrorBoundary what="로그 묶음 트리" resetKey={bundleScan}>
+                <BundleTree
+                  key={bundleScan.root}
+                  scan={bundleScan}
+                  shown={treeShown}
+                  paneOfServer={paneOfServer}
+                  onOpen={openFromTree}
+                  onOpenAll={(rel) => switchBundleLog(rel, null)}
+                  onHide={() => setTreeOpen(false)}
+                  rotationKey={rotationKey}
+                  fmtSize={fmtSize}
+                  bigFile={BIG_FILE}
+                />
+              </ErrorBoundary>
             ) : (
               <button className="bt-show" title="로그 묶음 트리 펼치기" onClick={() => setTreeOpen(true)}>
                 ▶
@@ -2754,12 +2960,14 @@ function App() {
                   </button>
                 </div>
               </>
+            ) : active.bigSize ? (
+              bigPrompt(active)
             ) : (
               <div className="empty-title">불러오는 중…</div>
             )}
           </div>
         ) : (
-          <>
+          <ErrorBoundary what="편집기·미리보기" resetKey={active.id + "#" + active.reloadSeq + "#" + active.view}>
             {showEditor && (
               <div
                 className="pane editor-pane"
@@ -2819,7 +3027,7 @@ function App() {
                 )}
               </div>
             )}
-          </>
+          </ErrorBoundary>
         )}
       </div>
 
@@ -2861,6 +3069,18 @@ function App() {
                 </button>
               </span>
               <span className="st-lang">{langLabel(active.lang)}</span>
+              {active.path && active.eol && (
+                <span
+                  className={active.eolMixed ? "st-eol mixed" : "st-eol"}
+                  title={
+                    active.eolMixed
+                      ? `줄바꿈 종류가 섞여 있습니다. 고쳐 저장하면 모두 ${eolName(active.eol)} 로 맞춰집니다`
+                      : "줄바꿈 종류 — 저장할 때 그대로 지킵니다"
+                  }
+                >
+                  {active.eolMixed ? `줄바꿈 섞임(${eolName(active.eol)} 많음)` : eolName(active.eol)}
+                </span>
+              )}
               <span className="st-enc-wrap">
                 <button
                   className="st-enc"
@@ -2875,11 +3095,15 @@ function App() {
                 </button>
                 {encMenu && (
                   <div className="enc-menu" onMouseDown={(e) => e.stopPropagation()}>
-                    <div className="menu-head">인코딩하여 저장 / 변환</div>
+                    <div className="menu-head" title={saveLockedTip}>
+                      인코딩하여 저장 / 변환{saveLocked ? " (이 칸에서는 꺼짐)" : ""}
+                    </div>
                     {ENCODINGS.map((e) => (
                       <button
                         key={"save-" + e.id}
                         className="menu-item"
+                        disabled={saveLocked}
+                        title={saveLockedTip}
                         onClick={() => {
                           setEncMenu(false);
                           saveWithEncoding(e.id);
