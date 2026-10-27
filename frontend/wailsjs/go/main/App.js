@@ -30,6 +30,26 @@ export function FileAssociationSupported() {
   return window['go']['main']['App']['FileAssociationSupported']();
 }
 
+export function FilterCancel(arg1) {
+  return window['go']['main']['App']['FilterCancel'](arg1);
+}
+
+export function FilterClose(arg1) {
+  return window['go']['main']['App']['FilterClose'](arg1);
+}
+
+export function FilterRows(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['FilterRows'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function FilterStart(arg1) {
+  return window['go']['main']['App']['FilterStart'](arg1);
+}
+
+export function FilterStatus(arg1) {
+  return window['go']['main']['App']['FilterStatus'](arg1);
+}
+
 export function FrontendReady() {
   return window['go']['main']['App']['FrontendReady']();
 }
@@ -116,4 +136,8 @@ export function TypeChips(arg1, arg2, arg3) {
 
 export function UnregisterFileTypes(arg1) {
   return window['go']['main']['App']['UnregisterFileTypes'](arg1);
+}
+
+export function ValidateFilterRules(arg1) {
+  return window['go']['main']['App']['ValidateFilterRules'](arg1);
 }
