@@ -504,8 +504,9 @@ async function main() {
       const rows = await page.$$(".tags-dialog .rule-row");
       const last = rows[rows.length - 1];
       await (await last.$(".rule-pattern")).type("kafka", { delay: 40 });
-      await sleep(120);
-      ok("입력하는 동안에는 다시 거르지 않음", calls(be, "FilterStart").length === n0, calls(be, "FilterStart").length - n0);
+      await sleep(900); // past the tag save debounce
+      ok("입력하는 동안(적용 전)에는 다시 거르지 않음", calls(be, "FilterStart").length === n0, calls(be, "FilterStart").length - n0);
+      await page.click(".tags-dialog .tags-apply"); // 적용(10-28): 줄만 보기는 적용 뒤에만 다시 거름
       await until(() => calls(be, "FilterStart").length > n0, 4000);
       const save = calls(be, "SaveTags").pop();
       const restart = calls(be, "FilterStart")[n0];
@@ -523,10 +524,10 @@ async function main() {
         set.call(e, "#0000cc");
         e.dispatchEvent(new Event("input", { bubbles: true }));
       });
-      await page.keyboard.press("Escape");
+      await page.click(".tags-dialog .tags-ok"); // 확인(10-28): Esc 는 이제 버림
       await sleep(900);
       const blue = await page.$$eval(`.lv-row span[style*="color: ${rgb("#0000cc")}"]`, (els) => els.map((e) => e.textContent));
-      ok("색만 바꾸면 바로 칠함", blue.length === 2, blue);
+      ok("색만 바꿔 확인하면 바로 칠함", blue.length === 2, blue);
       ok("색만 바꾸면 다시 거르지 않음", calls(be, "FilterStart").length === n1, calls(be, "FilterStart").length - n1);
       await ctx.close();
     }

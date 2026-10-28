@@ -156,6 +156,11 @@ async function openTagWindow(page) {
   await page.click(".tag-menu >> text=태그 창 열기");
   await page.waitForSelector(".tags-dialog");
 }
+// 태그 창 「적용」(10-28): 창 안 변경은 초안 — 적용해야 저장·색칠된다
+async function applyTags(page) {
+  await page.click(".tags-dialog .tags-apply");
+  await sleep(150);
+}
 const savedTags = (be) => (be.st.tags ? JSON.parse(be.st.tags) : null);
 const tagNames = (be) => savedTags(be)?.tags.map((t) => t.name);
 
@@ -200,6 +205,7 @@ async function main() {
       await page.click(".rule-add");
       const rowsL = await page.$$(".tags-dialog .rule-row");
       await (await rowsL[rowsL.length - 1].$(".rule-pattern")).fill("a.b");
+      await applyTags(page); // 적용(10-28): 창 안 변경은 적용해야 저장된다
       await sleep(600);
       await page.evaluate(() => window.dispatchEvent(new Event("blur")));
       await sleep(700);
@@ -308,20 +314,21 @@ async function main() {
       for (const pat of ["(a+){4}$", "(.*,){4}X", "(\\w+\\s?){4}!", "(ab?|b)+$", ".*a.*b", "(a|aa)+$"]) {
         const t0 = Date.now();
         await (await last.$(".rule-pattern")).fill(pat);
+        await page.click(".tags-dialog .tags-apply"); // 적용(10-28): 색칠은 적용 뒤 — 그 순간 화면이 멈추지 않는지
         const lag = await page.evaluate(() => new Promise((r) => { const t = performance.now(); requestAnimationFrame(() => requestAnimationFrame(() => r(performance.now() - t))); }));
         const ms = Date.now() - t0;
         ok(`${pat}: 쓸 수 있음 · 화면 안 멈춤 (${ms}ms, 다음 프레임 ${Math.round(lag)}ms)`, (await last.$eval(".rule-pattern", (e) => e.getAttribute("data-problem"))) === "" && ms < 1500 && lag < 500, { ms, lag });
       }
       // v1.2.0 coloured these; the old stage-3 guard refused them
       await (await last.$(".rule-pattern")).fill("(\\w|-)+\\.example");
-      await sleep(150);
+      await applyTags(page);
       ok("(\\w|-)+ 다시 칠함", JSON.stringify(await spansWith(page, "#cc0009")) === '["host-name.example"]', await spansWith(page, "#cc0009"));
       await (await last.$(".rule-pattern")).fill("(\\d|\\.)+");
-      await sleep(150);
+      await applyTags(page);
       ok("(\\d|\\.)+ 다시 칠함", (await spansWith(page, "#cc0009")).includes("10.0.0.1"), await spansWith(page, "#cc0009"));
       // JavaScript-only syntax: refused, and the reason is shown under the row
       await (await last.$(".rule-pattern")).fill("(?<=ip )\\d+");
-      await sleep(100);
+      await applyTags(page);
       ok("뒤돌아보기 = 쓸 수 없음", (await last.$eval(".rule-pattern", (e) => e.getAttribute("data-problem"))) === "unsupported");
       const why = await page.$$eval(".rule-problem", (es) => es.map((e) => e.textContent));
       ok("이유가 줄 아래에 보임", why.some((w) => w.includes("쓸 수 없음") && w.includes("뒤돌아보기")), why);
@@ -332,10 +339,10 @@ async function main() {
       // kinds switch the colouring live: make it a word "5ms"
       await (await last.$(".rule-pattern")).fill("5ms");
       await (await last.$(".rule-kind")).selectOption("word");
-      await sleep(150);
+      await applyTags(page);
       ok("단어 5ms 는 120ms 안에서 안 칠함", JSON.stringify(await spansWith(page, "#cc0009")) === '["5ms"]', await spansWith(page, "#cc0009"));
       await (await last.$(".rule-kind")).selectOption("text");
-      await sleep(150);
+      await applyTags(page);
       ok("글자 그대로 5ms", JSON.stringify(await spansWith(page, "#cc0009")) === '["5ms"]', await spansWith(page, "#cc0009"));
 
       // ---- tags: add / rename / case-distinct / conflict / duplicate / delete / clear common
@@ -385,7 +392,7 @@ async function main() {
       await page.click(".tags-side-actions >> text=비우기");
       await sleep(100);
       ok("common 비우기", (await page.$$(".tags-dialog .rule-row")).length === 0);
-      await sleep(150);
+      await applyTags(page); // 적용(10-28): 비운 것도 적용해야 저장·색칠에 반영
       ok("비우면 색칠도 사라짐", (await spansWith(page, "#cc0001")).length === 0);
       // debounced save then check file
       await sleep(700);
@@ -529,13 +536,21 @@ async function main() {
       await page.click("text=＋ 새 태그");
       await page.fill(".tag-rename", "last-minute");
       await page.press(".tag-rename", "Enter");
-      // within the debounce window: ask to close
+      // 적용(10-28) and ask to close right away (the write may still be on its way)
       const n0 = be.st.calls.length;
+      await page.click(".tags-dialog .tags-apply");
       await page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
       await sleep(400);
       const after = be.st.calls.slice(n0).map((c) => c.name);
       ok("닫기 전에 SaveTags → 그다음 CloseWithSession", after.indexOf("SaveTags") >= 0 && after.indexOf("SaveTags") < after.indexOf("CloseWithSession"), after);
       ok("마지막 태그가 저장됨", (tagNames(be) || []).includes("last-minute"), tagNames(be));
+      // not applied: closing the app does not write it (닫기 = 취소, like the window)
+      await page.click("text=＋ 새 태그");
+      await page.fill(".tag-rename", "never-applied");
+      await page.press(".tag-rename", "Enter");
+      await page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
+      await sleep(400);
+      ok("적용 안 한 초안은 앱을 닫아도 저장 안 함", !(tagNames(be) || []).includes("never-applied"), tagNames(be));
       await ctx.close();
 
       // read-only (newer file): never saved
@@ -550,6 +565,7 @@ async function main() {
       await r2.page.fill(".tag-rename", "changed-here");
       await r2.page.press(".tag-rename", "Enter");
       await r2.page.click(".rule-add");
+      await r2.page.click(".tags-dialog .tags-apply"); // 적용(10-28)
       await sleep(900); // past the debounce
       await r2.page.evaluate(() => window.dispatchEvent(new Event("blur")));
       await r2.page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
@@ -569,9 +585,11 @@ async function main() {
       await openTagWindow(r5.page);
       await r5.page.click("text=＋ 새 태그");
       await r5.page.press(".tag-rename", "Enter");
+      await r5.page.click(".tags-dialog .tags-apply"); // 적용(10-28)
       await sleep(900);
       const nFail = be5.st.calls.filter((c) => c.name === "SaveTags").length;
       await r5.page.click(".rule-add");
+      await r5.page.click(".tags-dialog .tags-apply"); // 적용(10-28)
       await sleep(900);
       await r5.page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
       await sleep(300);
@@ -590,11 +608,12 @@ async function main() {
       await r4.page.click("text=＋ 새 태그");
       await r4.page.fill(".tag-rename", "in-flight");
       await r4.page.press(".tag-rename", "Enter");
+      await r4.page.click(".tags-dialog .tags-apply"); // 적용(10-28): the write starts now
       const started = () => be4.st.calls.some((c) => c.name === "SaveTags" && String(c.args[0]).includes("in-flight"));
       for (let i = 0; i < 80 && !started(); i++) await sleep(25);
       const savingSince = Date.now();
       const nCalls = be4.st.calls.filter((c) => c.name === "SaveTags").length;
-      ok("디바운스 저장이 진행 중", started() && be4.st.saveDone.length < nCalls, { started: started(), done: be4.st.saveDone.length, nCalls });
+      ok("적용한 저장이 진행 중", started() && be4.st.saveDone.length < nCalls, { started: started(), done: be4.st.saveDone.length, nCalls });
       await r4.page.evaluate(() => window.runtime.EventsEmit("chipper:flush-before-close"));
       for (let i = 0; i < 60 && !be4.st.calls.some((c) => c.name === "CloseWithSession"); i++) await sleep(25);
       const closeAt = (be4.st.calls.find((c) => c.name === "CloseWithSession") || {}).t;

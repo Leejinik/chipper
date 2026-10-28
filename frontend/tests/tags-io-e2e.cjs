@@ -509,7 +509,11 @@ async function main() {
       await page.waitForSelector(".tags-import-result");
       await page.click(".rule-add"); // edit something
       await sleep(100);
-      ok("가져온 뒤 고치면 되돌리기 꺼짐", await page.$eval(".tags-undo", (e) => e.disabled));
+      // 적용(10-28): 고치기만 한 초안은 저장본을 안 바꿔 되돌리기가 그대로 — 적용하면 꺼짐
+      ok("가져온 뒤 고치기만(적용 전) 하면 되돌리기 켜진 채", !(await page.$eval(".tags-undo", (e) => e.disabled)));
+      await page.click(".tags-dialog .tags-apply");
+      await sleep(150);
+      ok("가져온 뒤 고쳐 적용하면 되돌리기 꺼짐", await page.$eval(".tags-undo", (e) => e.disabled));
       await ctx.close();
     }
     });
@@ -655,7 +659,9 @@ async function main() {
       const { ctx, page } = await openPage(browser, url, be);
       await openTags(page);
       be.st.failSave = "[TAGS_BACKUP_FAILED] 직전 태그 파일(.bak)을 남기지 못해 저장하지 않았습니다";
-      await page.click(".rule-add"); // an unsaved edit
+      await page.click(".rule-add"); // an edit, applied but not written (적용, 10-28)
+      await page.click(".tags-dialog .tags-apply");
+      await sleep(150);
       be.st.importQueue.push([{ name: "x.chipper-tags.json", text: JSON.stringify({ format: "chipper-tags", version: 1, tags: [{ name: "n", rules: [] }] }) }]);
       await page.click(".tags-import");
       await sleep(300);
