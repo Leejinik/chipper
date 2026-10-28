@@ -625,6 +625,9 @@ async function main() {
       await page.keyboard.press("Control+s");
       await until(async () => JSON.stringify(await tabStates(page)) === '["S"]', 2000);
       ok("저장 중 → S, 이 탭 전환 막힘", JSON.stringify(await tabStates(page)) === '["S"]' && (await page.$$eval(".lines-seg.big button", (els) => els.every((e) => e.disabled))));
+      await page.click(".cm-content");
+      await page.keyboard.type("NOPE");
+      ok("S: 글자 입력 막힘(편집기 읽기 전용)", !(await page.$eval(".cm-content", (e) => e.textContent.includes("NOPE"))));
       await page.click(".tabs-scroll .tab:nth-child(2)");
       await page.waitForSelector('.lines-view[data-mode="all"]');
       const w = await page.$eval(".lv-edit", (e) => [e.disabled, e.title]);

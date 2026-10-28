@@ -4294,7 +4294,7 @@ function App() {
               initialDoc={() => initialDocFor(t.id, t.reloadSeq)}
               lang={t.lang}
               fontSize={fontSize}
-              mode={slot.mode}
+              mode={saving.includes(t.id) && slot.mode === "edit" ? "read" : slot.mode /* S: no typing while saving */}
               autoFocus={focused}
               logRules={logOn(t) ? layersForTab(t) : null}
               onDocChanged={() => markEdited(t.id)}
@@ -4924,6 +4924,7 @@ function App() {
                       initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
                       lang={active.lang}
                       fontSize={fontSize}
+                      mode={saving.includes(active.id) ? "read" : "edit" /* S: no typing while saving */}
                       logRules={logOn(active) ? layersForTab(active) : null}
                       onDocChanged={() => markEdited(active.id)}
                       onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}

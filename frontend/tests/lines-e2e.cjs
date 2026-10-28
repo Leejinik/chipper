@@ -1188,21 +1188,26 @@ async function main() {
       be2.st.session = session([], "");
       be2.st.openFiles = [a];
       const r2 = await openPage(browser, url, be2);
+      // readview (user 10-28): 100MB 이상은 묻지 않고 📖 — 「창이 떠 있는 동안 단축키
+      // 무시」는 이제 「✏️ 편집으로 열기」 확인 창(C)으로 본다
       await r2.page.click('.empty-actions button:has-text("파일 열기")');
-      await r2.page.waitForSelector(".big-ask");
+      await r2.page.waitForSelector('.lines-view[data-mode="all"]');
+      await r2.page.click(".lv-edit");
+      await r2.page.waitForSelector(".choice-ask");
       be2.st.openFiles = [b];
       await r2.page.keyboard.press("Control+o");
       await sleep(400);
-      const h = await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "");
-      ok("확인 창이 떠 있는 동안 Ctrl+O 는 무시 · 첫 질문 그대로", h.includes("askA") && (await r2.page.$$(".big-ask")).length === 1, h);
-      await r2.page.click('.big-ask button:has-text("태그 줄만")');
-      await sleep(500);
+      const h = await r2.page.$eval(".choice-ask h3", (e) => e.textContent).catch(() => "");
+      ok("확인 창이 떠 있는 동안 Ctrl+O 는 무시 · 첫 질문 그대로", h.includes("askA") && (await r2.page.$$(".choice-ask")).length === 1, h);
+      await r2.page.keyboard.press("Escape");
+      await sleep(300);
       const titles = await r2.page.$$eval(".tabs-scroll .tab .tab-title", (els) => els.map((e) => e.textContent));
-      ok("첫 질문에 답하면 그 파일만 열림", JSON.stringify(titles) === '["askA.log"]' && !(await r2.page.$(".big-ask")), titles);
-      // after it, Ctrl+O works again and asks for the next file
+      ok("질문을 닫아도 그 파일만 열려 있음", JSON.stringify(titles) === '["askA.log"]' && !(await r2.page.$(".choice-ask")), titles);
+      // after it, Ctrl+O works again (the next big file opens 📖 without a question)
       await r2.page.keyboard.press("Control+o");
-      await r2.page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
-      ok("창이 닫힌 뒤 Ctrl+O 는 다시 물음", ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askB"));
+      await until(async () => (await r2.page.$$(".tabs-scroll .tab")).length === 2, 3000);
+      const titles2 = await r2.page.$$eval(".tabs-scroll .tab .tab-title", (els) => els.map((e) => e.textContent));
+      ok("창이 닫힌 뒤 Ctrl+O 는 다시 됨", JSON.stringify(titles2) === '["askA.log","askB.log"]', titles2);
       await r2.ctx.close();
     }
 
