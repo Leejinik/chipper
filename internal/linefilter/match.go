@@ -187,6 +187,9 @@ type wstate struct {
 	hi    []uint64
 	hiSet bool
 	ext   []uint64
+	// a line without its ANSI sequences, and where each byte came from (ansi.go)
+	ansiBuf []byte
+	ansiPos []int32
 }
 
 // setRule marks rule k (position in m.rules) as matching the current line:
@@ -706,6 +709,11 @@ func (ws *wstate) scanBuf(data []byte, base int64, out []hit, lineBase int64, ca
 	m := ws.m
 	if len(m.rules) == 0 {
 		return out, nlines, false
+	}
+	if bytes.IndexByte(data, esc) >= 0 {
+		// ANSI colour codes: lines are judged without them, one by one (ansi.go)
+		out, full := ws.scanBufLines(data, base, out, lineBase, capHits, hasCR)
+		return out, nlines, full
 	}
 	if !m.litMode {
 		var idx int64

@@ -1,4 +1,4 @@
-import { DEFAULT_LOG_RULES, normalizeLogRules, type LogRule } from "./logHighlight";
+import { DEFAULT_LOG_RULES, DEFAULTS_REV, normalizeLogRules, type LogRule } from "./logHighlight";
 
 // Log colour tags: named rule sets stored in ~/.chipper/tags.json (Go: tags.go).
 // `common` applies to every log; other tags apply where they are assigned.
@@ -32,6 +32,9 @@ export interface TagStore {
   version: number;
   tags: Tag[];
   assign: TagAssign;
+  // Revision of the built-in common rules this common was last brought up to
+  // (logHighlight DEFAULTS_REV, commonDefaults.ts); absent = 1 (before stage 6).
+  defaults?: number;
 }
 
 export const emptyAssign = (): TagAssign => ({ dir: {}, file: {}, name: {} });
@@ -192,6 +195,7 @@ export function normalizeTagStore(raw: any, notes?: string[]): TagStore {
   if (ci < 0) tags.unshift({ name: COMMON, rules: DEFAULT_LOG_RULES, updated: "" });
   else if (ci > 0) tags.unshift(...tags.splice(ci, 1));
   const a = raw?.assign;
+  const d = raw?.defaults;
   return {
     version: TAGS_VERSION,
     tags,
@@ -200,13 +204,17 @@ export function normalizeTagStore(raw: any, notes?: string[]): TagStore {
       file: normalizeAssignMap(a?.file, rename, true),
       name: normalizeAssignMap(a?.name, rename, true),
     },
+    // no common at all: it was just made from the current defaults
+    ...(ci < 0 ? { defaults: DEFAULTS_REV } : Number.isInteger(d) && d >= 1 ? { defaults: d } : {}),
   };
 }
 
 // First run: common from the old session's `logRules` (or the defaults).
 export function migratedStore(sessionLogRules: unknown, now = new Date().toISOString()): TagStore {
-  const rules = Array.isArray(sessionLogRules) ? normalizeLogRules(sessionLogRules) : DEFAULT_LOG_RULES;
-  return { version: TAGS_VERSION, tags: [{ name: COMMON, rules, updated: now }], assign: emptyAssign() };
+  // an old session's rules are revision 1 (brought up to date by commonDefaults.ts)
+  if (Array.isArray(sessionLogRules))
+    return { version: TAGS_VERSION, tags: [{ name: COMMON, rules: normalizeLogRules(sessionLogRules), updated: now }], assign: emptyAssign() };
+  return { version: TAGS_VERSION, tags: [{ name: COMMON, rules: DEFAULT_LOG_RULES, updated: now }], assign: emptyAssign(), defaults: DEFAULTS_REV };
 }
 
 export const serializeTags = (s: TagStore) => JSON.stringify(s, null, 2);

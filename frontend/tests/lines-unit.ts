@@ -63,10 +63,11 @@ const store: TagStore = {
   assign: emptyAssign(),
 };
 const fr = filterRules(store, ["common"], []);
-ok("common 만: 오류·경고·장애 (정보·디버그·시각 빠짐)", eq(fr.map((r) => r.id), ["error", "warn", "mk119"]), fr.map((r) => r.id));
+// stage 6: 오류 = 레벨(error) + 실패·예외(fail); ClickHouse <Error> 줄 배경(error-ck)은 줄만 끔
+ok("common 만: 오류·실패·경고·장애 (정보·디버그·시각·error-ck 빠짐)", eq(fr.map((r) => r.id), ["error", "fail", "warn", "mk119"]), fr.map((r) => r.id));
 const fr2 = filterRules(store, ["common", "collector"], []);
-ok("태그 먼저, common 나중 · 꺼진/줄만 아님/빈 규칙 빠짐", eq(fr2.map((r) => r.id), ["c1", "error", "warn", "mk119"]), fr2.map((r) => r.id));
-ok("ruleOwners 같은 순서", eq(ruleOwners(store, ["common", "collector"], []), ["collector", "common", "common", "common"]));
+ok("태그 먼저, common 나중 · 꺼진/줄만 아님/빈 규칙 빠짐", eq(fr2.map((r) => r.id), ["c1", "error", "fail", "warn", "mk119"]), fr2.map((r) => r.id));
+ok("ruleOwners 같은 순서", eq(ruleOwners(store, ["common", "collector"], []), ["collector", "common", "common", "common", "common"]));
 ok("common 끄기", eq(filterRules(store, ["common", "collector"], ["common"]).map((r) => r.id), ["c1"]));
 ok("여러 태그 순서대로", eq(filterRules(store, ["common", "admin", "collector"], ["common"]).map((r) => r.id), ["a1", "c1"]));
 ok("없는 태그 이름 무시", eq(filterRules(store, ["common", "nope"], ["common"]), []));

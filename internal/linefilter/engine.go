@@ -120,6 +120,7 @@ type view struct {
 	id       string
 	j        *job
 	canceled bool
+	findSeq  atomic.Int64 // the running Find (find.go); changed = stop it
 }
 
 // New creates an engine.
@@ -578,6 +579,7 @@ func (e *Engine) Close(id string) {
 		return
 	}
 	delete(e.views, id)
+	v.findSeq.Store(-1) // a Find still running on it stops
 	j := v.j
 	j.mu.Lock()
 	delete(j.views, id)

@@ -101,3 +101,11 @@ func (a *App) FilterClose(jobID string) { a.filters().Close(jobID) }
 func (a *App) FilterRowOfLine(jobID string, above, below int, line int64) (int, error) {
 	return a.filters().RowOfLine(jobID, above, below, line)
 }
+
+// FilterFind lists the rows of a job's filtered view (with these above/below)
+// whose text matches query (a LogRule's kind, pattern, caseSensitive) — 「찾기」
+// in the 「태그 줄만」 view, over the whole result, not only the rows on screen.
+// A newer FilterFind on the same view stops the older one (canceled).
+func (a *App) FilterFind(jobID string, above, below int, query linefilter.Rule) (linefilter.FindResult, error) {
+	return a.filters().Find(jobID, above, below, query)
+}

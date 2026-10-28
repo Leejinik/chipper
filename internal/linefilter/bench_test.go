@@ -32,8 +32,13 @@ import (
 
 func benchSet(set string) []Rule {
 	re := func(p string, cs bool) Rule { return Rule{Kind: "regex", Pattern: p, CaseSensitive: cs} }
-	d := defaultLogRules()
+	d := defaultLogRulesV1() // the stage-1 measurements' rule set
 	switch set {
+	case "default8": // revision 2 (stage 6)
+		return defaultLogRules()
+	case "filter4": // revision 2's 「줄만」 defaults: error, fail, warn, mk119
+		v := defaultLogRules()
+		return []Rule{v[0], v[2], v[3], v[7]}
 	case "default6":
 		return d
 	case "filter3": // the "줄만 보기에 씀" defaults: error, warning, failure signals

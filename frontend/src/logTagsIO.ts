@@ -1,4 +1,4 @@
-import { RULE_KINDS, ruleCheck, type LogRule, type RuleKind } from "./logHighlight";
+import { RULE_KINDS, lineHeadOf, ruleCheck, validLineHead, type LogRule, type RuleKind } from "./logHighlight";
 import {
   COMMON,
   assignKey,
@@ -180,6 +180,7 @@ export function importRule(x: unknown, newId: () => string = newRuleId): { rule:
     color,
     line: bool(o.line, false),
     filter: bool(o.filter, true),
+    ...(validLineHead(o.lineHead) ? { lineHead: o.lineHead } : {}),
   };
   const p = importRuleProblem(rule);
   return p ? { problem: p } : { rule };
@@ -194,6 +195,7 @@ const sameRule = (x: LogRule, y: LogRule) =>
   x.caseSensitive === y.caseSensitive &&
   x.color.toLowerCase() === y.color.toLowerCase() &&
   x.line === y.line &&
+  lineHeadOf(x) === lineHeadOf(y) &&
   x.filter === y.filter &&
   x.on === y.on;
 
@@ -213,6 +215,7 @@ export interface RuleDiff {
 
 const KIND_WORD: Record<RuleKind, string> = { text: "글자 그대로", word: "단어", regex: "정규식" };
 const onOff = (b: boolean) => (b ? "켬" : "끔");
+const headWord = (r: LogRule) => (lineHeadOf(r) ? `줄 앞 ${lineHeadOf(r)}자 안` : "어디든");
 const ruleName = (r: LogRule) => `「${clip(r.pattern)}」` + (r.label ? ` (${clip(r.label, 20)})` : "");
 
 function changes(m: LogRule, t: LogRule): string[] {
@@ -223,6 +226,7 @@ function changes(m: LogRule, t: LogRule): string[] {
   if (m.caseSensitive !== t.caseSensitive) out.push(`대소문자 구분 ${onOff(m.caseSensitive)} → ${onOff(t.caseSensitive)}`);
   if (m.color.toLowerCase() !== t.color.toLowerCase()) out.push(`색 ${m.color.toLowerCase()} → ${t.color.toLowerCase()}`);
   if (m.line !== t.line) out.push(`줄 배경 ${onOff(m.line)} → ${onOff(t.line)}`);
+  if (lineHeadOf(m) !== lineHeadOf(t)) out.push(`줄 배경 자리 ${headWord(m)} → ${headWord(t)}`);
   if (m.filter !== t.filter) out.push(`줄만 ${onOff(m.filter)} → ${onOff(t.filter)}`);
   if (m.on !== t.on) out.push(`켜짐 ${onOff(m.on)} → ${onOff(t.on)}`);
   return out;

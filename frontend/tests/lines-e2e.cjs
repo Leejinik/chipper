@@ -304,7 +304,8 @@ async function main() {
       const tagsShown = await page.$$eval(".lv-tag", (els) => els.map((e) => e.textContent.trim()));
       ok("태그 체크 = common 만 (태그 없어도 common 적용)", JSON.stringify(tagsShown) === '["common"]', tagsShown);
       const st0 = calls(be, "FilterStart")[0];
-      ok("common 의 「줄만」 규칙 3개(오류·경고·장애)로 거름", st0 && st0.args[0].rules.length === 3, st0 && st0.args[0].rules.map((r) => r.pattern.slice(0, 20)));
+      // stage 6: 오류 = 오류(레벨) + 오류·실패 낱말 (괄호 레벨 규칙은 줄만 끔)
+      ok("common 의 「줄만」 규칙 4개(오류 레벨·오류 낱말·경고·장애)로 거름", st0 && st0.args[0].rules.length === 4, st0 && st0.args[0].rules.map((r) => r.pattern.slice(0, 20)));
       ok("요청 인코딩 = 탭 인코딩(utf-8)", st0 && st0.args[0].encoding === "utf-8", st0 && st0.args[0].encoding);
       const want = refRows(plain, isErrWarn, 1, 2);
       ok("행 = grep -B1 -A2 (원래 줄 번호·생략 행)", JSON.stringify(await waitRows(page, want)) === JSON.stringify(want), await shownRows(page));

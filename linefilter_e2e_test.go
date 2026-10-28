@@ -98,6 +98,13 @@ func TestFilterE2EServer(t *testing.T) {
 			arg(2, &B)
 			arg(3, &line)
 			res, err = a.FilterRowOfLine(id, A, B, line)
+		case "FilterFind":
+			var q linefilter.Rule
+			arg(0, &id)
+			arg(1, &A)
+			arg(2, &B)
+			arg(3, &q)
+			res, err = a.FilterFind(id, A, B, q)
 		case "ValidateFilterRules":
 			var rs []linefilter.Rule
 			arg(0, &rs)

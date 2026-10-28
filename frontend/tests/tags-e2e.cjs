@@ -226,11 +226,13 @@ async function main() {
       const be2 = makeBackend();
       ({ ctx, page } = await openPage(browser, url, be2));
       await sleep(400);
-      ok("세션 없음 → common = 기본 규칙 6개", savedTags(be2)?.tags[0].rules.length === 6, savedTags(be2)?.tags[0].rules.length);
+      // stage 6: 기본 규칙 revision 2 = 8개 (오류 레벨·괄호 레벨·오류 낱말·경고·정보·디버그·시각·장애)
+      ok("세션 없음 → common = 기본 규칙 8개", savedTags(be2)?.tags[0].rules.length === 8, savedTags(be2)?.tags[0].rules.length);
       ok(
         "기본 규칙 filter",
-        savedTags(be2)?.tags[0].rules.map((x) => x.filter).join() === "true,true,false,false,false,true"
+        savedTags(be2)?.tags[0].rules.map((x) => x.filter).join() === "true,false,true,true,false,false,false,true"
       );
+      ok("새로 시작한 tags.json 에 revision 2", savedTags(be2)?.defaults === 2, savedTags(be2)?.defaults);
       await ctx.close();
 
       // first tag save fails → session keeps the old logRules (nothing lost)

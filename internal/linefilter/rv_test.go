@@ -639,7 +639,7 @@ func jsGen(rng *rand.Rand, depth int) string {
 	}
 }
 
-var jsLineAlpha = []string{"д", "Д", "σ", "Σ", "ς", "ö", "Ö", "ÿ", "Ÿ", "a", "b", "k", "K", "s", "S", "e", "r", "o", "E", "R", "O", "x", "é", "É", "ß", "ẞ", "가", "K", "ſ", "_", "1", "2", " ", "\t", "-", ":", ".", " ", " ", "　", "\uFEFF", "\x0b", "\x0c", "\U0001F600", "error", "ERROR", "fail", "kafka", "/", "{", "}", "]", "\x00", "A", "İ", "ı", " "}
+var jsLineAlpha = []string{"\x1b[31m", "\x1b[0m", "\x1b[1;33m", "\x1b[", "\x1b", "д", "Д", "σ", "Σ", "ς", "ö", "Ö", "ÿ", "Ÿ", "a", "b", "k", "K", "s", "S", "e", "r", "o", "E", "R", "O", "x", "é", "É", "ß", "ẞ", "가", "K", "ſ", "_", "1", "2", " ", "\t", "-", ":", ".", " ", " ", "　", "\uFEFF", "\x0b", "\x0c", "\U0001F600", "error", "ERROR", "fail", "kafka", "/", "{", "}", "]", "\x00", "A", "İ", "ı", " "}
 
 // The engine (lines and first-match columns) against the editor's own regex
 // code run in Node (testdata/js_oracle.js). Skipped without node.

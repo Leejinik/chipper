@@ -2,6 +2,7 @@ import { Decoration, EditorView, ViewPlugin, type DecorationSet, type ViewUpdate
 import type { Extension, Range } from "@codemirror/state";
 import { RE2JS } from "re2js";
 import { translateJS } from "./jsRegex";
+import { noteRuleTrouble } from "./ruleHealth";
 
 // Log highlighting (what vim's `messages` syntax, VS Code's Log File Highlighter
 // and MobaXterm's keyword colouring do). There is no single standard; level
@@ -25,18 +26,66 @@ export interface LogRule {
   color: string; // CSS colour of the matched text
   line: boolean; // also tint the whole line
   filter: boolean; // used by "tag lines only" view (줄만 보기에 씀)
+  // With `line`: tint the line only when a match starts within its first
+  // lineHead characters (the level column of a log line). Absent/0 = anywhere.
+  // Display only — which lines match (and 「줄만」) does not depend on it.
+  lineHead?: number;
 }
+
+// The level column: 「줄 앞 60자 안」 (plan 7절).
+export const LEVEL_HEAD = 60;
+export const MAX_LINE_HEAD = 2000;
+
+// Revision of the built-in common rules. tags.json remembers the revision its
+// common was last brought up to (TagStore.defaults); commonDefaults.ts moves an
+// older common forward without touching the rules the user changed.
+//   1 = v1.2.0 … stage 5,  2 = stage 6 (error line tint only in the level
+//   column, more time formats, failed/Exception text colour only).
+export const DEFAULTS_REV = 2;
 
 export const DEFAULT_LOG_RULES: LogRule[] = [
   {
+    // The level: the level words as logs write them (upper case: log4j,
+    // logback, kafka, zookeeper, spring, mariadb [ERROR], liz modules) in the
+    // level column — the line background. Lower-case 「(unknown error)」 or an
+    // upper-case word further on is the message, not the level.
     id: "error",
     on: true,
-    label: "오류",
+    label: "오류 (레벨)",
+    pattern: String.raw`\b(FATAL|EMERG(ENCY)?|ALERT|CRIT(ICAL)?|ERROR|ERR|SEVERE|PANIC)\b`,
+    kind: "regex",
+    caseSensitive: true,
+    color: "#ff6b6b",
+    line: true,
+    filter: true,
+    lineHead: LEVEL_HEAD,
+  },
+  {
+    // Bracketed level words are levels wherever they are: ClickHouse writes
+    // <Error> after the query id ({…uuid…}), often past column 60; nginx /
+    // apache write [error]. 「줄만」 off: the next rule already keeps the lines.
+    id: "error-ck",
+    on: true,
+    label: "오류 줄 배경 (<Error>·[error] 꼴)",
+    pattern: String.raw`<(Fatal|Critical|Error)>|\[(emerg|alert|crit|error)\]`,
+    kind: "regex",
+    caseSensitive: true,
+    color: "#ff6b6b",
+    line: true,
+    filter: false,
+  },
+  {
+    // v1.2.0's 오류 words anywhere, in any case (「INFO … has failed」,
+    // 「I/O exception」, 「(unknown error)」): the text colour only, the line is
+    // not tinted. 「줄만」 keeps the same lines as v1.2.0's 오류 rule did.
+    id: "fail",
+    on: true,
+    label: "오류·실패 낱말 (글자색만)",
     pattern: String.raw`\b(FATAL|EMERG(ENCY)?|ALERT|CRIT(ICAL)?|ERROR|ERR|SEVERE|PANIC|FAIL(ED|URE)?)\b|\b\w*Exception\b`,
     kind: "regex",
     caseSensitive: false,
     color: "#ff6b6b",
-    line: true,
+    line: false,
     filter: true,
   },
   {
@@ -76,9 +125,11 @@ export const DEFAULT_LOG_RULES: LogRule[] = [
     id: "time",
     on: true,
     label: "시각",
-    // syslog "Oct 20 17:03:00", ISO / mariadb "2026-10-20  0:49:54",
-    // redis "18 Oct 2026 23:00:44.012"; optional ms
-    pattern: String.raw`\b[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d\b|\b\d{4}-\d\d-\d\d[ T] ?\d{1,2}:\d\d:\d\d([.,]\d+)?|\b\d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d:\d\d(\.\d+)?`,
+    // syslog "Oct 20 17:03:00", ISO / mariadb "2026-10-20  0:49:54" (also
+    // kafka "[2026-10-20 19:07:03,123]" and zookeeper "2026-10-20 19:07:03,123"
+    // through [.,]ms), redis "18 Oct 2026 23:00:44.012", clickhouse
+    // "2026.10.20 19:07:03.039812", liz modules "10-22 00:00:03"
+    pattern: String.raw`\b[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d\b|\b\d{4}-\d\d-\d\d[ T] ?\d{1,2}:\d\d:\d\d([.,]\d+)?|\b\d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d:\d\d(\.\d+)?|\b\d{4}\.\d\d\.\d\d \d\d:\d\d:\d\d(\.\d+)?|\b\d\d-\d\d \d\d:\d\d:\d\d([.,]\d+)?`,
     kind: "regex",
     caseSensitive: true,
     color: "#56b6c2",
@@ -96,6 +147,18 @@ export const DEFAULT_LOG_RULES: LogRule[] = [
     line: true,
     filter: true,
   },
+];
+
+// The built-in common rules of revision 1 (v1.2.0 … stage 5), exactly as they
+// were. commonDefaults.ts compares against these to tell an old default the
+// user never touched from one they changed.
+export const DEFAULT_LOG_RULES_V1: LogRule[] = [
+  { id: "error", on: true, label: "오류", pattern: String.raw`\b(FATAL|EMERG(ENCY)?|ALERT|CRIT(ICAL)?|ERROR|ERR|SEVERE|PANIC|FAIL(ED|URE)?)\b|\b\w*Exception\b`, kind: "regex", caseSensitive: false, color: "#ff6b6b", line: true, filter: true },
+  { id: "warn", on: true, label: "경고", pattern: String.raw`\bWARN(ING)?\b`, kind: "regex", caseSensitive: false, color: "#e5c07b", line: false, filter: true },
+  { id: "info", on: true, label: "정보", pattern: String.raw`\b(INFO|NOTICE)\b|\[Note\]`, kind: "regex", caseSensitive: false, color: "#61afef", line: false, filter: false },
+  { id: "debug", on: true, label: "디버그", pattern: String.raw`\b(DEBUG|TRACE|VERBOSE)\b`, kind: "regex", caseSensitive: false, color: "#7f848e", line: false, filter: false },
+  { id: "time", on: true, label: "시각", pattern: String.raw`\b[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d\b|\b\d{4}-\d\d-\d\d[ T] ?\d{1,2}:\d\d:\d\d([.,]\d+)?|\b\d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d:\d\d(\.\d+)?`, kind: "regex", caseSensitive: true, color: "#56b6c2", line: false, filter: false },
+  { id: "mk119", on: true, label: "장애 신호 (클러스터·프로세스)", pattern: String.raw`Entering (FAULT|BACKUP) STATE|NON_PRIM|WSREP: forgetting|Out of memory|Killed process|Main process exited|code=killed`, kind: "regex", caseSensitive: true, color: "#ff9e64", line: true, filter: true },
 ];
 
 
@@ -131,7 +194,7 @@ interface CompiledRule {
   reason: string; // Korean, "" when fine
 }
 
-const BUILTIN_PATTERNS = new Set(DEFAULT_LOG_RULES.map((r) => r.pattern));
+const BUILTIN_PATTERNS = new Set([...DEFAULT_LOG_RULES, ...DEFAULT_LOG_RULES_V1].map((r) => r.pattern));
 const NONE: number[] = [];
 
 function v8Matcher(re: RegExp): RuleMatcher {
@@ -287,6 +350,8 @@ interface Compiled {
   layer: number;
   mark: Decoration;
   line: Decoration | null;
+  head: number; // LogRule.lineHead (0 = anywhere)
+  key: string; // ruleKey
   label: string;
   dead: boolean;
   spent: number; // ms used in the current pass
@@ -294,20 +359,24 @@ interface Compiled {
 
 // One line's colouring: spans = flat [from, to, rule, …] (rule = index into the
 // compiled list), tint = the rule whose line background shows, or -1.
+// dim = flat [from, to, …] of ANSI colour codes (shown faint, see paintLine).
 export interface LinePaint {
   spans: number[];
   tint: number;
+  dim?: number[];
 }
 
 // Resolve the matches of every rule on one line. found[i] = ranges of rule i
 // (flat, sorted, non-overlapping), layer[i] = its layer (0 = highest).
-export function resolvePaint(len: number, found: number[][], layer: number[], lineRule: boolean[]): LinePaint {
+// lineHead[i] > 0: rule i tints the line only when its first match starts
+// before that column (LogRule.lineHead).
+export function resolvePaint(len: number, found: number[][], layer: number[], lineRule: boolean[], lineHead?: number[]): LinePaint {
   let tint = -1;
   let count = 0;
   for (let i = 0; i < found.length; i++) {
     if (!found[i].length) continue;
     count += found[i].length / 2;
-    if (tint < 0 && lineRule[i]) tint = i;
+    if (tint < 0 && lineRule[i] && !(lineHead?.[i] && found[i][0] >= lineHead[i])) tint = i;
   }
   if (!count) return { spans: NONE, tint };
   // Gather and order by start; nothing overlapping → done.
@@ -360,17 +429,90 @@ export function resolvePaint(len: number, found: number[][], layer: number[], li
   return { spans, tint };
 }
 
+// --- ANSI colour codes -------------------------------------------------------------
+//
+// Programs that colour their terminal output leave ESC [ … m codes in the log
+// (`ESC[31m2026-10-20 09:32:56ESC[0m [ESC[1;31mWARNESC[0m]`). Rules are matched
+// on the line without the codes — the characters one reads — and the codes are
+// shown faint. The Go line filter takes out exactly the same sequences
+// (internal/linefilter/ansi.go), so 「줄만」 keeps the lines the editor colours.
+// A sequence = ESC '[', parameter bytes 0x30–0x3F, intermediate bytes 0x20–0x2F,
+// one final byte 0x40–0x7E (any CSI, not only the colour ones). An ESC that
+// does not start a complete sequence stays a character.
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+
+export interface AnsiStripped {
+  text: string; // the line without the codes
+  raw: Int32Array; // raw[i] = index in the line of text[i]; raw[text.length] = line length
+  codes: number[]; // flat [from, to, …] of the codes in the line
+}
+
+// The line without its ANSI codes, or null when it has none.
+export function stripAnsi(line: string): AnsiStripped | null {
+  if (line.indexOf("\x1b") < 0) return null;
+  ANSI_RE.lastIndex = 0;
+  const codes: number[] = [];
+  let cut = 0;
+  let m: RegExpExecArray | null;
+  while ((m = ANSI_RE.exec(line))) {
+    codes.push(m.index, m.index + m[0].length);
+    cut += m[0].length;
+  }
+  if (!codes.length) return null;
+  const raw = new Int32Array(line.length - cut + 1);
+  let text = "";
+  let at = 0;
+  let n = 0;
+  const keep = (a: number, b: number) => {
+    text += line.slice(a, b);
+    for (let i = a; i < b; i++) raw[n++] = i;
+  };
+  for (let k = 0; k < codes.length; k += 2) {
+    keep(at, codes[k]);
+    at = codes[k + 1];
+  }
+  keep(at, line.length);
+  raw[n] = line.length;
+  return { text, raw, codes };
+}
+
+// One line's colouring, the same for the editor and 「줄만」 (lineView.ts):
+// find(text) gives every rule's matches on the text it is handed (the line
+// without ANSI codes); the result is in the line's own positions, with the
+// codes in `dim`. lineHead columns count the characters without the codes.
+export function paintLine(
+  text: string,
+  find: (visible: string) => number[][],
+  layer: number[],
+  lineRule: boolean[],
+  lineHead?: number[]
+): LinePaint {
+  const a = stripAnsi(text);
+  if (!a) return resolvePaint(text.length, find(text), layer, lineRule, lineHead);
+  const p = resolvePaint(a.text.length, find(a.text), layer, lineRule, lineHead);
+  const spans: number[] = [];
+  const s = p.spans;
+  for (let k = 0; k < s.length; k += 3) spans.push(a.raw[s[k]], a.raw[s[k + 1] - 1] + 1, s[k + 2]);
+  return { spans, tint: p.tint, dim: a.codes };
+}
+
+// A rule's identity for notes about it (ruleHealth.ts): what it matches.
+export const ruleKey = (r: Pick<LogRule, "kind" | "pattern" | "caseSensitive">) =>
+  `${r.kind}\u0000${r.caseSensitive ? 1 : 0}\u0000${r.pattern}`;
+
+const ANSI_DIM = Decoration.mark({ class: "cm-ansi", attributes: { style: "opacity:0.45" } });
+
 class Painter {
   cache = new Map<string, LinePaint>();
   layer: number[];
   lineRule: boolean[];
+  lineHead: number[];
   constructor(public rules: Compiled[]) {
     this.layer = rules.map((r) => r.layer);
     this.lineRule = rules.map((r) => !!r.line);
+    this.lineHead = rules.map((r) => r.head);
   }
-  paint(text: string): LinePaint {
-    const hit = this.cache.get(text);
-    if (hit) return hit;
+  private find = (text: string): number[][] => {
     const found: number[][] = [];
     for (const r of this.rules) {
       if (r.dead) {
@@ -381,7 +523,12 @@ class Painter {
       found.push(r.m.ranges(text));
       r.spent += performance.now() - t0;
     }
-    const p = resolvePaint(text.length, found, this.layer, this.lineRule);
+    return found;
+  };
+  paint(text: string): LinePaint {
+    const hit = this.cache.get(text);
+    if (hit) return hit;
+    const p = paintLine(text, this.find, this.layer, this.lineRule, this.lineHead);
     if (this.cache.size >= LINE_CACHE_MAX) this.cache.clear();
     this.cache.set(text, p);
     return p;
@@ -398,6 +545,8 @@ class Painter {
         if (p.tint >= 0) out.push(this.rules[p.tint].line!.range(line.from));
         const s = p.spans;
         for (let k = 0; k < s.length; k += 3) out.push(this.rules[s[k + 2]].mark.range(line.from + s[k], line.from + s[k + 1]));
+        const d = p.dim;
+        if (d) for (let k = 0; k < d.length; k += 2) out.push(ANSI_DIM.range(line.from + d[k], line.from + d[k + 1]));
         pos = line.to + 1;
       }
     }
@@ -406,6 +555,7 @@ class Painter {
       if (!r.dead && r.spent > RULE_BUDGET_MS) {
         r.dead = died = true;
         console.warn(`로그 색 규칙 「${r.label}」이 너무 느려 이번 실행 동안 끕니다`);
+        noteRuleTrouble(r.key, "editor");
       }
       r.spent = 0;
     }
@@ -430,6 +580,8 @@ export function logHighlighter(rules: LogRule[] | RuleLayers): Extension {
       compiled.push({
         m,
         layer,
+        head: lineHeadOf(r),
+        key: ruleKey(r),
         label: r.label || r.pattern,
         dead: false,
         spent: 0,
@@ -480,8 +632,14 @@ export function normalizeRule(x: any): LogRule | null {
     color: typeof x.color === "string" && /^#[0-9a-f]{6}$/i.test(x.color) ? x.color : "#ff6b6b",
     line: !!x.line,
     filter: typeof x.filter === "boolean" ? x.filter : defaultFilterFor(id),
+    ...(validLineHead(x.lineHead) ? { lineHead: x.lineHead } : {}),
   };
 }
+
+// lineHead is kept only as a whole number 1 … MAX_LINE_HEAD (else: anywhere).
+export const validLineHead = (v: unknown): v is number =>
+  typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= MAX_LINE_HEAD;
+export const lineHeadOf = (r: Pick<LogRule, "lineHead">): number => (validLineHead(r.lineHead) ? r.lineHead : 0);
 
 // Rules from an old session (`logRules`) or a tag; the defaults when not an array.
 export function normalizeLogRules(raw: unknown): LogRule[] {
