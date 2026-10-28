@@ -307,11 +307,11 @@ const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니
 const EDIT_MEM_FILE = 128 << 20;
 const EDIT_MEM_NOTE = "고치면 메모리를 많이 씁니다(384MB 저장 때 앱 전체 약 8GB).";
 // Go refuses (without writing) a save whose result is over the open limit
-// until the user agreed: the file could not be opened in Chipper again.
+// until the user agreed: the file could not be opened whole again (only 「태그 줄만」).
 const TOO_BIG_SAVE = "CHIPPER_TOO_BIG_AFTER_SAVE:";
 const tooBigSaveText = (title: string, bytes: number) =>
   `"${title}" 을(를) 저장하면 ${sizeText(bytes)} 이 되어 ${LIMIT_TEXT} 를 넘습니다.\n` +
-  "저장은 할 수 있지만, 다음부터는 Chipper 로 이 파일을 열 수 없습니다. 저장할까요?";
+  "저장은 할 수 있지만, 다음부터는 전체로 열 수 없고 「🏷 태그 줄만」으로만 볼 수 있습니다. 저장할까요?";
 
 // The session keeps the text of edited tabs only up to these sizes, counted
 // in the bytes that cross to Go (sessionTextBytes), not in characters. Measured
