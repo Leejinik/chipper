@@ -678,6 +678,9 @@ export default function LinesView(p: LinesViewProps) {
       // landed: the view's own top line counts again (unless another seek or a
       // seek waiting for the scan is still to land)
       if (!seeking.current && !pendingLine.current) anchorLine.current = 0;
+      // draw the rows now (the waiting rows were shown while holding) — the
+      // scroll may not have moved (a short result), which redraws nothing
+      bump();
     }
   });
 
