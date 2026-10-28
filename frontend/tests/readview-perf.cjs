@@ -1,6 +1,6 @@
 // Performance of 「📖 읽기 보기」 (readview): six synthetic 300MB logs opened at
-// once (no question), 📖↔🏷 in every pane, find, exclude (hide), End, and one
-// 「✏️ 편집으로 열기」 — times and the window's longest stall (longtask / a 50ms
+// once (no question), 📖↔🏷 in every pane, find, exclude (hide), End, and ✏️
+// off (100MB+ is read-only) — times and the window's longest stall (longtask / a 50ms
 // timer's lateness = how long input would wait). Acceptance (user 10-28): no
 // stall over 2s while opening, switching, finding or excluding in 📖.
 // The real engine (Go helper, as lines-e2e); the files stay in PERF_DIR.
@@ -439,18 +439,11 @@ async function main() {
     rec("📖 End (마지막 줄로)", Date.now() - t0, L, await page.$eval('.mpane[data-slot="0"] .lv-row[data-line]:last-child', (e) => "줄 " + e.dataset.line).catch(() => ""));
     console.log("  메모리(작업 뒤): " + (await mem()));
     res.push({ what: "메모리 작업 뒤", ms: 0, lt: 0, extra: await mem() });
-    // 5. ✏️ one of them (pieces): time, the window's longest stall
+    // 5. 100MB 이상은 읽기 전용(user 10-28 밤): ✏️ 는 꺼진 채 이유 — 예전 「✏️ 300MB(조각) → 편집기」 측정은 없어짐
     await reset();
-    t0 = Date.now();
-    await page.click('.mpane[data-slot="0"] .lv-edit');
-    await page.waitForSelector(".choice-ask");
-    await page.click('.choice-ask [data-choice="edit"]');
-    await page.waitForSelector('.mpane[data-slot="0"] .cm-editor', { timeout: 300000 });
-    L = await lt();
-    rec("✏️ 편집으로 열기 300MB(조각) → 편집기", Date.now() - t0, L, "(합격 기준 대상 아님: 확인 창에 알림)");
-    console.log("  메모리(✏️ 하나): " + (await mem()));
-    res.push({ what: "메모리 ✏️ 하나", ms: 0, lt: 0, extra: await mem() });
-    // while one pane is ✏️, the 📖 panes still answer
+    const ed = await page.$eval('.mpane[data-slot="0"] .lv-edit', (b) => [b.disabled, b.title]);
+    rec("✏️ 300MB → 읽기 전용(꺼짐)", 0, 0, ed[0] ? "꺼짐: " + ed[1] : "켜져 있음(틀림)");
+    // the 📖 panes still answer
     await reset();
     t0 = Date.now();
     await page.focus('.mpane[data-slot="1"] .lv-scroll');
@@ -458,7 +451,7 @@ async function main() {
     await page.keyboard.press("PageDown");
     await sleep(300);
     L = await lt();
-    rec("✏️ 뒤 📖 칸 PageDown", Date.now() - t0, L);
+    rec("📖 칸 PageDown", Date.now() - t0, L);
     await ctx.close();
   } finally {
     await browser.close();

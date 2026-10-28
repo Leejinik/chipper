@@ -163,6 +163,20 @@ function makeBackend() {
 
 const INIT = () => {
   window.__chipperTestHooks = true;
+  // the window's JS memory as the app reads it (performance.memory), overridable: window.__fakeHeap = { used, limit }
+  try {
+    const real = Object.getOwnPropertyDescriptor(Performance.prototype, "memory");
+    Object.defineProperty(performance, "memory", {
+      configurable: true,
+      get() {
+        const f = window.__fakeHeap;
+        if (f) return { usedJSHeapSize: f.used, totalJSHeapSize: f.used, jsHeapSizeLimit: f.limit };
+        return real && real.get ? real.get.call(performance) : undefined;
+      },
+    });
+  } catch {
+    /* no performance.memory */
+  }
   window.__events = {};
   const call = (name) => (...args) => window.__goCall(name, args);
   window.go = { main: { App: new Proxy({}, { get: (_, name) => call(String(name)) }) } };
@@ -554,6 +568,15 @@ async function main() {
       await page.waitForSelector(".cm-editor", { timeout: 15000 });
       ok("100MB − 1 → 편집기, 조각으로 읽음(ReadFile 0, EditOpenBegin 1)", calls(be, "ReadFile").length === 0 && calls(be, "EditOpenBegin").length === 1, [calls(be, "ReadFile").length, calls(be, "EditOpenBegin").length]);
       ok("… 글자 그대로", (await until(() => page.$eval(".cm-content", (e) => e.textContent.includes("INFO line 1")), 5000)) === true, await page.$eval(".cm-content", (e) => e.textContent.slice(0, 120)));
+      // the document made from the pieces (never joined): typing and saving write the whole file
+      await page.click(".cm-content");
+      await page.keyboard.press("Control+End");
+      await page.keyboard.type(" TAILTYPED");
+      await page.keyboard.press("Control+s");
+      await until(() => calls(be, "SaveFile").length === 1, 5000);
+      const sv = calls(be, "SaveFile")[0];
+      const want0 = fs.readFileSync(P("e.log"), "utf8") + " TAILTYPED";
+      ok("조각으로 연 탭 고쳐 저장 → 파일 전체 + 고친 글자", !!sv && sv.args[1] === want0, sv && [sv.args[1].length, want0.length, sv.args[1].slice(-30)]);
       await encMenu(page, "open", "CP949 (EUC-KR)");
       await until(async () => (await page.$eval(".st-enc", (e) => e.textContent)).includes("CP949"), 6000);
       ok("100MB 미만 E 탭 「다른 인코딩으로 다시 열기」 → 다시 읽음(CP949)", (await page.$eval(".st-enc", (e) => e.textContent)).includes("CP949") && (await page.$(".cm-editor")) !== null, await page.$eval(".st-enc", (e) => e.textContent));
@@ -745,6 +768,41 @@ async function main() {
         ok("F-12: 768MB+1바이트 → 꺼짐, 문구 모순 없음(바이트 수로)", w[0] && !/768\.0MB 가 되어 768\.0MB/.test(w[1]) && w[1].includes("바이트"), w);
         await ctx.close();
       }
+    }
+    // =============== J. 화면 JS 힙이 차 있으면 ✏️·큰 열기를 막음 (작은 파일판 OOM, .18 10-29) ==========
+    if (want("J")) {
+      console.log("J. 내려놓은 글자가 아직 안 풀려 화면 힙이 차 있으면 ✏️ 꺼짐+이유 · 풀리면 다시 켜짐 · 큰 일반 열기는 📖 를 권함");
+      const be = makeBackend();
+      be.st.sizes[P("a.log")] = 99 * MB;
+      be.st.sizes[P("b.log")] = 99 * MB;
+      be.st.session = session([Rt("t1", P("a.log"))], "t1");
+      const { ctx, page } = await openSess(be);
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      const GB = 1 << 30;
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.0 * GB, limit: 4.1 * GB }), GB);
+      await page.click(".tabs-scroll .tab:nth-child(1)"); // re-render
+      const w = await until(async () => {
+        const x = await page.$eval(".lv-edit", (b) => [b.disabled, b.title]);
+        return x[0] && x;
+      }, 5000);
+      ok("힙 3.0GB / 4.1GB + 99MB → ✏️ 꺼짐 + 「화면 메모리」 이유", !!w && w[1].includes("화면 메모리"), w || (await page.$eval(".lv-edit", (b) => [b.disabled, b.title])));
+      await page.evaluate(() => window.__chipperTest.requestEdit(document.querySelector(".lines-host").dataset.tab));
+      await sleep(300);
+      ok("눌러도 확인 창 없음", (await page.$(".choice-ask")) === null && calls(be, "EditOpenBegin").length === 0);
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 1.0 * GB, limit: 4.1 * GB }), GB);
+      const back = await until(async () => !(await page.$eval(".lv-edit", (b) => b.disabled)), 6000);
+      ok("힙이 풀리면(1.0GB) 손대지 않아도 몇 초 안에 ✏️ 다시 켜짐", back === true);
+      // a big plain file opened while the heap is full: the question offers 📖
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.0 * GB, limit: 4.1 * GB }), GB);
+      be.st.openFiles = [P("b.log")];
+      await page.keyboard.press("Control+o");
+      await page.waitForSelector(".big-ask", { timeout: 5000 }).catch(() => {});
+      const ask = await page.$eval(".big-ask", (e) => [e.textContent, [...e.querySelectorAll("button")].map((b) => b.textContent.trim())]).catch(() => null);
+      ok("힙이 찬 채 99MB 열기 → 확인 창(📖 읽기 권함·화면 메모리 이유)", !!ask && ask[1][0] === "📖 읽기" && ask[0].includes("화면 메모리"), ask);
+      if (ask) await page.click('.big-ask button:has-text("📖 읽기")');
+      await sleep(400);
+      ok("… 📖 로 열림(편집기로 안 읽음)", calls(be, "ReadFile").length === 0 && calls(be, "EditOpenBegin").length === 0);
+      await ctx.close();
     }
   } finally {
     await browser.close();

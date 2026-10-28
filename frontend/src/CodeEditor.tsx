@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { EditorState, Compartment, Prec } from "@codemirror/state";
+import { EditorState, Compartment, Prec, type Text } from "@codemirror/state";
 import {
   EditorView,
   keymap,
@@ -92,7 +92,7 @@ function fontSizeTheme(px: number) {
 interface Props {
   // Read when the editor mounts (not at render): when the same tab's editor is
   // replaced in one commit, the old one's onFlush has run by then.
-  initialDoc: () => string;
+  initialDoc: () => string | Text; // a big file's pieces come as a Text (editParts.ts)
   lang: EditorLang;
   fontSize: number;
   // The document is NOT copied out on every keystroke (that made big files

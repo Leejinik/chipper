@@ -1,7 +1,8 @@
 // Unit tests of the whole-file total (wholeBudget.ts): six real 300MB logs
 // opened whole killed the window on the test PC (10-28, realtest-progress.md).
 //   node tests/run-unit.cjs
-import { budgetAsks, budgetText, BUDGET_SMALL, editAskText, editBudgetWhy, WHOLE_BUDGET, wholeBudget, wholeWaitText } from "../src/wholeBudget";
+import { budgetAsks, budgetText, BUDGET_SMALL, editAskText, editBudgetWhy, heapWhyOf, WHOLE_BUDGET, wholeBudget, wholeWaitText } from "../src/wholeBudget";
+import { jsHeap, memLevel } from "../src/MemBar";
 
 let pass = 0;
 let fail = 0;
@@ -63,6 +64,21 @@ ok("wait tiny ≥ 1초", wholeWaitText(1000).includes("약 1초"));
   ok("편집: 1바이트 넘음 → 문구가 바이트로(모순 없음)", !one.includes("768.0MB 가 되어 768.0MB") && one.includes("805,306,369 바이트") && one.includes("805,306,368 바이트"), one);
   const t = editAskText(300 * MB, 300 * MB, f);
   ok("확인 창: 시간·멈춤·메모리·한도(지금·합계)·저장·읽기 권함", /약 30초/.test(t) && t.includes("응답하지 않") && /약 1\.0GB/.test(t) && t.includes("768.0MB") && t.includes("지금 300.0MB") && t.includes("600.0MB") && t.includes("저장도 오래") && t.includes("📖 읽기 보기"), t);
+}
+
+// the window's JS memory (heapWhyOf): no performance.memory (macOS / Linux webviews) → the budget only
+{
+  const MB = 1 << 20;
+  const GB = 1 << 30;
+  const f = (n: number) => (n / MB).toFixed(1) + "MB";
+  ok("힙 값 없음(null) → 막지 않음(예산만)", heapWhyOf(null, 99 * MB, f) === "");
+  ok("힙 한계 0·NaN → 막지 않음", heapWhyOf({ used: 1, limit: 0 }, 99 * MB, f) === "" && heapWhyOf({ used: 1, limit: NaN }, 99 * MB, f) === "");
+  ok("힙 1.0/4.1GB + 99MB → 됨", heapWhyOf({ used: 1 * GB, limit: 4.1 * GB }, 99 * MB, f) === "");
+  const w = heapWhyOf({ used: 3.0 * GB, limit: 4.1 * GB }, 99 * MB, f);
+  ok("힙 3.0/4.1GB + 99MB → 막힘 + 「화면 메모리」", w.includes("화면 메모리"), w);
+  // node has performance but no performance.memory: like WKWebView / WebKitGTK
+  ok("performance.memory 없음 → jsHeap() null", jsHeap() === null);
+  ok("🧠 수준: 값 없음(0) → 표시 그대로", memLevel(0) === "");
 }
 
 console.log(`wholebudget-unit: ${pass} passed, ${fail} failed`);

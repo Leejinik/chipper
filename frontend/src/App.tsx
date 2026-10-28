@@ -49,7 +49,8 @@ import {
   type AssignTarget,
 } from "./tagAssign";
 import LinesView from "./LinesView";
-import MemBar, { type MemTab } from "./MemBar";
+import MemBar, { jsHeap, type MemTab } from "./MemBar";
+import { ropeOf, textOfParts } from "./editParts";
 import { upgradeCommonDefaults } from "./commonDefaults";
 import RuleFromText, { selectionForRule } from "./RuleFromText";
 import { editorExcludeTarget, ExcludeEditorItem } from "./ExcludeCtxMenu";
@@ -59,7 +60,7 @@ import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import { comboKey, normalizeCombo } from "./keyCombo";
 import "./App.css";
-import { budgetAsks, budgetText, editAskText, editBudgetWhy, wholeBudget, wholeWaitText, WHOLE_BUDGET } from "./wholeBudget";
+import { budgetAsks, budgetText, editAskText, editBudgetWhy, heapWhyOf, wholeBudget, wholeWaitText, WHOLE_BUDGET, BUDGET_SMALL } from "./wholeBudget";
 import {
   OpenFileDialog,
   OpenFilesDialog,
@@ -299,6 +300,9 @@ const readOnlyWhy = (path: string, size: number) => (isGz(path) ? RO_GZ : size >
 // a 100MB file sent in one message kept the window from answering for seconds
 // (.18, 10-28: 4.7s on screen, 1.25s 「응답 없음」).
 const CHUNK_OPEN = 8 << 20;
+// Reading a file in waits for room in the window's JS memory too (wholeBudget.ts
+// heapWhyOf — the budget alone let 99MB×7 ✏️ ↔ 📖 kill the window, .18 10-29).
+const heapWhy = (size: number): string => heapWhyOf(jsHeap(), size, fmtSize);
 // Never read a file larger than this (Go readDoc refuses it too): 500MB+ crashed
 // the WebView in the v1.2.0 tests. 384MB = 402,653,184 bytes.
 const TOO_BIG_FILE = 384 << 20;
@@ -762,7 +766,7 @@ async function readForEditor(
   size: number,
   onPct?: (pct: number) => void,
   canceled?: () => boolean
-): Promise<main.FileDoc | null> {
+): Promise<(main.FileDoc & { text?: Text }) | null> {
   if (size < CHUNK_OPEN) return enc ? ReadFileAs(path, enc) : ReadFile(path);
   const o = await EditOpenBegin(path, enc);
   try {
@@ -775,7 +779,8 @@ async function readForEditor(
       const pct = Math.min(99, Math.floor(((i + 1) / o.chunks) * 100));
       if (pct !== last) onPct?.((last = pct));
     }
-    return { ...o.doc, content: parts.join("") } as main.FileDoc;
+    // never joined into one string: the editor's document straight from the pieces
+    return { ...o.doc, content: ropeOf(parts), text: textOfParts(parts) } as main.FileDoc & { text: Text };
   } finally {
     EditOpenEnd(o.id).catch(() => {});
   }
@@ -1056,6 +1061,12 @@ function App() {
   // view; tab.content is refreshed only when the editor goes away (onFlush) or a
   // save writes it, so typing never copies the whole document.
   const viewsRef = useRef(new Map<string, EditorView>());
+  // A big file read in pieces: its editor document made from the pieces
+  // (editParts.ts), used while the tab's content is still that text.
+  const bigDocs = useRef(new Map<string, { content: string; text: Text }>());
+  const keepDoc = (id: string, res: { content: string; text?: Text }) => {
+    if (res.text) bigDocs.current.set(id, { content: res.content, text: res.text });
+  };
   // 「태그 줄만」 → whole file at a line: the line waits for the tab's editor.
   const pendingJump = useRef(new Map<string, number>());
   // Where each tab's 「태그 줄만」 was left (top line), to come back to it.
@@ -1131,6 +1142,7 @@ function App() {
   // "edit:<id>#<n>" (W, one per try). Each counts until the tab holds the text
   // (then the tab counts it — never both) or the read ends without it.
   const readingWhole = useRef(new Map<string, number>());
+  const heapWaitAt = useRef(0); // when ✏️ / a read was last refused for the heap (heapWhy)
   // What a tab holding text counts (WHOLE_BUDGET): the file's bytes, or the
   // text's length when that is more (typed / pasted, never-saved text).
   const tabHeld = useCallback((t: Tab): number => {
@@ -1764,10 +1776,11 @@ function App() {
           setLines(id, (l) => ({ ...l, big: true }));
           return toReadRef.current(id, line);
         }
-        if (wholeBudget(heldWhole(), [{ size, whole: true }]).over) {
-          // over the editing budget: 「📖 읽기 보기」 (nothing read in) instead of nothing
+        const hn = size >= BUDGET_SMALL ? heapWhy(size) : "";
+        if (wholeBudget(heldWhole(), [{ size, whole: true }]).over || hn) {
+          // over the editing budget (or the window's memory full): 「📖 읽기 보기」 (nothing read in) instead of nothing
           if (size > 0) knownSize.current.set(normPath(t.path), size);
-          flash("편집으로 연 파일이 많아 📖 읽기 보기로 엽니다 — " + budgetMsg(heldWhole(), size, true).split("\n")[0]);
+          flash("📖 읽기 보기로 엽니다 — " + (hn || budgetMsg(heldWhole(), size, true).split("\n")[0]));
           setLines(id, (l) => ({ ...l, big: true }));
           return toReadRef.current(id, line);
         }
@@ -1834,8 +1847,9 @@ function App() {
         const tooBig = sized.filter((x) => x.size > TOO_BIG_FILE);
         if (tooBig.length) alert(tooBigText(tooBig));
         const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: x.size <= TOO_BIG_FILE && !isGz(x.path) })));
-        if (wb.over) {
-          alert(budgetMsg(held, wb.adding, wb.counted === 1));
+        const heapNote = !wb.over && wb.adding > 0 ? heapWhy(wb.adding) : "";
+        if (wb.over || heapNote) {
+          alert(heapNote || budgetMsg(held, wb.adding, wb.counted === 1));
           return { allowed: new Set(), tooBig: new Set(tooBig.map((x) => x.path)), lines: new Set(), read: new Set(), declined: true, sizes };
         }
         const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
@@ -1858,7 +1872,9 @@ function App() {
       // Over the whole-file total, every file of some size is asked about too
       // (small ones add up), with no 「전체 열기」.
       const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: !noWhole(x) && !isRead(x) })));
-      const overBudget = wb.over;
+      // within the budget but the window's memory is still full (text let go, not freed yet)
+      const heapNote = !wb.over && wb.adding > 0 ? heapWhy(wb.adding) : "";
+      const overBudget = wb.over || !!heapNote;
       const asked = (x: { path: string; size: number }) => !isRead(x) && budgetAsks(overBudget, { size: x.size, whole: !noWhole(x) });
       const big = sized.filter(asked);
       const canFull = !overBudget && big.some((x) => !noWhole(x));
@@ -1866,7 +1882,7 @@ function App() {
       if (big.length) {
         const only = big.filter(noWhole);
         const text = overBudget
-          ? budgetMsg(held, wb.adding, wb.counted === 1) + (only.length ? "\n" + linesOnlyText(only, false) : "")
+          ? (heapNote || budgetMsg(held, wb.adding, wb.counted === 1)) + (only.length ? "\n" + linesOnlyText(only, false) : "")
           : (big.some((x) => !noWhole(x) && x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") +
             (canFull ? BIG_TEXT + "\n" + wholeWaitText(big.filter((x) => !noWhole(x)).reduce((a, x) => a + x.size, 0)) : "") +
             (only.length ? (canFull ? "\n" : "") + linesOnlyText(only, canFull) : "");
@@ -1969,6 +1985,7 @@ function App() {
         });
         seen.add(normPath(path));
         opened.add(path);
+        keepDoc(tab.id, res);
         setTabs((prev) => (prev.some((t) => samePath(t.path, tab.path)) ? prev : [...prev, tab]));
         lastId = tab.id;
         ids.push(tab.id);
@@ -2378,12 +2395,33 @@ function App() {
       const w = editLoadRef.current;
       if (w && w.tabId !== t.id) return `앞 파일(${w.title})을 편집용으로 여는 중 (${w.pct}%) — 끝나거나 취소한 뒤에 여세요`;
       if (isSaving()) return "다른 파일을 저장하는 중 — 끝난 뒤에 여세요";
-      if (t.needsLoad) return editBudgetWhy(heldWhole(), size, fmtSize);
+      if (t.needsLoad) {
+        const why = editBudgetWhy(heldWhole(), size, fmtSize);
+        if (why) return why;
+        const hw = heapWhy(size);
+        if (hw) heapWaitAt.current = Date.now();
+        return hw;
+      }
       return "";
     },
     [heldWhole]
   );
   const sizeOf = (t: Tab) => knownSize.current.get(normPath(t.path)) ?? -1;
+  // The ✏️ buttons follow the window's memory (heapWhy): V8 fills and frees it
+  // in its own time and nothing else would re-render them — look every 2s,
+  // re-render when it moved by 128MB or a refusal is recent.
+  useEffect(() => {
+    let bucket = -1;
+    const iv = window.setInterval(() => {
+      const h = jsHeap();
+      const b = h ? Math.round(h.used / (128 << 20)) : -1;
+      if (b !== bucket || (heapWaitAt.current && Date.now() - heapWaitAt.current < 5000)) {
+        bucket = b;
+        setSizeTick((n) => n + 1);
+      }
+    }, 2000);
+    return () => window.clearInterval(iv);
+  }, []);
   // ✏️ from a pane that is 📖 읽기 전용 / 🔒 잠금: the pane becomes ✏️ 편집 —
   // asking to edit and then not being able to type was a dead end (agy F-03)
   const paneToEdit = useCallback((tabId: string) => {
@@ -2448,7 +2486,9 @@ function App() {
         }
         EditOpenEnd(o.id).catch(() => {});
         if (w.cancel) return;
-        const content = parts.join("");
+        // never joined into one string (editParts.ts): the document from the pieces
+        const content = ropeOf(parts);
+        bigDocs.current.set(t.id, { content, text: textOfParts(parts) });
         parts.length = 0;
         const bytes = Math.max(size, o.doc.size || 0);
         knownSize.current.set(normPath(t.path), bytes);
@@ -2716,7 +2756,7 @@ function App() {
     }
     if (!bigApproved.current.has(t.id)) {
       // over the whole-file total (WHOLE_BUDGET) the pane asks too, with no 「전체 열기」
-      if (size >= BIG_FILE || wholeBudget(heldWhole(), [{ size, whole: true }]).over) {
+      if (size >= BIG_FILE || wholeBudget(heldWhole(), [{ size, whole: true }]).over || (size >= BUDGET_SMALL && heapWhy(size))) {
         // the pane asks (bigPrompt): 「🏷 태그 줄만」, and 「전체 열기」 up to the limit
         loadingIds.current.delete(t.id);
         setTabs((prev) => prev.map((x) => (x.id !== t.id || !x.needsLoad ? x : { ...x, bigSize: size })));
@@ -2734,6 +2774,7 @@ function App() {
         ? await readForEditor(t.path, "", size, pct)
         : await readForEditor(t.path, t.encoding, size, pct).catch(() => readForEditor(t.path, "", size, pct));
       if (size >= CHUNK_OPEN) flashRef.current("");
+      if (res && !res.binary) keepDoc(t.id, res);
       if (res?.binary) {
         res = null;
         err = "텍스트 파일이 아닙니다.";
@@ -2882,6 +2923,7 @@ function App() {
       label,
       bytes: Math.max(size, res.size || 0),
     });
+    keepDoc(tab.id, res);
     setTabs((prev) => (prev.some((t) => samePath(t.path, tab.path)) ? prev : [...prev, tab]));
     return tab.id;
   }, [openLinesOnly, flash]);
@@ -3406,6 +3448,7 @@ function App() {
         const res = await readForEditor(t.path, enc, size, (n) => flash(`「${t.label || t.title}」 다시 여는 중 ${n}%`));
         if (size >= CHUNK_OPEN) flash("");
         if (!res) return;
+        if (!res.binary) keepDoc(t.id, res);
         if (res.binary) {
           alert("선택한 인코딩으로는 이 파일을 텍스트로 읽을 수 없습니다.\n다시 열기를 취소했습니다.");
           return;
@@ -3954,11 +3997,19 @@ function App() {
   }, []);
   useEffect(() => {
     flushedRef.current.clear(); // the state now carries every parked text
+    // documents of big pieces whose tab let the text go (📖, closed, edited and flushed)
+    for (const [id, b] of bigDocs.current) {
+      const t = tabs.find((x) => x.id === id);
+      if (!t || t.content !== b.content) bigDocs.current.delete(id);
+    }
   }, [tabs]);
   const initialDocFor = useCallback((id: string, seq: number) => {
     const parked = flushedRef.current.get(id);
     if (parked && parked.seq === seq) return parked.text;
-    return tabsRef.current.find((x) => x.id === id)?.content ?? "";
+    const t = tabsRef.current.find((x) => x.id === id);
+    const big = bigDocs.current.get(id);
+    if (t && big && big.content === t.content) return big.text;
+    return t?.content ?? "";
   }, []);
 
   const findTargets = useCallback((): FindTarget[] => {
@@ -4388,7 +4439,8 @@ function App() {
   const bigPrompt = (t: Tab) => {
     const over = t.bigSize > TOO_BIG_FILE;
     // over the whole-file total with the tabs already read whole: no 「전체 열기」
-    const budget = !over && wholeBudget(heldWhole(), [{ size: t.bigSize, whole: true }]).over;
+    const heapNote = t.bigSize >= BUDGET_SMALL ? heapWhy(t.bigSize) : "";
+    const budget = !over && (wholeBudget(heldWhole(), [{ size: t.bigSize, whole: true }]).over || !!heapNote);
     return (
       <>
         <div className="empty-title">
@@ -4397,7 +4449,7 @@ function App() {
         <div className="empty-sub">{t.path}</div>
         {budget ? (
           <div className="empty-sub" style={{ whiteSpace: "pre-line" }}>
-            {budgetMsg(heldWhole(), t.bigSize, true)}
+            {heapNote || budgetMsg(heldWhole(), t.bigSize, true)}
           </div>
         ) : over ? (
           <div className="empty-sub">

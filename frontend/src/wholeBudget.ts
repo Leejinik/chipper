@@ -73,3 +73,17 @@ export function editAskText(size: number, held: number, fmt: (n: number) => stri
     "· 보기·찾기·제외만 할 거면 📖 읽기 보기가 빠르고 가볍습니다.",
   ].join("\n");
 }
+
+// The window's JS memory has a hard ceiling (~4GB, then 「Out of Memory」). Text
+// let go (✏️ → 📖, a closed tab) leaves the budget at once but the memory only
+// when the engine collects it: with 99MB×7 held (693MB, heap 2.7GB) 📖 ↔ ✏️
+// killed the window on the 4th round (.18 10-29). So reading a file in also
+// waits for room in the heap itself: used + the file × HEAP_PER_BYTE ≤ HEAP_MAX
+// of the limit. heap null (no performance.memory: macOS WKWebView, Linux
+// WebKitGTK) = only the budget counts.
+export const HEAP_PER_BYTE = 4; // .18 10-29: 7 × 99MB held = 2.7GB
+export const HEAP_MAX = 0.8;
+export function heapWhyOf(heap: { used: number; limit: number } | null, size: number, fmt: (n: number) => string): string {
+  if (!heap || !(heap.limit > 0) || size <= 0 || heap.used + size * HEAP_PER_BYTE <= heap.limit * HEAP_MAX) return "";
+  return `화면 메모리가 ${fmt(heap.used)} / 약 ${fmt(heap.limit)} 이라 ${fmt(size)} 를 더 읽어 들이면 창이 죽을 수 있습니다 — 내려놓은 글자가 풀릴 때까지 잠시 기다리거나, 편집 중인 다른 탭을 📖 읽기로 돌리거나 닫으세요`;
+}
