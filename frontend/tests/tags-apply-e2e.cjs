@@ -334,6 +334,19 @@ async function main() {
       await page.mouse.click(1390, 890);
       await sleep(150);
       ok("창 바깥 누르기: 안 닫힘 · 고친 것 그대로", !!(await page.$(".tags-dialog")) && (await rulePatterns(page)).includes("banana"));
+      // 10-28 .18: app shortcuts ran behind the window (Ctrl+N made a tab and the
+      // next letters went into it). While the window is up they must do nothing.
+      {
+        const tabs0 = await page.$$eval(".tab", (es) => es.length);
+        const active0 = await page.$eval(".tab.active", (e) => e.textContent);
+        for (const k of ["Control+n", "Control+Tab", "Control+w", "Control+f"]) await page.keyboard.press(k);
+        await sleep(150);
+        ok(
+          "창이 떠 있는 동안 Ctrl+N·Tab·W·F 는 뒤에서 안 돎 (탭 수·활성 탭 그대로, 창 그대로)",
+          (await page.$$eval(".tab", (es) => es.length)) === tabs0 && (await page.$eval(".tab.active", (e) => e.textContent)) === active0 && !!(await page.$(".tags-dialog")),
+          [tabs0, await page.$$eval(".tab", (es) => es.length)]
+        );
+      }
       // 닫기 throws it away, without asking
       const dlg0 = page.__dialogs.length;
       await page.click(".tags-dialog .tags-close");

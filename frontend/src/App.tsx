@@ -2964,6 +2964,9 @@ function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (keysOpenRef.current || assocOpenRef.current) return; // a settings modal owns the keyboard
+      // Any other window over the app (태그 창, 태그 지정, 큰 파일 확인, chips …) owns it too:
+      // Ctrl+N / Ctrl+Tab / Ctrl+W behind it moved focus and let typing land in a log.
+      if (document.querySelector(".chips-overlay, .big-ask-back, .tags-sub-overlay")) return;
       const isMod = e.ctrlKey || e.metaKey;
       // Ctrl+Tab / Ctrl+Shift+Tab: fixed tab navigation (not remappable).
       if (isMod && e.key.toLowerCase() === "tab") {
