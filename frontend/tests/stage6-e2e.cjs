@@ -534,9 +534,11 @@ async function main() {
       ok("오류(레벨) 줄에 「줄 배경 자리 60」 칸", heads[0] === "60" && heads[1] === "" && heads[2] === null, heads);
       const savesH = calls(be, "SaveTags").length;
       await page.fill(".tags-dialog .rule-row:nth-of-type(1) .rule-head", "");
+      await page.click(".tags-dialog .tags-apply"); // 적용(10-28)
       await until(() => calls(be, "SaveTags").length > savesH, 3000);
       ok("칸을 비우면 lineHead 없음(어디서든 줄 배경)으로 저장", savedTags(be).tags[0].rules[0].lineHead === undefined, savedTags(be).tags[0].rules[0]);
       await page.fill(".tags-dialog .rule-row:nth-of-type(1) .rule-head", "60");
+      await page.click(".tags-dialog .tags-apply"); // 적용(10-28)
       await until(() => savedTags(be).tags[0].rules[0].lineHead === 60, 3000);
       ok("다시 60 → 저장", savedTags(be).tags[0].rules[0].lineHead === 60);
       await page.keyboard.press("Escape");

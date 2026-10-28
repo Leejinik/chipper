@@ -1,13 +1,16 @@
 // Scroll frame times of a big log with many colour rules, headless chromium,
 // against a built frontend (default frontend/dist; DIST=<dir> for another build).
 //
-//   node tests/perf-scroll.cjs <log file> [rule set: A|B|freeze]
+//   node tests/perf-scroll.cjs <log file> [rule set: A|A2|B|freeze]
 //     A      = 6 default rules + 24 user rules (most regex) — usable by the old
 //              stage-3 guard too, so old and new builds run the same rules
+//     A2     = this build's built-in common rules (logHighlight DEFAULT_LOG_RULES,
+//              revision 2 = 8 rules since stage 6) + the same 24 user rules
 //     B      = A + the review's slow-looking regexes ((\w|-)+, (a+){4}$, …)
 //     freeze = A + (a+){4}$ on a document with a 2,000-character "aaa…!" line
 //   DIST=<dist dir>  PLAYWRIGHT=<path>  MB=<megabytes of the log to use, default 10>
 //   COLORS=off  (log colouring off: what CodeMirror alone costs)
+//   ANSI=1      every 3rd line wrapped in ANSI colour codes (ESC[..m), as some logs are
 //
 // Prints the time from setting scrollTop to the next frame (≈16.7 ms when idle) for smooth scrolling (200 × 120px) and for jumps
 // (60 random positions): median, p95, max, and frames over 50 ms.
@@ -19,7 +22,24 @@ const { chromium } = require(process.env.PLAYWRIGHT || "D:/QA/workspace/playwrig
 const DIST = path.resolve(process.env.DIST || path.join(__dirname, "..", "dist"));
 const LOG = process.argv[2];
 const SET = process.argv[3] || "A";
-if (!LOG) throw new Error("usage: node tests/perf-scroll.cjs <log file> [A|B|freeze]");
+if (!LOG) throw new Error("usage: node tests/perf-scroll.cjs <log file> [A|A2|B|freeze]");
+
+// The built-in common rules of the build under test, from its source (esbuild
+// from vite's node_modules, like run-unit.cjs).
+function currentDefaults() {
+  const esbuild = require(path.join(__dirname, "..", "node_modules", "esbuild"));
+  const out = esbuild.buildSync({
+    stdin: { contents: 'export { DEFAULT_LOG_RULES } from "./src/logHighlight";', resolveDir: path.join(__dirname, ".."), loader: "ts" },
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    write: false,
+    logLevel: "silent",
+  });
+  const m = { exports: {} };
+  new Function("module", "exports", "require", out.outputFiles[0].text)(m, m.exports, require);
+  return m.exports.DEFAULT_LOG_RULES;
+}
 
 function serve() {
   const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
@@ -85,6 +105,7 @@ const color = (i) => "#" + [0x40 + ((i * 53) % 0xa0), 0x40 + ((i * 97) % 0xa0), 
 const user = (list, base) => list.map(([p, k], i) => rule(`u${base + i}`, p, k, color(base + i), i % 7 === 0));
 let rules = [...DEFAULTS, ...user(USER_A, 0)];
 if (SET === "B") rules = [...rules, ...user(USER_B, 100)];
+if (SET === "A2") rules = [...currentDefaults(), ...user(USER_A, 0)];
 if (SET === "freeze") rules = [...rules, rule("slow", "(a+){4}$", "regex", "#123456")];
 
 async function main() {
@@ -95,6 +116,13 @@ async function main() {
   fs.closeSync(fd);
   let text = buf.subarray(0, n).toString("utf8");
   text = text.slice(0, text.lastIndexOf("\n") + 1);
+  if (process.env.ANSI) {
+    const E = "\x1b[";
+    text = text
+      .split("\n")
+      .map((l, i) => (i % 3 === 0 && l ? `${E}0;32m${l.replace(/\b(ERROR|WARN|INFO)\b/, `${E}1;31m$1${E}0;32m`)}${E}0m` : l))
+      .join("\n");
+  }
   if (SET === "freeze") {
     // a worst-case line every ~2,000 lines, so one is on screen wherever we are
     const ls = text.split("\n");
@@ -175,7 +203,7 @@ async function main() {
     }
     return { smooth: stat(smooth), jumps: stat(jumps), height: sc.scrollHeight };
   });
-  console.log(JSON.stringify({ dist: DIST, set: SET, rules: rules.length, mb: MB, openMs, ...r }));
+  console.log(JSON.stringify({ dist: DIST, set: SET, rules: rules.length, ansi: !!process.env.ANSI, mb: MB, openMs, ...r }));
   await browser.close();
   srv.close();
 }

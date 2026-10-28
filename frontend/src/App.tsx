@@ -1376,6 +1376,16 @@ function App() {
     },
     [saveTagsNow]
   );
+  // 적용 / 확인 in the tag window: its draft becomes the store (editor colours,
+  // 「태그 줄만」) and is written now. A failed write keeps it for this run and
+  // retries on the next change, like any tag save.
+  const applyTags = useCallback(
+    (next: TagStore) => {
+      setTagStore(next);
+      return saveTagsWith(next);
+    },
+    [saveTagsWith]
+  );
   useEffect(() => {
     if (!tagsReady) return;
     window.clearTimeout(tagsTimer.current);
@@ -4926,6 +4936,7 @@ function App() {
         <TagsDialog
           store={tagStore}
           onChange={setTagStore}
+          onApply={applyTags}
           onClose={() => setTagsOpen(null)}
           initial={tagsOpen}
           applied={active ? appliedTags(active).names : [COMMON]}

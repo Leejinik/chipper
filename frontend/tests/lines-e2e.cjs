@@ -92,7 +92,7 @@ const goGet = (p) => fetch(`http://${goAddr}${p}`).then((r) => r.text());
 
 // ---- fake Go side for everything else ------------------------------------------------------
 function makeBackend() {
-  const st = { session: "", tags: null, calls: [], files: {}, sizes: {}, scan: null, openFiles: [] };
+  const st = { session: "", tags: null, calls: [], files: {}, sizes: {}, scan: null, openFiles: [], tooBigSave: 0 };
   const read = (p) => {
     if (st.files[p] != null) return st.files[p];
     if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
@@ -123,6 +123,13 @@ function makeBackend() {
       return fs.existsSync(p) ? { exists: true, modTime: 1, size: fs.statSync(p).size } : { exists: false, modTime: 0, size: 0 };
     },
     ScanBundle: () => st.scan,
+    // Go's SaveFile: tooBigSave = the size the saved file would have (over the
+    // open limit → refused with the prefix until allowTooBig, like app.go)
+    SaveFile: (p, content, opt) => {
+      if (st.tooBigSave && !(opt && opt.allowTooBig)) throw new Error("CHIPPER_TOO_BIG_AFTER_SAVE:" + st.tooBigSave);
+      st.files[p] = content;
+      return { path: p, name: p.split(/[\\/]/).pop(), content: "", modTime: 2, size: content.length, encoding: "utf-8", binary: false, canceled: false, eol: "lf", eolMixed: false, bom: false, unchanged: false };
+    },
     OpenFolderDialog: () => (st.scan ? st.scan.root : ""),
     OpenFilesDialog: () => st.openFiles,
     OpenFileDialog: () => st.openFiles[0] || "",
@@ -508,8 +515,9 @@ async function main() {
       const rows = await page.$$(".tags-dialog .rule-row");
       const last = rows[rows.length - 1];
       await (await last.$(".rule-pattern")).type("kafka", { delay: 40 });
-      await sleep(120);
-      ok("입력하는 동안에는 다시 거르지 않음", calls(be, "FilterStart").length === n0, calls(be, "FilterStart").length - n0);
+      await sleep(900); // past the tag save debounce
+      ok("입력하는 동안(적용 전)에는 다시 거르지 않음", calls(be, "FilterStart").length === n0, calls(be, "FilterStart").length - n0);
+      await page.click(".tags-dialog .tags-apply"); // 적용(10-28): 줄만 보기는 적용 뒤에만 다시 거름
       await until(() => calls(be, "FilterStart").length > n0, 4000);
       const save = calls(be, "SaveTags").pop();
       const restart = calls(be, "FilterStart")[n0];
@@ -527,10 +535,10 @@ async function main() {
         set.call(e, "#0000cc");
         e.dispatchEvent(new Event("input", { bubbles: true }));
       });
-      await page.keyboard.press("Escape");
+      await page.click(".tags-dialog .tags-ok"); // 확인(10-28): Esc 는 이제 버림
       await sleep(900);
       const blue = await page.$$eval(`.lv-row span[style*="color: ${rgb("#0000cc")}"]`, (els) => els.map((e) => e.textContent));
-      ok("색만 바꾸면 바로 칠함", blue.length === 2, blue);
+      ok("색만 바꿔 확인하면 바로 칠함", blue.length === 2, blue);
       ok("색만 바꾸면 다시 거르지 않음", calls(be, "FilterStart").length === n1, calls(be, "FilterStart").length - n1);
       await ctx.close();
     }
@@ -1206,6 +1214,33 @@ async function main() {
       await r2.page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
       ok("앞의 파일을 다시 열면 다시 물음", ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askA"));
       await r2.ctx.close();
+    }
+
+    // 최종 병합 되묻기 ③: the 「저장 뒤 384MB 초과」 question says what the file becomes
+    console.log("10h. 저장하면 384MB 를 넘는 파일 — 경고 문구");
+    if (want("10h")) {
+      const f = P("grow.log");
+      fs.writeFileSync(f, small.join("\n"));
+      const be = makeBackend();
+      be.st.tags = TAGS1;
+      be.st.session = session([tab("t1", f)], "t1");
+      const { ctx, page } = await openPage(browser, url, be);
+      await until(() => page.$(".cm-line"), 8000);
+      await page.click(".cm-content");
+      await page.keyboard.press("Control+End");
+      await page.keyboard.type("x");
+      be.st.tooBigSave = 400 * 1024 * 1024 + 123; // multi-byte text: only Go knows the size
+      const d0 = page.__dialogs.length;
+      await page.keyboard.press("Control+s");
+      await until(() => calls(be, "SaveFile").length >= 2, 4000);
+      const asked = page.__dialogs.slice(d0);
+      const q = asked.find((d) => d.includes("저장하면")) || "";
+      ok("저장 뒤 크기를 묻는 창이 뜸 (파일 이름·크기)", q.startsWith("confirm:") && q.includes("grow.log") && q.includes("400"), asked);
+      ok("문구: 다음부터 전체로 열 수 없고 「🏷 태그 줄만」으로만 볼 수 있음", q.includes("다음부터는 전체로 열 수 없고 「🏷 태그 줄만」으로만 볼 수 있습니다. 저장할까요?"), q);
+      ok("옛 문구(「Chipper 로 이 파일을 열 수 없습니다」) 아님", !q.includes("열 수 없습니다. 저장할까요") && !q.includes("Chipper 로 이 파일을"), q);
+      const sv = calls(be, "SaveFile");
+      ok("「확인」 → allowTooBig 로 다시 저장", sv.length === 2 && !sv[0].args[2].allowTooBig && sv[1].args[2].allowTooBig === true, sv.map((c) => c.args[2] && c.args[2].allowTooBig));
+      await ctx.close();
     }
   } finally {
     await browser.close();

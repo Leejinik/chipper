@@ -26,9 +26,17 @@ import type { main } from "../wailsjs/go/models";
 // questions (the window under them is inert) → keep the store as it is in
 // tags-backup/before-import-<time>.json (stop if that fails) → apply + save
 // (on failure the window goes back to the store before the import).
+//
+// The tag window keeps its own edits as a draft until 적용 (tagDraft.ts).
+// Import, undo and restore work on the saved store (`store`) and save at once
+// — they have their own question and backups — and the window lays its draft
+// over the result. Export writes what the window shows (`view`, the draft
+// included): it does not touch tags.json.
 
 interface Opts {
-  store: TagStore;
+  store: TagStore; // the saved store
+  view: TagStore; // what the tag window shows (saved store + draft)
+  dirty: boolean; // the window has edits not applied yet
   onChange: (s: TagStore) => void;
   // write the tags now (`next` first, when given): "" = saved, else why not
   onSaveNow: (next?: TagStore) => Promise<string>;
@@ -126,7 +134,11 @@ function DiffList({ title, sign, items }: { title: string; sign: string; items: 
   );
 }
 
-export function useTagsIO({ store, onChange, onSaveNow, current, select }: Opts) {
+// Asked before an import / restore while the window holds edits not applied.
+export const DRAFT_KEEP_TEXT =
+  "창에 적용 안 한 변경이 있습니다. 이 작업은 저장된 태그를 기준으로 하고 곧바로 저장합니다. 적용 안 한 변경은 그 결과 위에 다시 얹어 창에 남기고(얹을 수 없게 된 변경은 창 위에 알림), [적용]해야 저장됩니다.";
+
+export function useTagsIO({ store, view, dirty, onChange, onSaveNow, current, select }: Opts) {
   const storeRef = useRef(store);
   storeRef.current = store;
   const [exporting, setExporting] = useState<ExportState | null>(null);
@@ -185,12 +197,12 @@ export function useTagsIO({ store, onChange, onSaveNow, current, select }: Opts)
     return !pre;
   };
 
-  // ---- export
-  const names = store.tags.map((t) => t.name);
+  // ---- export (what the window shows, the draft included)
+  const names = view.tags.map((t) => t.name);
   const exportNames = exporting ? names.filter((n) => exporting.checked.includes(n)) : [];
   const exportName = exporting ? (exporting.typed ? exporting.name : exportNames.length === 1 ? exportNames[0] : "") : "";
   const exportFile = exportFileName(exportName);
-  const exportPlaces = exporting ? placeCount(exportAssign(store, exportNames)) : 0;
+  const exportPlaces = exporting ? placeCount(exportAssign(view, exportNames)) : 0;
   const startExport = () => {
     setIoMsg(null);
     setRestoring(null);
@@ -199,13 +211,13 @@ export function useTagsIO({ store, onChange, onSaveNow, current, select }: Opts)
   const doExport = async () => {
     if (!exporting || !exportNames.length || !exportFile || busy) return;
     // what the receiver could not import is not written
-    const limit = importLimitProblem(store.tags.filter((t) => exportNames.includes(t.name)));
+    const limit = importLimitProblem(view.tags.filter((t) => exportNames.includes(t.name)));
     if (limit) {
       setIoMsg({ text: "받는 쪽에서 가져올 수 없는 크기라 내보내지 않았습니다: " + limit.replace(/ — 이 파일은 가져오지 않습니다$/, ""), bad: true });
       return;
     }
     const withAssign = exporting.withAssign && exportPlaces > 0;
-    const payload = exportPayload(store, exportNames, undefined, withAssign);
+    const payload = exportPayload(view, exportNames, undefined, withAssign);
     setBusy(true);
     try {
       const r = await ExportTagsDialog(exportFile, payload);
@@ -248,6 +260,7 @@ export function useTagsIO({ store, onChange, onSaveNow, current, select }: Opts)
   };
   const doImport = async () => {
     if (busy) return;
+    if (dirty && !window.confirm(DRAFT_KEEP_TEXT + "\n\n가져올까요?")) return;
     setIoMsg(null);
     setExporting(null);
     setRestoring(null);
@@ -326,7 +339,12 @@ export function useTagsIO({ store, onChange, onSaveNow, current, select }: Opts)
   const restoreFrom = async (b: main.TagsBackupInfo) => {
     if (busy) return;
     const when = `${b.time} ${b.kind === "import" ? "가져오기" : "되돌리기"} 직전`;
-    if (!window.confirm(`태그를 ${when} 상태로 되돌릴까요?\n태그와 붙인 곳이 모두 그때 상태(태그 ${b.tags}개, 붙인 곳 ${b.places}곳)로 바뀝니다. 지금 상태는 따로 백업해 둡니다.`))
+    if (
+      !window.confirm(
+        `태그를 ${when} 상태로 되돌릴까요?\n태그와 붙인 곳이 모두 그때 상태(태그 ${b.tags}개, 붙인 곳 ${b.places}곳)로 바뀝니다. 지금 상태는 따로 백업해 둡니다.` +
+          (dirty ? "\n\n" + DRAFT_KEEP_TEXT : "")
+      )
+    )
       return;
     setBusy(true);
     try {
@@ -431,8 +449,9 @@ export function useTagsIO({ store, onChange, onSaveNow, current, select }: Opts)
         <SubPanel className="tags-export-panel" label="태그 내보내기">
           <div className="chips-title">태그 내보내기</div>
           <div className="chips-sub">고른 태그와 그 규칙을 파일 하나로 저장합니다.</div>
+          {dirty && <div className="dim tags-export-draft">창에 보이는 그대로(적용 안 한 변경 포함) 내보냅니다. 내 tags.json 은 바뀌지 않습니다.</div>}
           <div className="tags-export-list">
-            {store.tags.map((t) => (
+            {view.tags.map((t) => (
               <label key={t.name} className="tags-export-item">
                 <input
                   type="checkbox"
