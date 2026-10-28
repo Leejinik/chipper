@@ -207,7 +207,7 @@ func refText(raw string, maxDisplay int) (string, bool) {
 
 type refOpts struct {
 	above, below, maxRows, maxDisplay int
-	exclude                           []Rule // Request.Exclude: a matched line one of these matches is not a hit
+	exclude                           []Rule                 // Request.Exclude: a matched line one of these matches is not a hit
 	giantCol                          func(lineLen int) bool // col unknown (-1) allowed for this line
 }
 

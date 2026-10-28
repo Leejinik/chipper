@@ -66,12 +66,12 @@ type Request struct {
 
 // StartResult answers FilterStart.
 type StartResult struct {
-	JobID    string      `json:"jobId"`
-	Issues   []RuleIssue `json:"issues,omitempty"` // rules left out (the rest still run)
+	JobID  string      `json:"jobId"`
+	Issues []RuleIssue `json:"issues,omitempty"` // rules left out (the rest still run)
 	// ExcludeIssues: exclude rules left out (Index = position in Exclude)
 	ExcludeIssues []RuleIssue `json:"excludeIssues,omitempty"`
-	Cached   bool        `json:"cached"`           // an identical scan (same file state, rules, encoding) was reused
-	Progress Progress    `json:"progress"`
+	Cached        bool        `json:"cached"` // an identical scan (same file state, rules, encoding) was reused
+	Progress      Progress    `json:"progress"`
 }
 
 // Progress is the "linefilter:progress" event payload and FilterStatus result.
@@ -100,11 +100,11 @@ type Progress struct {
 	Canceled     bool    `json:"canceled"`
 	Changed      bool    `json:"changed"` // the file's content changed (not just appended): start again (limit: see above)
 	Error        string  `json:"error,omitempty"`
-	TotalLines   int64   `json:"totalLines"`          // lines in the file (editor count); 0 until known (done and not truncated)
-	SlowRules    []int   `json:"slowRules,omitempty"` // request rule indexes too complex for the fast matcher (state explosion): judged by the slow standard regexp
+	TotalLines   int64   `json:"totalLines"`            // lines in the file (editor count); 0 until known (done and not truncated)
+	SlowRules    []int   `json:"slowRules,omitempty"`   // request rule indexes too complex for the fast matcher (state explosion): judged by the slow standard regexp
 	SlowExclude  []int   `json:"slowExclude,omitempty"` // the same for Request.Exclude indexes
-	Version      int     `json:"version"`             // +1 each time lines appended to the file are taken in
-	TailLine     int64   `json:"tailLine"`            // the next append can change lines ≥ TailLine
+	Version      int     `json:"version"`               // +1 each time lines appended to the file are taken in
+	TailLine     int64   `json:"tailLine"`              // the next append can change lines ≥ TailLine
 	ElapsedMs    int64   `json:"elapsedMs"`
 	FirstHitMs   int64   `json:"firstHitMs"` // -1 until the first hit is published
 }
@@ -280,19 +280,19 @@ type restartPoint struct {
 }
 
 type job struct {
-	e       *Engine
-	id      string
-	key     string
-	path    string
-	reqEnc  string
-	m       *matcher
-	ex      *matcher // Request.Exclude (nil: none)
-	issues  []RuleIssue
+	e        *Engine
+	id       string
+	key      string
+	path     string
+	reqEnc   string
+	m        *matcher
+	ex       *matcher // Request.Exclude (nil: none)
+	issues   []RuleIssue
 	exIssues []RuleIssue
-	nRules  int
-	started time.Time
-	stop    atomic.Bool
-	content sync.RWMutex // readers vs. rewriting the temp copy's tail (append)
+	nRules   int
+	started  time.Time
+	stop     atomic.Bool
+	content  sync.RWMutex // readers vs. rewriting the temp copy's tail (append)
 
 	mu           sync.Mutex
 	cond         *sync.Cond

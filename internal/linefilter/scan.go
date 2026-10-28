@@ -22,9 +22,9 @@ type chunkResult struct {
 	hits        []hit
 	ext         []uint64 // the hits' rules past the 64th (see hit.ext)
 	longs       []longLine
-	full        bool  // stopped at MaxRows+1 hits (the rest of the region was not scanned)
-	invalid     int64 // bytes that are not UTF-8 (UTF-8 files only)
-	invalidLine int64 // region-local index of the first line with one, -1 none
+	full        bool    // stopped at MaxRows+1 hits (the rest of the region was not scanned)
+	invalid     int64   // bytes that are not UTF-8 (UTF-8 files only)
+	invalidLine int64   // region-local index of the first line with one, -1 none
 	excluded    int64   // matched lines left out by the exclude rules (whole region scanned so far)
 	exBefore    []int64 // per hit: excluded lines before it in the region (with exclude rules only)
 	err         error

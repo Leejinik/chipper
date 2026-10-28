@@ -61,7 +61,7 @@ var exDoc = strings.Join([]string{
 	"2 abc commonConnection ok", // hit by abc, excluded
 	"3 after 2",
 	"4 plain",
-	"5 def payload", // hit
+	"5 def payload",          // hit
 	"6 abc CommonConnection", // excluded only when case is ignored
 	"7 plain",
 	"8 plain",
