@@ -286,6 +286,10 @@ async function main() {
     ch = await rowChips(page, "r:s1/modules/lizcollector/admin.log");
     ok("트리: 파일 묶음에 📌 덮어쓴 칩", ch.length === 1 && ch[0].c.includes("override") && ch[0].t.includes("📌") && ch[0].title.includes("collector") , ch);
     await page.click(row("r:s1/modules/lizcollector/admin.log"));
+    // 「디렉토리 열기」(10-28): a tree click opens in the focused pane (was: the
+    // pane following the file's server). Step 3 left pane 2 focused, so pick
+    // pane 1 (s1) first — the step is about pane 1 showing the s1 file.
+    await page.click(".mpane >> nth=0 >> .mp-num");
     await page.click(row("f:s1/modules/lizcollector/admin.log.2026-10-22"));
     await sleep(500);
     ok("admin.log.2026-10-22 = common + admin (폴더 collector 대신)", (await statusIs(page, "🏷 common + admin")) === "🏷 common + admin", await statusTags(page));
@@ -462,7 +466,8 @@ async function main() {
     await page.click(".tag-menu .menu-item >> nth=0");
     await page.waitForSelector(".tag-assign");
     const w10 = await page.$eval(".ta-where", (e) => e.textContent);
-    ok("이름 문장", w10.includes("이름이 「messages」") && w10.includes("묶음 밖"), w10);
+    // 10-28: 「로그 묶음 밖」 → 「맨 위 폴더(서버) 밖」 — a file lying directly in an opened directory gets this kind too
+    ok("이름 문장", w10.includes("이름이 「messages」") && w10.includes("맨 위 폴더(서버) 밖"), w10);
     await checkTag(page, "syslog");
     await confirm(page);
     await flush(page);
