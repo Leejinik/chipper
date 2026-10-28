@@ -170,6 +170,30 @@ func refRegex(r Rule) *regexp.Regexp {
 	return cr.lineRe
 }
 
+// refStripANSI: line without the sequences the editor takes out
+// (/\x1b\[[0-?]*[ -\/]*[@-~]/g), and for each byte of the result plus one
+// past its end, the offset in line. An independent copy of ansi.go's rule.
+var refANSI = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]`)
+
+func refStripANSI(line string) (string, []int) {
+	var b strings.Builder
+	var at []int
+	last := 0
+	keep := func(a, z int) {
+		b.WriteString(line[a:z])
+		for i := a; i < z; i++ {
+			at = append(at, i)
+		}
+	}
+	for _, m := range refANSI.FindAllStringIndex(line, -1) {
+		keep(last, m[0])
+		last = m[1]
+	}
+	keep(last, len(line))
+	at = append(at, len(line))
+	return b.String(), at
+}
+
 func refCol(line string, s int) int32 {
 	return int32(len(utf16.Encode([]rune(line[:s]))))
 }
@@ -197,11 +221,15 @@ func refFilter(text string, rules []Rule, o refOpts) ([]Row, bool) {
 	cols := make([]int32, len(lines))
 	for li, ln := range lines {
 		best := -1
+		// ANSI colour codes: rules see the line without them (the editor's
+		// stripAnsi); judge = that text, at[i] = where its byte i is in ln.
+		judge, at := refStripANSI(ln)
 		for ri, r := range rules {
 			if bad[ri] || !r.enabled() || r.Pattern == "" {
 				continue
 			}
-			if ok, s := refMatch(r, ln); ok {
+			if ok, s := refMatch(r, judge); ok {
+				s = at[s]
 				hitRules[li] = append(hitRules[li], ri)
 				if best < 0 || s < best {
 					best = s

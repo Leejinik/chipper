@@ -33,10 +33,23 @@ function compile(r) {
     return re.test("") ? null : re;
   } catch { return null; }
 }
-function firstColour(re, text) {
+// The editor matches on the line without its ANSI codes (logHighlight.ts
+// stripAnsi, the same regex) and reports positions in the line as stored.
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+function firstColourRaw(re, text) {
   re.lastIndex = 0; let m;
   while ((m = re.exec(text))) { if (!m[0]) { re.lastIndex++; continue; } return m.index; }
   return -1;
+}
+function firstColour(re, line) {
+  if (line.indexOf("\x1b") < 0) return firstColourRaw(re, line);
+  const raw = []; let vis = ""; let at = 0; let m;
+  ANSI_RE.lastIndex = 0;
+  const keep = (a, b) => { vis += line.slice(a, b); for (let i = a; i < b; i++) raw.push(i); };
+  while ((m = ANSI_RE.exec(line))) { keep(at, m.index); at = m.index + m[0].length; }
+  keep(at, line.length);
+  const p = firstColourRaw(re, vis);
+  return p < 0 ? -1 : raw[p];
 }
 const st = { rules: 0, both: 0, editorRisky: 0, goOnly: 0, editorOnly: [], lineChecks: 0, lineMismatch: 0, colChecks: 0, colMismatch: 0, knownAstral: 0, knownModifier: 0 };
 // Known differences, counted apart: characters outside the BMP (JS without the

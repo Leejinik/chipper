@@ -1,5 +1,33 @@
 export namespace linefilter {
 	
+	export class FindResult {
+	    rows: number[];
+	    total: number;
+	    capped?: boolean;
+	    searched: number;
+	    partial?: boolean;
+	    canceled?: boolean;
+	    issue?: string;
+	    version: number;
+	    changed?: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new FindResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.rows = source["rows"];
+	        this.total = source["total"];
+	        this.capped = source["capped"];
+	        this.searched = source["searched"];
+	        this.partial = source["partial"];
+	        this.canceled = source["canceled"];
+	        this.issue = source["issue"];
+	        this.version = source["version"];
+	        this.changed = source["changed"];
+	    }
+	}
 	export class Progress {
 	    jobId: string;
 	    phase: string;
