@@ -1185,7 +1185,10 @@ async function main() {
       const n = await notes(page);
       ok("옛 작업의 늦은 seek 실패 → 새 화면은 오류 아님", vd.state !== "error" && !n.some((x) => x.includes("거르지 못했습니다")), { vd, n });
       await ctx.close();
-      // two size questions at once: the newer one wins, the first is answered 「취소」
+      // two size questions at once: since 10-28 (53b96a9) app shortcuts do nothing
+      // while a window is up, so Ctrl+O over the size question is ignored — the
+      // first question stays and answering it opens only that file. (Before, the
+      // newer question replaced the first and the first was answered 「취소」.)
       const a = P("askA.log");
       const b = P("askB.log");
       fs.writeFileSync(a, small.join("\n"));
@@ -1201,18 +1204,17 @@ async function main() {
       await r2.page.waitForSelector(".big-ask");
       be2.st.openFiles = [b];
       await r2.page.keyboard.press("Control+o");
-      await until(async () => ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askB"), 3000);
+      await sleep(400);
       const h = await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "");
-      ok("두 번째 확인 창이 앞의 것을 대신함", h.includes("askB") && (await r2.page.$$(".big-ask")).length === 1, h);
+      ok("확인 창이 떠 있는 동안 Ctrl+O 는 무시 · 첫 질문 그대로", h.includes("askA") && (await r2.page.$$(".big-ask")).length === 1, h);
       await r2.page.click('.big-ask button:has-text("태그 줄만")');
       await sleep(500);
       const titles = await r2.page.$$eval(".tabs-scroll .tab .tab-title", (els) => els.map((e) => e.textContent));
-      ok("앞의 열기는 취소로 끝남 · 뒤의 것만 열림", JSON.stringify(titles) === '["askB.log"]' && !(await r2.page.$(".big-ask")), titles);
-      // the first one is not stuck: opening it again asks again
-      be2.st.openFiles = [a];
+      ok("첫 질문에 답하면 그 파일만 열림", JSON.stringify(titles) === '["askA.log"]' && !(await r2.page.$(".big-ask")), titles);
+      // after it, Ctrl+O works again and asks for the next file
       await r2.page.keyboard.press("Control+o");
       await r2.page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
-      ok("앞의 파일을 다시 열면 다시 물음", ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askA"));
+      ok("창이 닫힌 뒤 Ctrl+O 는 다시 물음", ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askB"));
       await r2.ctx.close();
     }
 
