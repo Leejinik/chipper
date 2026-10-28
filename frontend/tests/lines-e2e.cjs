@@ -125,6 +125,7 @@ function makeBackend() {
     ScanBundle: () => st.scan,
     OpenFolderDialog: () => (st.scan ? st.scan.root : ""),
     OpenFilesDialog: () => st.openFiles,
+    OpenFileDialog: () => st.openFiles[0] || "",
     FrontendReady: () => [],
     AutoUpdate: () => ({ blocked: false, info: { available: false } }),
     GetPlatform: () => "windows",
@@ -134,10 +135,14 @@ function makeBackend() {
     AssociationStatus: () => ({}),
   };
   const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules"]);
+  // delay[name] = ms: hold that call before it goes out (late answers, races)
+  const delay = {};
   return {
     st,
+    delay,
     call: async (name, args) => {
       st.calls.push({ name, args, t: Date.now() });
+      if (delay[name]) await sleep(delay[name]);
       if (FILTER.has(name)) return goPost(name, args);
       const f = impl[name];
       return f ? f(...args) : null;
@@ -271,6 +276,10 @@ const shot = async (page, name) => {
   if (SHOTS) await page.screenshot({ path: path.join(SHOTS, name) });
 };
 
+// ONLY=1,8,10a … runs just those sections (all when unset)
+const ONLY = (process.env.ONLY || "").split(",").filter(Boolean);
+const want = (k) => !ONLY.length || ONLY.includes(k);
+
 async function main() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lines-e2e-"));
   const P = (n) => path.join(dir, n);
@@ -286,7 +295,7 @@ async function main() {
       plain.push(i === 10 || i === 30 ? `2026-10-20 10:00:${String(i).padStart(2, "0")} ERROR boom ${i}` : i === 50 ? `10:01 WARN slow ${i}` : `2026-10-20 10:00:00 INFO line ${i}`);
     fs.writeFileSync(P("plain.log"), plain.join("\n"));
     const isErrWarn = (l) => /\b(ERROR|WARN)\b/.test(l);
-    {
+    if (want("1")) {
       const be = makeBackend();
       be.st.session = session([tab("t1", P("plain.log"), { lines: { on: true, above: 1, below: 2, off: [] } })], "t1");
       const { ctx, page } = await openPage(browser, url, be);
@@ -379,7 +388,7 @@ async function main() {
 
     // =============== 2. tab encoding goes to the engine; never-read tab = detect ==============
     console.log("2. 탭 인코딩을 엔진에 넘김");
-    {
+    if (want("2")) {
       // a real CP949 file: 「오류」 lines
       const kr = ["시작", "오류 발생 1", "정상", "오류 발생 2", "끝"].join("\n");
       execFileSync("python", ["-c", `open(r'${P("kr.log")}','wb').write(${JSON.stringify(kr)}.encode('cp949'))`]);
@@ -420,7 +429,7 @@ async function main() {
 
     // =============== 3. appended lines: the end is fetched again; rewrite = start again ========
     console.log("3. 덧붙음(version) → 끝부분 다시 받기 · 다시 쓰기(changed) → 처음부터");
-    {
+    if (want("3")) {
       const base = ["a1", "ERROR one", "a3", "a4", "a5", "a6", "ERROR tail"];
       fs.writeFileSync(P("grow.log"), base.join("\n"));
       const be = makeBackend();
@@ -456,7 +465,7 @@ async function main() {
 
     // =============== 4. saved tag rules → filter again (after the save, not per keystroke) =======
     console.log("4. 태그 규칙이 바뀌어 저장되면 다시 거름 · common 끄기");
-    {
+    if (want("4")) {
       const lines = ["start", "kafka connect", "ERROR x", "rebalance begin", "y", "kafka rebalance done", "z"];
       fs.writeFileSync(P("t.log"), lines.join("\n"));
       const be = makeBackend();
@@ -523,7 +532,7 @@ async function main() {
 
     // =============== 5. slow rules / caps (engine with small limits) ==========================
     console.log("5. 느린 규칙 알림 · 상한 안내");
-    {
+    if (want("5")) {
       const many = [];
       for (let i = 1; i <= 40; i++) many.push(i % 2 ? `ERROR line ${i} abc12x` : `ok ${i}`);
       fs.writeFileSync(P("many.log"), many.join("\n"));
@@ -575,7 +584,7 @@ async function main() {
 
     // =============== 8. big file from the tree: 「태그 줄만 열기」 · .gz ==========================
     console.log("8. 큰 파일 확인 창의 「태그 줄만 열기」 · .gz");
-    {
+    if (want("8")) {
       const root = P("bundle");
       fs.mkdirSync(path.join(root, "server1", "modules", "lizcollector"), { recursive: true });
       const big = path.join(root, "server1", "modules", "lizcollector", "collector.log");
@@ -584,6 +593,9 @@ async function main() {
       fs.writeFileSync(big, blines.join("\n"));
       const gz = path.join(root, "server1", "modules", "lizcollector", "collector.log.1.gz");
       fs.writeFileSync(gz, zlib.gzipSync(Buffer.from(blines.join("\n"))));
+      // a 100–384MB log in the same folder: the one that can still be opened whole
+      const mid = path.join(root, "server1", "modules", "lizcollector", "mid.log");
+      fs.writeFileSync(mid, blines.join("\n"));
       const be = makeBackend();
       be.st.tags = JSON.stringify({
         version: 1,
@@ -593,14 +605,16 @@ async function main() {
         ],
         assign: { dir: { "modules/lizcollector": ["collector"] }, file: {}, name: {} },
       });
-      be.st.sizes[big] = 200 << 20; // the common 100–384MB open gate offers line-only view
+      be.st.sizes[big] = 726 << 20; // the scan and StatFile say it is big: over the 384MB open limit
+      be.st.sizes[mid] = 200 << 20;
       be.st.scan = {
         root,
         servers: [
           {
             name: "server1",
             files: [
-              { rel: "modules/lizcollector/collector.log", size: 200 << 20, compressed: false },
+              { rel: "modules/lizcollector/collector.log", size: 726 << 20, compressed: false },
+              { rel: "modules/lizcollector/mid.log", size: 200 << 20, compressed: false },
               { rel: "modules/lizcollector/collector.log.1.gz", size: 1000, compressed: true },
             ],
             truncated: false,
@@ -616,9 +630,12 @@ async function main() {
       await page.click('.bt-row.file:has-text("collector.log") >> nth=0');
       await page.waitForSelector(".big-ask");
       const btns = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
-      ok("확인 창: 태그 줄만 / 전체 / 취소", JSON.stringify(btns) === '["🏷 태그 줄만 열기","전체 열기","취소"]', btns);
+      ok("726MB 확인 창: 태그 줄만 / 취소 (전체 열기 없음)", JSON.stringify(btns) === '["🏷 태그 줄만 열기","취소"]', btns);
       const title = await page.$eval(".big-ask h3", (e) => e.textContent);
-      ok("확인 창에 크기", title.includes("200.0MB"), title);
+      ok("확인 창에 크기", title.includes("726.0MB"), title);
+      const askText = await page.$eval(".big-ask p", (e) => e.textContent);
+      ok("확인 창: 전체로는 열 수 없다고 알림", askText.includes("전체로 열 수 없") && askText.includes("384MB"), askText);
+      ok("「너무 커서 열 수 없습니다」 알림 없이 물음", !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
       await shot(page, "lines-big-ask.png");
       await page.click('.big-ask button:has-text("태그 줄만")');
       await page.waitForSelector(".lines-view");
@@ -637,7 +654,21 @@ async function main() {
       ok("행 수 = grep 행 수", +(await viewData(page)).count === w.length, (await viewData(page)).count);
       await shot(page, "lines-bundle.png");
       ok("칸 아래 [전체|줄만] 에서 줄만이 켜짐", await page.$eval(".mpane-foot .lines-seg button.on", (e) => e.textContent.includes("줄만")));
-      // whole file of a big never-read tab: asks (no 「태그 줄만」 choice), cancel keeps the view
+      // whole file of a file over the open limit: refused, the view stays
+      await page.click('.lv-btn:has-text("전체")');
+      await until(() => page.__dialogs.length > 0, 3000);
+      ok("726MB → 「전체」 는 거절 (이 판 문구)", page.__dialogs.some((d) => d.includes("너무 커서") && d.includes("태그 줄만") && !d.includes("다음 버전")), page.__dialogs);
+      ok("거절 뒤 줄만 보기 그대로 · 읽지 않음", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")) && calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
+      // a 200MB log of the same folder: 3 choices; its whole file then asks (no 「태그 줄만」 choice), cancel keeps the view
+      await page.fill(".bt-filter", "mid.log");
+      await page.click('.bt-row.file:has-text("mid.log") >> nth=0');
+      await page.waitForSelector(".big-ask");
+      const btnsM = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
+      ok("200MB 확인 창: 태그 줄만 / 전체 / 취소", JSON.stringify(btnsM) === '["🏷 태그 줄만 열기","전체 열기","취소"]', btnsM);
+      ok("확인 창에 크기 (200MB)", (await page.$eval(".big-ask h3", (e) => e.textContent)).includes("200.0MB"));
+      await page.click('.big-ask button:has-text("태그 줄만")');
+      await until(async () => (calls(be, "FilterStart").pop() || { args: [{}] }).args[0].path === mid, 4000);
+      await waitDone(page);
       await page.click('.lv-btn:has-text("전체")');
       await page.waitForSelector(".big-ask");
       const btns2 = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
@@ -674,7 +705,7 @@ async function main() {
 
     // =============== 9. a long result: virtual rows, scrolling, End, N keeps the place ============
     console.log("9. 긴 결과: 가상 목록·스크롤·End·N 바꿀 때 자리 유지");
-    {
+    if (want("9")) {
       const L = [];
       for (let i = 1; i <= 200000; i++) L.push(i % 7 === 0 ? `ERROR at ${i}` : `line ${i} some text here`);
       fs.writeFileSync(P("long.log"), L.join("\n"));
@@ -742,6 +773,432 @@ async function main() {
       ok("N 바꿔도 다시 거르지 않음", calls(be, "FilterStart").length === 1);
       await shot(page, "lines-long.png");
       await ctx.close();
+    }
+
+    // =============== 10. 2단계 수정 (f2): big files every way · restored tabs · multi panes ==========
+    const TAGS1 = JSON.stringify({
+      version: 1,
+      tags: [{ name: "common", rules: [{ id: "error", on: true, label: "오류", pattern: "\\bERROR\\b", kind: "regex", caseSensitive: false, color: "#ff6b6b", line: true, filter: true }], updated: "" }],
+      assign: { dir: {}, file: {}, name: {} },
+    });
+    const small = [];
+    for (let i = 1; i <= 300; i++) small.push(i % 70 === 0 ? `ERROR e${i}` : `info ${i}`);
+    const reads = (be) => [...calls(be, "ReadFile"), ...calls(be, "ReadFileAs")];
+    const askBtns = (page) => page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
+    const emptyBtns = (page, scope = "") => page.$$eval(scope + " .empty-actions button", (els) => els.map((e) => e.textContent.trim()));
+    const tabCount = (page) => page.$$eval(".tabs-scroll .tab", (els) => els.length);
+    const slots6 = (first, mode = "read") => {
+      const s = [{ tabId: first, mode, server: "", note: "" }];
+      while (s.length < 6) s.push({ tabId: "", mode, server: "", note: "" });
+      return s;
+    };
+    const topOf = (page) =>
+      page.evaluate(() => {
+        const el = document.querySelector(".lv-scroll");
+        const rows = [...document.querySelectorAll(".lv-row[data-row]")].sort((a, b) => a.dataset.row - b.dataset.row);
+        // the first line row on screen (「⋯ N줄 생략」 rows have no line)
+        const top = rows.find((r) => r.dataset.line && r.offsetTop + r.offsetHeight > el.scrollTop);
+        return top ? { row: +top.dataset.row, line: +top.dataset.line } : null;
+      });
+    const hasRow = async (page, prefix, ms = 5000) => !!(await until(async () => (await shownRows(page)).some((r) => r.startsWith(prefix)), ms));
+
+    // H1 · a file over 384MB through 📂 열기 (single view) and the multi-file dialog
+    console.log("10a. 384MB 넘는 파일 — 📂 파일 열기 · 여러 파일 한 번에 · 취소");
+    if (want("10a")) {
+      const huge = P("huge.log");
+      const midF = P("mid10.log");
+      fs.writeFileSync(huge, small.join("\n"));
+      fs.writeFileSync(midF, small.join("\n"));
+      const be = makeBackend();
+      be.st.tags = TAGS1;
+      be.st.sizes[huge] = 726 << 20;
+      be.st.sizes[midF] = 200 << 20;
+      be.st.session = session([], "");
+      be.st.openFiles = [huge];
+      const { ctx, page } = await openPage(browser, url, be);
+      await page.click('.empty-actions button:has-text("파일 열기")');
+      await until(async () => (await page.$(".big-ask")) || page.__dialogs.length, 3000);
+      ok("726MB 📂 열기 → 「태그 줄만 / 취소」 확인 창", JSON.stringify(await askBtns(page)) === '["🏷 태그 줄만 열기","취소"]', { btns: await askBtns(page), dialogs: page.__dialogs });
+      ok("726MB 📂 열기 → 「너무 커서」 알림 없음", !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
+      if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("취소")');
+      await sleep(300);
+      ok("취소 → 아무것도 안 열림", (await tabCount(page)) === 0 && !(await page.$(".lines-view")) && reads(be).length === 0);
+      await page.click('.empty-actions button:has-text("파일 열기")');
+      await page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
+      if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("태그 줄만")');
+      await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
+      ok("「태그 줄만 열기」 → 726MB 줄만 보기 (읽지 않음)", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0, reads(be).length);
+      await ctx.close();
+      // several files at once (multi view, empty pane → 📂 파일 열기): 200MB + 726MB, 「전체 열기」
+      const be2 = makeBackend();
+      be2.st.tags = TAGS1;
+      be2.st.sizes[huge] = 726 << 20;
+      be2.st.sizes[midF] = 200 << 20;
+      be2.st.session = session([], "", { multi: { on: true, count: 1, slots: slots6("", "edit") } });
+      be2.st.openFiles = [midF, huge];
+      const r2 = await openPage(browser, url, be2);
+      await r2.page.click('.mpane .empty-actions button:has-text("파일 열기")');
+      await r2.page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
+      ok("200MB + 726MB 한 번에 → 확인 창 하나 (줄만 / 전체 / 취소)", JSON.stringify(await askBtns(r2.page)) === '["🏷 태그 줄만 열기","전체 열기","취소"]', { btns: await askBtns(r2.page), dialogs: r2.page.__dialogs });
+      const t2 = (await r2.page.$eval(".big-ask p", (e) => e.textContent).catch(() => "")) || "";
+      ok("확인 창: 726MB 는 줄만으로 열린다고 알림", t2.includes("huge.log") && t2.includes("태그 줄만"), t2);
+      if (await r2.page.$(".big-ask")) await r2.page.click('.big-ask button:has-text("전체 열기")');
+      await until(async () => (await tabCount(r2.page)) === 2, 3000);
+      const rd = reads(be2).map((x) => path.basename(x.args[0]));
+      ok("「전체 열기」 → 200MB 는 읽고 726MB 는 줄만 탭", JSON.stringify(rd) === '["mid10.log"]' && (await tabCount(r2.page)) === 2, { rd, tabs: await tabCount(r2.page), dialogs: r2.page.__dialogs });
+      await r2.ctx.close();
+    }
+
+    // M2 · big .gz: never 「전체 열기」, 「취소」 is kept, no 「너무 커서」 — 📂 열기 and the tree alike
+    console.log("10b. 큰 .gz — 확인 창은 「태그 줄만 / 취소」, 취소 지킴 (📂 열기 · 트리)");
+    if (want("10b")) {
+      const gz = P("big10.log.gz");
+      fs.writeFileSync(gz, zlib.gzipSync(Buffer.from(small.join("\n"))));
+      for (const sz of [150 << 20, 500 << 20]) {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.sizes[gz] = sz;
+        be.st.session = session([], "");
+        be.st.openFiles = [gz];
+        const { ctx, page } = await openPage(browser, url, be);
+        await page.click('.empty-actions button:has-text("파일 열기")');
+        await until(async () => (await page.$(".big-ask")) || (await page.$(".lines-view")) || page.__dialogs.length, 3000);
+        ok(`.gz ${sz >> 20}MB 📂 열기 → 「태그 줄만 / 취소」`, JSON.stringify(await askBtns(page)) === '["🏷 태그 줄만 열기","취소"]', { btns: await askBtns(page), dialogs: page.__dialogs });
+        ok(`.gz ${sz >> 20}MB → 「너무 커서」 알림 없음`, !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
+        if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("취소")');
+        await sleep(400);
+        ok(`.gz ${sz >> 20}MB 「취소」 → 열리지 않음`, !(await page.$(".lines-view")) && (await tabCount(page)) === 0);
+        await ctx.close();
+      }
+      // a small .gz: no question, straight to 줄만 보기
+      {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.session = session([], "");
+        be.st.openFiles = [gz];
+        const { ctx, page } = await openPage(browser, url, be);
+        await page.click('.empty-actions button:has-text("파일 열기")');
+        await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
+        ok("작은 .gz → 묻지 않고 줄만 보기", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")) && (await hasRow(page, "70:ERROR e70")));
+        await ctx.close();
+      }
+      // the tree: the same rule; the .gz row says it opens as 줄만 보기
+      const root = P("bundle10b");
+      fs.mkdirSync(path.join(root, "server1", "m"), { recursive: true });
+      const tgz = path.join(root, "server1", "m", "app.log.1.gz");
+      const sgz = path.join(root, "server1", "m", "app.log.2.gz");
+      fs.writeFileSync(tgz, zlib.gzipSync(Buffer.from(small.join("\n"))));
+      fs.writeFileSync(sgz, zlib.gzipSync(Buffer.from(small.join("\n"))));
+      const be = makeBackend();
+      be.st.tags = TAGS1;
+      be.st.sizes[tgz] = 150 << 20;
+      be.st.scan = {
+        root,
+        servers: [
+          {
+            name: "server1",
+            files: [
+              { rel: "m/app.log.1.gz", size: 150 << 20, compressed: true },
+              { rel: "m/app.log.2.gz", size: 1000, compressed: true },
+            ],
+            truncated: false,
+            unreadable: 0,
+          },
+        ],
+      };
+      be.st.session = session([], "");
+      const { ctx, page } = await openPage(browser, url, be);
+      await page.click('button:has-text("📦 로그 묶음")');
+      await page.waitForSelector(".bundle-tree");
+      await page.fill(".bt-filter", "app.log");
+      const row = await page.waitForSelector('.bt-row.file:has-text("app.log.1.gz")');
+      const rowInfo = await row.evaluate((e) => ({ title: e.title, off: e.classList.contains("off"), drag: e.draggable, all: !!e.querySelector(".bt-all") }));
+      ok("트리 .gz 행: 흐리지 않음 · 「줄만 보기로 열림」 풍선 · 끌기·⇉", !rowInfo.off && !rowInfo.title.includes("열 수 없습니다") && rowInfo.title.includes("줄만") && rowInfo.drag && rowInfo.all, rowInfo);
+      await row.click();
+      await until(async () => (await page.$(".big-ask")) || (await page.$(".lines-view")), 3000);
+      ok("트리 150MB .gz → 「태그 줄만 / 취소」", JSON.stringify(await askBtns(page)) === '["🏷 태그 줄만 열기","취소"]', await askBtns(page));
+      if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("취소")');
+      await sleep(400);
+      ok("트리 .gz 「취소」 → 칸 그대로 (안 열림)", !(await page.$(".lines-view")));
+      await page.click('.bt-row.file:has-text("app.log.2.gz")');
+      await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
+      ok("트리 작은 .gz → 묻지 않고 줄만 보기", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")));
+      await ctx.close();
+    }
+
+    // H1 · M3 · restored big tabs (single view): 「🏷 태그 줄만」 in the pane
+    console.log("10c. 복원된 큰 탭 (한 칸 보기) — 「🏷 태그 줄만」 · 384MB 넘으면 전체 열기 없음");
+    if (want("10c")) {
+      const f = P("rest10.log");
+      fs.writeFileSync(f, small.join("\n"));
+      {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.sizes[f] = 200 << 20;
+        be.st.session = session([tab("t1", f)], "t1");
+        const { ctx, page } = await openPage(browser, url, be);
+        await sleep(600);
+        const b = await emptyBtns(page);
+        ok("200MB 복원 탭: 줄만 / 전체 열기 / 탭 닫기", JSON.stringify(b) === '["🏷 태그 줄만","전체 열기","× 탭 닫기"]', b);
+        if (b.some((x) => x.includes("줄만"))) await page.click('.empty-actions button:has-text("태그 줄만")');
+        await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
+        ok("「🏷 태그 줄만」 → 줄만 보기 (읽지 않음)", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0, reads(be).length);
+        // and back to the whole file: asks once, then reads
+        if (await page.$(".lines-view")) {
+          await page.click('.lv-btn:has-text("전체")');
+          await page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
+          if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("전체 열기")');
+          await page.waitForSelector(".cm-editor", { timeout: 3000 }).catch(() => {});
+          ok("줄만 → 전체: 한 번 묻고 읽음", !!(await page.$(".cm-editor")) && reads(be).length === 1, reads(be).length);
+        }
+        await ctx.close();
+      }
+      {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.sizes[f] = 726 << 20;
+        be.st.session = session([tab("t1", f)], "t1");
+        const { ctx, page } = await openPage(browser, url, be);
+        await sleep(600);
+        const b = await emptyBtns(page);
+        ok("726MB 복원 탭: 줄만 / 탭 닫기 (전체 열기 없음)", JSON.stringify(b) === '["🏷 태그 줄만","× 탭 닫기"]', b);
+        const txt = await page.$eval(".empty", (e) => e.textContent).catch(() => "");
+        ok("726MB 복원 탭 문구: 384MB 까지 · 「다음 버전」 없음", txt.includes("384MB") && !txt.includes("다음 버전"), txt);
+        if (b.some((x) => x.includes("줄만"))) await page.click('.empty-actions button:has-text("태그 줄만")');
+        await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
+        ok("726MB 복원 탭 → 줄만 보기", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0);
+        await ctx.close();
+      }
+    }
+
+    // H1 · H2 · multi view: restored big tabs, a never-read 줄만 tab, the pane's tag chips
+    console.log("10d. 멀티 칸 — 복원된 큰 탭 (StatFile 반복 없음·자동 저장) · 줄만 탭 읽지 않음 · 칸 태그 칩");
+    if (want("10d")) {
+      const f = P("multi10.log");
+      fs.writeFileSync(f, small.join("\n"));
+      const o = P("other10.log");
+      for (const sz of [200 << 20, 726 << 20]) {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.sizes[f] = sz;
+        be.st.session = session([tab("t1", f), tab("t2", o, { needsLoad: false, content: "x" })], "t1", { multi: { on: true, count: 2, slots: slots6("t1") } });
+        const { ctx, page } = await openPage(browser, url, be);
+        await sleep(1000);
+        const a = calls(be, "StatFile").length;
+        await sleep(1500);
+        const b = calls(be, "StatFile").length;
+        ok(`멀티 칸 ${sz >> 20}MB 복원 탭: StatFile 이 멈춰 있음`, b - a <= 1, { a, b });
+        const btn = (await emptyBtns(page, ".mpane")).filter((x) => !x.includes("파일 열기")); // the other, empty pane
+        ok(
+          `멀티 칸 ${sz >> 20}MB 복원 탭: 칸 안에 「🏷 태그 줄만」`,
+          JSON.stringify(btn) === (sz > 384 << 20 ? '["🏷 태그 줄만","× 탭 닫기"]' : '["🏷 태그 줄만","전체 열기","× 탭 닫기"]'),
+          btn
+        );
+        // a change that the session keeps: the other tab into the focused pane → autosave
+        const s0 = calls(be, "SaveSession").length;
+        await page.click(".tabs-scroll .tab >> nth=1");
+        await sleep(2500);
+        ok(`멀티 칸 ${sz >> 20}MB 복원 탭: 세션 자동 저장 됨`, calls(be, "SaveSession").length > s0, { s0, now: calls(be, "SaveSession").length });
+        await ctx.close();
+      }
+      // a never-read 줄만 tab in a pane
+      const be = makeBackend();
+      be.st.tags = TAGS1;
+      be.st.session = session([tab("t1", f, { encAuto: true, lines: { on: true, above: 0, below: 1, off: [] } })], "t1", { multi: { on: true, count: 2, slots: slots6("t1") } });
+      const { ctx, page } = await openPage(browser, url, be);
+      await page.waitForSelector(".lines-view");
+      await waitDone(page);
+      await sleep(1200); // autosave
+      let t1 = null;
+      try {
+        t1 = JSON.parse(be.st.session).tabs.find((t) => t.id === "t1");
+      } catch {
+        /* none */
+      }
+      ok("멀티 칸 줄만 탭: 파일을 편집기로 읽지 않음", reads(be).length === 0, reads(be).map((x) => x.name));
+      ok("멀티 칸 줄만 탭: 인코딩 자동 그대로 (다시 거르지 않음)", t1 && t1.encAuto === true && calls(be, "FilterStart").length === 1, { encAuto: t1 && t1.encAuto, starts: calls(be, "FilterStart").length });
+      ok("멀티 칸 줄만 탭(읽은 적 없음): 칸 아래 태그 칩", !!(await page.$(".mpane-foot .mp-tags")));
+      await ctx.close();
+    }
+
+    // M1 · typing 「12」 into 「위」 fast keeps the place
+    console.log("10e. 위·아래 N 을 빠르게 연달아 바꿔도 보던 자리 유지");
+    if (want("10e")) {
+      const L = [];
+      for (let i = 1; i <= 200000; i++) L.push(i % 7 === 0 ? `ERROR at ${i}` : `line ${i} some text here`);
+      fs.writeFileSync(P("long10.log"), L.join("\n"));
+      for (const d of [0, 150]) {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.session = session([tab("t1", P("long10.log"), { lines: { on: true, above: 3, below: 0, off: [] } })], "t1");
+        const { ctx, page } = await openPage(browser, url, be);
+        await page.waitForSelector(".lines-view");
+        await waitDone(page);
+        await page.$eval(".lv-scroll", (e) => (e.scrollTop = e.scrollHeight * 0.4));
+        await sleep(400);
+        const before = await topOf(page);
+        be.delay.FilterRowOfLine = d;
+        await page.click(".lv-ctx:nth-of-type(1) input", { clickCount: 3 });
+        await page.keyboard.type("12", { delay: d ? 30 : 0 });
+        await sleep(1500 + d * 4);
+        be.delay.FilterRowOfLine = 0;
+        const after = await topOf(page);
+        ok(`「위」 3 → 「12」 빠르게 (FilterRowOfLine 지연 ${d}ms) → 보던 줄 근처`, before && after && Math.abs(after.line - before.line) <= 20, { before, after });
+        await ctx.close();
+      }
+    }
+
+    // M4 · no hit yet · low: back to a line not scanned yet does not jump · no rules → no scan
+    console.log("10f. 아직 걸린 줄 없음 문구 · 안 훑은 곳으로 돌아갈 때 튀지 않음 · 규칙 0개면 안 훑음");
+    if (want("10f")) {
+      // a ~70MB file and a rule the fast matcher gives up on (slow scan, like 5.)
+      const slow = P("slow10.log");
+      const chunk = [];
+      for (let i = 0; i < 2000; i++) chunk.push(i % 97 === 0 ? `ERROR line ${i} abc12-x` : `ok line ${i} padding padding padding padding padding abc12y`);
+      const s = chunk.join("\n") + "\n";
+      const fd = fs.openSync(slow, "w");
+      for (let k = 0; k < 300; k++) fs.writeSync(fd, s);
+      fs.closeSync(fd);
+      await goGet("/reset?dfaMemory=600");
+      const slowTags = (pattern) =>
+        JSON.stringify({
+          version: 1,
+          tags: [{ name: "common", rules: [{ id: "x", on: true, label: "폭발", pattern, kind: "regex", caseSensitive: false, color: "#aaaaaa", line: false, filter: true }], updated: "" }],
+          assign: { dir: {}, file: {}, name: {} },
+        });
+      {
+        const be = makeBackend();
+        be.st.tags = slowTags("[a-z].{0,25}[0-9]{2}[^0-9]q"); // never matches
+        be.st.session = session([tab("t1", slow, { lines: { on: true, above: 0, below: 0, off: [] } })], "t1");
+        const { ctx, page } = await openPage(browser, url, be);
+        await page.waitForSelector(".lines-view");
+        const seen = new Set();
+        await until(async () => {
+          seen.add(await page.$eval(".lv-stat", (e) => e.textContent).catch(() => ""));
+          return (await viewData(page)).state === "done";
+        }, 30000, 20);
+        ok("걸린 줄 없을 때 「훑는 중 N% — 아직 걸린 줄 없음」", [...seen].some((t) => /훑는 중 \d+% — 아직 걸린 줄 없음/.test(t)), [...seen].slice(0, 6));
+        ok("끝나면 「걸린 줄이 없습니다.」 (생략 행 하나 아래)",((await page.$eval(".lv-empty", (e) => e.textContent).catch(() => "")) || "").includes("걸린 줄이 없습니다"));
+        await ctx.close();
+      }
+      {
+        const be = makeBackend();
+        // two tags: turning one off filters again with other rules (a new scan — a finished
+        // scan with the same rules would be reused and done at once)
+        const t = JSON.parse(slowTags("[a-z].{0,25}[0-9]{2}[^0-9]x")); // the ERROR lines
+        t.tags.push({ name: "extra", rules: [{ id: "q", on: true, label: "", pattern: "zzzq", kind: "text", caseSensitive: false, color: "#00aa00", line: false, filter: true }], updated: "" });
+        t.assign.name["slow10.log"] = ["extra"];
+        be.st.tags = JSON.stringify(t);
+        be.st.session = session([tab("t1", slow, { lines: { on: true, above: 0, below: 0, off: [] } })], "t1");
+        const { ctx, page } = await openPage(browser, url, be);
+        await page.waitForSelector(".lines-view");
+        await until(async () => (await viewData(page)).state === "done", 30000);
+        await until(async () => +(await viewData(page)).count > 10000, 5000);
+        await page.$eval(".lv-scroll", (e) => (e.scrollTop = e.scrollHeight * 0.6));
+        const before = await until(async () => {
+          const x = await topOf(page);
+          return x && x.line > 1000 && x;
+        }, 5000);
+        // the seek goes out once the new scan is part way (its answer = the rows known so far)
+        be.delay.FilterRowOfLine = 300;
+        await page.click('.lv-tag:has-text("extra") input');
+        setTimeout(() => (be.delay.FilterRowOfLine = 0), 100);
+        const samples = [];
+        await until(async () => {
+          const t = await topOf(page).catch(() => null);
+          if (t) samples.push(t.line);
+          return (await viewData(page)).state === "done" && t && Math.abs(t.line - before.line) <= 200;
+        }, 30000, 15);
+        await sleep(300);
+        const after = await topOf(page);
+        const stray = samples.filter((x) => x > 1000 && Math.abs(x - before.line) > 200);
+        ok("↻ 다시 거르기 → 보던 줄로 돌아옴", after && Math.abs(after.line - before.line) <= 200, { before, after });
+        ok("스캔 중 엉뚱한 자리로 튀지 않음", stray.length === 0, { before: before && before.line, stray: [...new Set(stray)].slice(0, 8), n: samples.length });
+        await ctx.close();
+      }
+      await goGet("/reset");
+      {
+        const be = makeBackend();
+        be.st.tags = TAGS1;
+        be.st.session = session([tab("t1", P("plain.log"), { lines: { on: true, above: 0, below: 0, off: [] } })], "t1");
+        if (!fs.existsSync(P("plain.log"))) fs.writeFileSync(P("plain.log"), small.join("\n"));
+        const { ctx, page } = await openPage(browser, url, be);
+        await page.waitForSelector(".lines-view");
+        await waitDone(page);
+        const n0 = calls(be, "FilterStart").length;
+        await page.click('.lv-tag:has-text("common") input');
+        await sleep(600);
+        ok("규칙 0개 → FilterStart 안 함", calls(be, "FilterStart").length === n0, calls(be, "FilterStart").length - n0);
+        ok("규칙 0개 → 「거를 규칙이 없습니다.」", ((await page.$eval(".lv-empty", (e) => e.textContent).catch(() => "")) || "").includes("거를 규칙이 없습니다"));
+        await page.click('.lv-tag:has-text("common") input');
+        await waitDone(page);
+        ok("다시 켜면 거름", calls(be, "FilterStart").length === n0 + 1 && (await shownRows(page)).length > 0);
+        await ctx.close();
+      }
+    }
+
+    // low · a late answer of the old job (seek) does not mark the new view as failed
+    console.log("10g. 옛 작업의 늦은 실패가 새 화면을 「오류」로 바꾸지 않음 · 확인 창 겹침");
+    if (want("10g")) {
+      const f = P("race10.log");
+      const lines = [];
+      for (let i = 1; i <= 400; i++) lines.push(i % 10 === 0 ? `ERROR boom ${i}` : i % 25 === 0 ? `kafka rebalance ${i}` : `info ${i}`);
+      fs.writeFileSync(f, lines.join("\n"));
+      const be = makeBackend();
+      be.st.tags = JSON.stringify({
+        version: 1,
+        tags: [
+          { name: "common", rules: [{ id: "error", on: true, label: "오류", pattern: "ERROR", kind: "text", caseSensitive: true, color: "#ff6b6b", line: false, filter: true }], updated: "" },
+          { name: "kafka", rules: [{ id: "k", on: true, label: "", pattern: "rebalance", kind: "text", caseSensitive: false, color: "#00aa00", line: false, filter: true }], updated: "" },
+        ],
+        assign: { dir: {}, file: {}, name: { "race10.log": ["kafka"] } },
+      });
+      be.st.session = session([tab("t1", f, { lines: { on: true, above: 0, below: 0, off: [] } })], "t1");
+      const { ctx, page } = await openPage(browser, url, be);
+      await page.waitForSelector(".lines-view");
+      await waitDone(page);
+      await page.$eval(".lv-scroll", (e) => (e.scrollTop = e.scrollHeight * 0.5));
+      await sleep(300);
+      be.delay.FilterRowOfLine = 500;
+      await page.fill(".lv-ctx:nth-of-type(1) input", "2"); // seek → FilterRowOfLine held 500ms
+      await sleep(50);
+      be.delay.FilterRowOfLine = 0;
+      await page.click('.lv-tag:has-text("kafka") input'); // new job; the old one is closed before its seek arrives
+      await sleep(1200);
+      await waitDone(page);
+      const vd = await viewData(page);
+      const n = await notes(page);
+      ok("옛 작업의 늦은 seek 실패 → 새 화면은 오류 아님", vd.state !== "error" && !n.some((x) => x.includes("거르지 못했습니다")), { vd, n });
+      await ctx.close();
+      // two size questions at once: the newer one wins, the first is answered 「취소」
+      const a = P("askA.log");
+      const b = P("askB.log");
+      fs.writeFileSync(a, small.join("\n"));
+      fs.writeFileSync(b, small.join("\n"));
+      const be2 = makeBackend();
+      be2.st.tags = TAGS1;
+      be2.st.sizes[a] = 200 << 20;
+      be2.st.sizes[b] = 300 << 20;
+      be2.st.session = session([], "");
+      be2.st.openFiles = [a];
+      const r2 = await openPage(browser, url, be2);
+      await r2.page.click('.empty-actions button:has-text("파일 열기")');
+      await r2.page.waitForSelector(".big-ask");
+      be2.st.openFiles = [b];
+      await r2.page.keyboard.press("Control+o");
+      await until(async () => ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askB"), 3000);
+      const h = await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "");
+      ok("두 번째 확인 창이 앞의 것을 대신함", h.includes("askB") && (await r2.page.$$(".big-ask")).length === 1, h);
+      await r2.page.click('.big-ask button:has-text("태그 줄만")');
+      await sleep(500);
+      const titles = await r2.page.$$eval(".tabs-scroll .tab .tab-title", (els) => els.map((e) => e.textContent));
+      ok("앞의 열기는 취소로 끝남 · 뒤의 것만 열림", JSON.stringify(titles) === '["askB.log"]' && !(await r2.page.$(".big-ask")), titles);
+      // the first one is not stuck: opening it again asks again
+      be2.st.openFiles = [a];
+      await r2.page.keyboard.press("Control+o");
+      await r2.page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
+      ok("앞의 파일을 다시 열면 다시 물음", ((await r2.page.$eval(".big-ask h3", (e) => e.textContent).catch(() => "")) || "").includes("askA"));
+      await r2.ctx.close();
     }
   } finally {
     await browser.close();

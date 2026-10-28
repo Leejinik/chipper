@@ -129,9 +129,14 @@ export default function LinesView(p: LinesViewProps) {
   const inflight = useRef(new Set<string>());
   const emptyAt = useRef(new Map<string, number>()); // page → count when it came back empty
   const abRef = useRef({ A: clampContext(p.above), B: clampContext(p.below) });
-  const seeking = useRef(false);
+  const seeking = useRef(0); // seeks in flight
   const pendingRow = useRef<number | null>(null); // scroll here once the count allows
   const pendingLine = useRef(0); // line to come back to when the scan has reached it
+  // The line the view is going back to (a context change or a restart asked for
+  // it, the scroll is not there yet): what topLine() says until then, so a
+  // second change before the first one landed keeps the place too.
+  const anchorLine = useRef(0);
+  const scannedRef = useRef(0); // lines the scan has read (last progress)
   const scRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const firstRef = useRef(0); // first row index on screen (for the anchor)
@@ -146,6 +151,7 @@ export default function LinesView(p: LinesViewProps) {
   }, []);
   // Progress updates come every ~100ms and with every page: draw at most once a frame.
   const showProg = useCallback((x: linefilter.Progress) => {
+    if (x.jobId === jobRef.current && x.scannedLines > scannedRef.current) scannedRef.current = x.scannedLines;
     const first = progQueued.current === null;
     progQueued.current = x;
     if (first)
@@ -165,6 +171,7 @@ export default function LinesView(p: LinesViewProps) {
 
   // The file line at the top of the view (where to come back after a change).
   const topLine = useCallback((): number => {
+    if (anchorLine.current) return anchorLine.current;
     const st = storeRef.current;
     const r = st.get(firstRef.current) ?? st.get(firstRef.current + 1);
     return r ? rowLine(r) : 0;
@@ -244,10 +251,11 @@ export default function LinesView(p: LinesViewProps) {
       return;
     }
     pb.busy = true;
+    let job = "";
     try {
       do {
         pb.again = false;
-        const job = jobRef.current;
+        job = jobRef.current;
         if (!job) return;
         const ep = epochRef.current;
         const { A, B } = abRef.current;
@@ -259,7 +267,7 @@ export default function LinesView(p: LinesViewProps) {
         }
       } while (pb.again);
     } catch (e) {
-      setStartErr(String(e));
+      if (job && job === jobRef.current) setStartErr(String(e)); // not for a job given up meanwhile
     } finally {
       pb.busy = false;
     }
@@ -297,18 +305,31 @@ export default function LinesView(p: LinesViewProps) {
       if (!job) return;
       const ep = epochRef.current;
       const { A, B } = abRef.current;
-      seeking.current = true;
+      // Not scanned that far yet: the engine would answer with the rows known
+      // so far (some row near the scan's end). Show the start and go there when
+      // the scan is done — no stop at a wrong place on the way.
+      if (line > 1 && !doneRef.current && line + B >= scannedRef.current) {
+        pendingLine.current = line;
+        anchorLine.current = line;
+        if (!storeRef.current.held(0)) await fetchPage(0, true);
+        bump();
+        return;
+      }
+      seeking.current++;
       try {
         let row = 0;
         if (line > 1) row = await FilterRowOfLine(job, A, B, line);
         if (job !== jobRef.current || ep !== epochRef.current) return;
         pendingRow.current = row;
         await fetchPage(Math.floor(row / PAGE), true);
-        if (!doneRef.current && line > 1 && row >= countRef.current) pendingLine.current = line; // not scanned that far yet
       } catch (e) {
-        setStartErr(String(e));
+        // a request of a job (or a layout) given up meanwhile: not this view's error
+        if (job === jobRef.current && ep === epochRef.current) {
+          anchorLine.current = 0;
+          setStartErr(String(e));
+        }
       } finally {
-        seeking.current = false;
+        seeking.current--;
         bump();
       }
     },
@@ -326,11 +347,12 @@ export default function LinesView(p: LinesViewProps) {
     }
     ab.busy = true;
     (async () => {
+      let job = "";
       try {
         let cur: linefilter.Progress | null = x;
         while (cur) {
           ab.next = null;
-          const job = jobRef.current;
+          job = jobRef.current;
           if (!job || cur.version <= verRef.current) break;
           const T = tailRef.current;
           const { A, B } = abRef.current;
@@ -347,7 +369,7 @@ export default function LinesView(p: LinesViewProps) {
           cur = ab.next;
         }
       } catch (e) {
-        setStartErr(String(e));
+        if (job && job === jobRef.current) setStartErr(String(e)); // not for a job given up meanwhile
       } finally {
         ab.busy = false;
         bump();
@@ -405,6 +427,7 @@ export default function LinesView(p: LinesViewProps) {
     emptyAt.current.clear();
     verRef.current = 0;
     tailRef.current = 0;
+    scannedRef.current = 0;
     doneRef.current = false;
     followRef.current = false;
     countRef.current = 0;
@@ -422,6 +445,13 @@ export default function LinesView(p: LinesViewProps) {
       delete rootRef.current.dataset.rowsMs;
     }
     const cur = pr.current;
+    // No rule to filter with (every tag unticked, or no 「줄만」 rule): nothing
+    // to scan for — don't read the whole file (a temp copy for CP949/UTF-16) for it.
+    if (!cur.rules.length) {
+      return () => {
+        alive = false;
+      };
+    }
     const req = linefilter.Request.createFrom({
       path: cur.path,
       encoding: cur.encoding,
@@ -438,6 +468,7 @@ export default function LinesView(p: LinesViewProps) {
         if (rootRef.current) rootRef.current.dataset.startMs = String(Math.round(performance.now() - timing.current.t0));
         verRef.current = res.progress.version;
         tailRef.current = res.progress.tailLine;
+        scannedRef.current = res.progress.scannedLines;
         setIssues(res.issues ?? []);
         setProg(res.progress);
         unsub = subscribe(mine, (x) => onProgressRef.current(x));
@@ -447,6 +478,7 @@ export default function LinesView(p: LinesViewProps) {
         const ln = pendingLine.current || (restartsSeen.current === 0 ? cur.initialLine : 0);
         pendingLine.current = 0;
         restartsSeen.current++;
+        anchorLine.current = ln > 1 ? ln : 0;
         const go = ln > 1 ? seek(ln) : fetchPage(0, true);
         go.then(() => {
           if (doneRef.current) checkByteCap();
@@ -488,7 +520,10 @@ export default function LinesView(p: LinesViewProps) {
       return;
     }
     if (A === abRef.current.A && B === abRef.current.B) return;
+    // topLine() of a view whose rows were just dropped for the previous change
+    // would be 0 (the top): the anchor keeps the line until the scroll lands.
     const line = topLine();
+    anchorLine.current = line > 1 ? line : 0;
     abRef.current = { A, B };
     epochRef.current++;
     storeRef.current.clear();
@@ -544,6 +579,9 @@ export default function LinesView(p: LinesViewProps) {
     if (r < count || (doneRef.current && count > 0)) {
       pendingRow.current = null;
       scrollToRow(Math.min(r, Math.max(0, count - 1)));
+      // landed: the view's own top line counts again (unless another seek or a
+      // seek waiting for the scan is still to land)
+      if (!seeking.current && !pendingLine.current) anchorLine.current = 0;
     }
   });
 
@@ -803,13 +841,16 @@ export default function LinesView(p: LinesViewProps) {
   }
 
   // --- header ------------------------------------------------------------------------------------------------
-  const scanning = !!prog && !prog.done && !startErr;
+  const noRules = !p.rules.length; // nothing is scanned (see the start effect)
+  const scanning = !noRules && !!prog && !prog.done && !startErr;
   const pct = prog && prog.totalBytes > 0 ? Math.min(100, Math.floor((prog.scannedBytes / prog.totalBytes) * 100)) : 0;
-  const hits = prog?.hits ?? 0;
+  const hits = noRules ? 0 : prog?.hits ?? 0;
   let stat = "준비 중…";
-  if (startErr) stat = "오류";
+  if (noRules) stat = "거를 규칙 없음";
+  else if (startErr) stat = "오류";
   else if (prog) {
     if (prog.canceled) stat = `멈춤 — 여기까지 걸린 줄 ${fmtN(hits)} · ${fmtN(count)}행`;
+    else if (scanning && hits === 0) stat = `훑는 중 ${pct}% — 아직 걸린 줄 없음`;
     else if (scanning) stat = `거르는 중 ${pct}% · 걸린 줄 ${fmtN(hits)}`;
     else
       stat =
@@ -876,7 +917,7 @@ export default function LinesView(p: LinesViewProps) {
     <div
       className="lines-view"
       ref={rootRef}
-      data-state={startErr ? "error" : prog?.done ? "done" : "scan"}
+      data-state={noRules ? "done" : startErr ? "error" : prog?.done ? "done" : "scan"}
       data-count={count}
       data-hits={hits}
     >
@@ -958,8 +999,17 @@ export default function LinesView(p: LinesViewProps) {
         <div className="lv-space" style={{ height: Math.max(geo.height, 1) }}>
           {rowsEls}
         </div>
-        {count === 0 && prog?.done && !err && (
-          <div className="lv-empty">{p.rules.length ? "걸린 줄이 없습니다." : "거를 규칙이 없습니다."}</div>
+        {noRules ? (
+          <div className="lv-empty">거를 규칙이 없습니다.</div>
+        ) : (
+          // no hit: the one 「⋯ N줄 생략」 row (or none) and this
+          prog?.done &&
+          !err &&
+          (count === 0 || hits === 0) && (
+            <div className="lv-empty" style={count > 0 && count < 10 ? { top: count * rowH + 12 } : undefined}>
+              걸린 줄이 없습니다.
+            </div>
+          )
         )}
       </div>
     </div>
