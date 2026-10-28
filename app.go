@@ -136,6 +136,9 @@ func releaseAssetName() string {
 		// e.g. chipper-linux-amd64. GOARCH keeps this honest if an arm64 job is
 		// ever added to the workflow.
 		return "chipper-linux-" + runtime.GOARCH
+	case "darwin":
+		// One universal .app (Intel + Apple Silicon), zipped by the macOS job.
+		return "chipper-macos-universal.zip"
 	default:
 		return "chipper.exe"
 	}
@@ -360,7 +363,7 @@ func openSizeError(path string) error {
 	if err != nil || info.IsDir() || info.Size() <= maxOpenBytes {
 		return nil // let the read itself report a missing file etc.
 	}
-	return fmt.Errorf("이 파일은 너무 커서 열 수 없습니다 (%s 바이트 = %s). %s 까지만 열 수 있습니다. 다음 버전의 『태그 줄만 보기』로 걸린 줄만 볼 수 있습니다", commaInt(info.Size()), mib(info.Size()), limitText())
+	return fmt.Errorf("이 파일은 너무 커서 열 수 없습니다 (%s 바이트 = %s). 전체로는 %s 까지만 열 수 있습니다. 「🏷 태그 줄만」으로는 걸린 줄을 볼 수 있습니다", commaInt(info.Size()), mib(info.Size()), limitText())
 }
 
 // tooBigAfterSavePrefix starts the error SaveFile / SaveFileDialog return,

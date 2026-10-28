@@ -31,6 +31,7 @@ func main() {
 		BackgroundColour: &options.RGBA{R: 24, G: 26, B: 31, A: 1},
 		OnStartup:        app.startup,
 		OnBeforeClose:    app.beforeClose,
+		OnShutdown:       app.shutdownFilters,
 		DragAndDrop: &options.DragAndDrop{
 			EnableFileDrop: true, // deliver dropped files' absolute paths to the frontend
 		},

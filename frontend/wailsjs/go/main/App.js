@@ -14,12 +14,20 @@ export function AutoUpdate() {
   return window['go']['main']['App']['AutoUpdate']();
 }
 
+export function BackupTagsBefore(arg1, arg2) {
+  return window['go']['main']['App']['BackupTagsBefore'](arg1, arg2);
+}
+
 export function CancelChips() {
   return window['go']['main']['App']['CancelChips']();
 }
 
 export function CancelClose() {
   return window['go']['main']['App']['CancelClose']();
+}
+
+export function CancelScanBundle() {
+  return window['go']['main']['App']['CancelScanBundle']();
 }
 
 export function CheckForUpdate() {
@@ -30,8 +38,44 @@ export function CloseWithSession(arg1) {
   return window['go']['main']['App']['CloseWithSession'](arg1);
 }
 
+export function ExportTagsDialog(arg1, arg2) {
+  return window['go']['main']['App']['ExportTagsDialog'](arg1, arg2);
+}
+
+export function ExportTagsTo(arg1, arg2) {
+  return window['go']['main']['App']['ExportTagsTo'](arg1, arg2);
+}
+
 export function FileAssociationSupported() {
   return window['go']['main']['App']['FileAssociationSupported']();
+}
+
+export function FilterCancel(arg1) {
+  return window['go']['main']['App']['FilterCancel'](arg1);
+}
+
+export function FilterClose(arg1) {
+  return window['go']['main']['App']['FilterClose'](arg1);
+}
+
+export function FilterFind(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['FilterFind'](arg1, arg2, arg3, arg4);
+}
+
+export function FilterRowOfLine(arg1, arg2, arg3, arg4) {
+  return window['go']['main']['App']['FilterRowOfLine'](arg1, arg2, arg3, arg4);
+}
+
+export function FilterRows(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['FilterRows'](arg1, arg2, arg3, arg4, arg5);
+}
+
+export function FilterStart(arg1) {
+  return window['go']['main']['App']['FilterStart'](arg1);
+}
+
+export function FilterStatus(arg1) {
+  return window['go']['main']['App']['FilterStatus'](arg1);
 }
 
 export function FrontendReady() {
@@ -54,8 +98,24 @@ export function HoldClose() {
   return window['go']['main']['App']['HoldClose']();
 }
 
+export function ImportTagsDialog() {
+  return window['go']['main']['App']['ImportTagsDialog']();
+}
+
+export function ImportTagsFiles(arg1) {
+  return window['go']['main']['App']['ImportTagsFiles'](arg1);
+}
+
+export function ListTagsBackups() {
+  return window['go']['main']['App']['ListTagsBackups']();
+}
+
 export function LoadSession() {
   return window['go']['main']['App']['LoadSession']();
+}
+
+export function LoadTags() {
+  return window['go']['main']['App']['LoadTags']();
 }
 
 export function MarkReleaseNotesSeen() {
@@ -90,6 +150,10 @@ export function ReadSessionBackup(arg1) {
   return window['go']['main']['App']['ReadSessionBackup'](arg1);
 }
 
+export function ReadTagsBackup(arg1) {
+  return window['go']['main']['App']['ReadTagsBackup'](arg1);
+}
+
 export function RegisterFileTypes(arg1) {
   return window['go']['main']['App']['RegisterFileTypes'](arg1);
 }
@@ -108,6 +172,10 @@ export function SaveFileDialog(arg1, arg2, arg3) {
 
 export function SaveSession(arg1) {
   return window['go']['main']['App']['SaveSession'](arg1);
+}
+
+export function SaveTags(arg1) {
+  return window['go']['main']['App']['SaveTags'](arg1);
 }
 
 export function ScanBundle(arg1) {
@@ -136,4 +204,8 @@ export function TypeChips(arg1, arg2, arg3) {
 
 export function UnregisterFileTypes(arg1) {
   return window['go']['main']['App']['UnregisterFileTypes'](arg1);
+}
+
+export function ValidateFilterRules(arg1) {
+  return window['go']['main']['App']['ValidateFilterRules'](arg1);
 }

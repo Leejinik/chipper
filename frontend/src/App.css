@@ -948,7 +948,7 @@
 }
 .mp-title {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 30px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
@@ -1090,6 +1090,11 @@
 }
 .rule-pattern.bad {
   border-color: var(--danger) !important;
+}
+.rule-problem {
+  margin: -2px 0 4px 28px;
+  font-size: 12px;
+  color: var(--danger);
 }
 .rule-row label {
   display: inline-flex;
@@ -1241,6 +1246,529 @@
   cursor: grab;
 }
 
+/* ---------- log colour tag window ---------- */
+.tags-dialog {
+  width: min(1060px, calc(100vw - 40px));
+}
+.tags-notice {
+  margin: -4px 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+.tags-body {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+}
+.tags-side {
+  flex: 0 0 210px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.tags-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(56vh, 520px);
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  background: var(--bg);
+}
+.tag-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.tag-item:hover {
+  background: var(--bg-3);
+}
+.tag-item.sel {
+  background: rgba(74, 122, 224, 0.22);
+}
+.tag-item.applied .tag-name::after {
+  content: " ●";
+  color: var(--accent);
+}
+.tag-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+.tag-count {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.tag-rename {
+  background: var(--bg-2);
+  color: var(--text);
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.tags-name-error {
+  min-height: 16px;
+  font-size: 11px;
+  color: var(--danger);
+}
+.tags-side-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+.tags-side-actions .tb-btn {
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.tags-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tags-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.tags-place {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 12px;
+}
+.tags-place.dim {
+  color: var(--text-dim);
+  border-style: dashed;
+}
+.tags-rules-sub {
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.tags-main-actions {
+  display: flex;
+  gap: 8px;
+}
+.st-tags {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- tag assignment (tree right-click, tab 🏷 menu) ---------- */
+.bt-row:focus {
+  outline: none;
+}
+.bt-row:focus-visible,
+.bt-row:focus {
+  box-shadow: inset 0 0 0 1px var(--accent);
+  background: var(--bg-3);
+  color: var(--text);
+}
+.bt-tag {
+  flex: none;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding: 0 5px;
+  border-radius: 8px;
+  font-size: 10.5px;
+  line-height: 15px;
+  font-weight: normal;
+  border: 1px solid transparent;
+}
+.bt-tag.direct {
+  background: var(--accent-dim);
+  color: #fff;
+}
+.bt-tag.inherited {
+  border-color: var(--border);
+  color: var(--text-dim);
+  opacity: 0.75;
+}
+.bt-tag.none {
+  border: 1px dashed var(--text-dim);
+  color: var(--text-dim);
+}
+.bt-tag.override {
+  background: #8a5a00;
+  color: #fff;
+}
+.bt-tag.none.override {
+  background: none;
+  border-color: #d19a3a;
+  color: #d19a3a;
+}
+/* every line has the same height: a big tree draws only the lines in view
+   (ROW_H in BundleTree.tsx) */
+.bundle-tree .bt-row {
+  height: 21px;
+  box-sizing: border-box;
+  flex: none;
+}
+.bt-gap {
+  flex: none;
+}
+/* common applies everywhere: a faint chip, so what is in effect is visible */
+.bt-common {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  line-height: 15px;
+  font-weight: normal;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  opacity: 0.55;
+}
+.mp-common {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 8px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 0.75;
+}
+.mp-common:hover {
+  opacity: 1;
+  color: var(--text);
+}
+.bt-save-warn {
+  color: var(--danger);
+}
+.st-tags-warn {
+  background: none;
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  color: var(--danger);
+  font-size: 11px;
+  padding: 0 5px;
+  margin-left: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mp-tags {
+  flex: 0 0.3 auto; /* keeps the first tag readable; the file name gives way first */
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 180px;
+  overflow: hidden;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.mp-tags.off {
+  opacity: 0.5;
+}
+.mp-tag {
+  background: var(--accent-dim);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 0 6px;
+  font-size: 10.5px;
+  line-height: 15px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.mp-tag:hover {
+  background: var(--accent);
+}
+.tag-assign {
+  width: min(92vw, 520px);
+}
+.ta-where {
+  margin: 8px 0 4px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg-3);
+  font-size: 13px;
+}
+.ta-now {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.ta-list {
+  margin: 8px 0;
+  max-height: 34vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 6px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.ta-row label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  cursor: pointer;
+}
+.ta-row:hover {
+  background: var(--bg-3);
+}
+.ta-common {
+  color: var(--text-dim);
+  cursor: default;
+}
+.ta-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+.ta-rules.mp-x {
+  font-size: 11px;
+}
+.ta-note,
+.ta-count {
+  flex: none;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ta-new {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.ta-new .find-input {
+  flex: 1 1 auto;
+}
+.ta-modes {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.ta-modes label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* tag export / import (stage 5) */
+.tags-dialog {
+  position: relative;
+}
+.tags-io-actions {
+  margin-top: 2px;
+}
+.tags-io-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  justify-content: space-between;
+  margin: -4px 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+  font-size: 12px;
+  word-break: break-all;
+}
+.tags-io-msg.bad {
+  border-color: var(--danger);
+}
+.tags-import-result {
+  margin: -4px 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.tags-import-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.tags-import-line {
+  flex: 1 1 auto;
+  font-variant-numeric: tabular-nums;
+}
+.tags-import-head .tb-btn {
+  font-size: 12px;
+  padding: 2px 10px;
+}
+.tags-import-save {
+  margin-top: 4px;
+  color: var(--danger);
+}
+.tags-import-details {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  max-height: 120px;
+  overflow-y: auto;
+  word-break: break-all;
+}
+.tags-import-details .dim,
+.tags-dialog .dim {
+  color: var(--text-dim);
+}
+.tags-sub-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(24, 26, 31, 0.6);
+}
+.tags-sub {
+  width: min(520px, calc(100% - 40px));
+  max-height: calc(100% - 40px);
+  overflow: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-2);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+.tags-export-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 10px 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: var(--bg);
+}
+.tags-export-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.tags-export-item .tag-name {
+  flex: 1 1 auto;
+}
+.tags-export-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.tags-export-file {
+  flex: 1 1 200px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.tags-export-preview {
+  flex-basis: 100%;
+  word-break: break-all;
+}
+.tags-conflict-q {
+  word-break: break-all;
+}
+.tags-conflict-all {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+}
+.tags-conflict-esc {
+  margin-top: 8px;
+  font-size: 11px;
+}
+/* stage 5 fix (TagsIO.tsx): rule differences, 「붙인 곳도 같이」, backups */
+.tags-io-actions .tags-restore {
+  grid-column: 1 / -1;
+}
+.tags-conflict-diff {
+  margin-top: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.tags-conflict-diff.common {
+  border-color: var(--danger);
+}
+.tags-diff-line {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.tags-diff-group {
+  margin-top: 4px;
+}
+.tags-diff-group ul {
+  margin: 2px 0 0;
+  padding-left: 16px;
+  word-break: break-all;
+}
+.tags-export-assign {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 2px;
+  font-size: 12px;
+}
+.tags-restore-panel {
+  width: min(640px, calc(100% - 40px));
+}
+.tags-restore-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.tags-restore-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.tags-restore-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
 /* v1.2.1 — session notice, render-error boundary, line-break label */
 .notice-bar {
   flex: none;
@@ -1374,5 +1902,97 @@ button.autosave:hover {
 }
 .render-error-item .rei-fail {
   color: var(--danger);
+  word-break: break-all;
+}
+.bt-close {
+  flex: none;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 1px 6px;
+}
+.bt-close:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+.bt-empty {
+  padding: 10px 12px;
+  color: var(--text-dim);
+}
+.workspace.drop-target {
+  outline: 2px dashed var(--accent);
+  outline-offset: -2px;
+}
+/* 「📂 디렉토리 열기」 scan in progress */
+.workspace {
+  position: relative;
+}
+.dir-scan {
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  font-size: 12px;
+}
+.dir-scan-title {
+  font-weight: 600;
+}
+.dir-scan-sub {
+  color: var(--text-dim);
+}
+
+/* tag window draft: 적용 / 확인 / 닫기 (10-28) */
+.tags-dialog .tags-x {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+}
+.tags-actions {
+  justify-content: flex-end;
+  align-items: center;
+  margin-top: 12px;
+}
+.tags-dirty {
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.tags-dirty.on {
+  color: #e5c07b;
+}
+.tags-apply-msg {
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 50%;
+}
+.tags-apply-msg.bad {
+  color: var(--danger);
+}
+.tags-draft-note {
+  display: block;
+  margin-top: 2px;
+}
+.tags-draft-notes {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  justify-content: space-between;
+  margin: -4px 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  font-size: 12px;
   word-break: break-all;
 }

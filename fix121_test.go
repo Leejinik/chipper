@@ -354,4 +354,8 @@ func TestReadFile_RefusesFilesOver384MB(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "너무 커서") {
 		t.Errorf("want a 「너무 커서 열 수 없습니다」 error, got %v (after %v)", err, time.Since(start))
 	}
+	// 「태그 줄만」 is in this version: the message points at it, not at a next one
+	if err != nil && (strings.Contains(err.Error(), "다음 버전") || !strings.Contains(err.Error(), "태그 줄만")) {
+		t.Errorf("the refusal should point at 「🏷 태그 줄만」 of this version: %v", err)
+	}
 }
