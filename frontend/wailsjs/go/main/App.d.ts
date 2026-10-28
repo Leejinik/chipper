@@ -16,6 +16,8 @@ export function CancelChips():Promise<void>;
 
 export function CancelClose():Promise<void>;
 
+export function CancelScanBundle():Promise<void>;
+
 export function CheckForUpdate():Promise<updater.UpdateInfo>;
 
 export function CloseWithSession(arg1:string):Promise<void>;

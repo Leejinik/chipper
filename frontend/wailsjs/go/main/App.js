@@ -26,6 +26,10 @@ export function CancelClose() {
   return window['go']['main']['App']['CancelClose']();
 }
 
+export function CancelScanBundle() {
+  return window['go']['main']['App']['CancelScanBundle']();
+}
+
 export function CheckForUpdate() {
   return window['go']['main']['App']['CheckForUpdate']();
 }

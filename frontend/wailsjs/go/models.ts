@@ -309,6 +309,7 @@ export namespace main {
 	    files: BundleFile[];
 	    truncated: boolean;
 	    unreadable: number;
+	    notRead: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new BundleServer(source);
@@ -320,6 +321,7 @@ export namespace main {
 	        this.files = this.convertValues(source["files"], BundleFile);
 	        this.truncated = source["truncated"];
 	        this.unreadable = source["unreadable"];
+	        this.notRead = source["notRead"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -344,6 +346,10 @@ export namespace main {
 	    root: string;
 	    servers: BundleServer[];
 	    rootFiles: BundleFile[];
+	    rootTruncated: boolean;
+	    truncated: boolean;
+	    fileLimit: number;
+	    files: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Bundle(source);
@@ -354,6 +360,10 @@ export namespace main {
 	        this.root = source["root"];
 	        this.servers = this.convertValues(source["servers"], BundleServer);
 	        this.rootFiles = this.convertValues(source["rootFiles"], BundleFile);
+	        this.rootTruncated = source["rootTruncated"];
+	        this.truncated = source["truncated"];
+	        this.fileLimit = source["fileLimit"];
+	        this.files = source["files"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
