@@ -205,6 +205,9 @@ func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
 	if count > MaxPageRows {
 		count = MaxPageRows
 	}
+	if j.all {
+		return e.allRows(id, j, from, count)
+	}
 	A, B := clampCtx(above), clampCtx(below)
 	page := Page{JobID: id, From: from, Rows: []Row{}}
 	j.mu.Lock()

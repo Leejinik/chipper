@@ -281,7 +281,7 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 		reg := sr.regions[sr.published]
 		base := sr.linesBefore + sr.linesDone + 1 // region-local 0 → file line number
 		j.mu.Lock()
-		room := j.e.opt.MaxRows + 1 - len(j.hits)
+		room := j.capHits() - len(j.hits)
 		hs := r.hits
 		trunc := false
 		if len(hs) >= room {
@@ -291,7 +291,7 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 			// grow by doubling (append grows 1.25x for big slices: 5x the
 			// final size allocated in total)
 			nc := max(2*cap(j.hits), 1024, need)
-			if lim := j.e.opt.MaxRows + 1; nc > lim {
+			if lim := j.capHits(); nc > lim {
 				nc = max(lim, need)
 			}
 			nh := make([]hit, len(j.hits), nc)
@@ -334,6 +334,9 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 			} else {
 				j.excluded += r.excluded
 			}
+		}
+		if j.all {
+			j.notePosLocked(base, reg.start)
 		}
 		if trunc {
 			j.truncated = true
@@ -492,7 +495,7 @@ func (j *job) excludedIn(path string, from, to int64) int64 {
 func (sr *scanRun) processRegion(f *os.File, ws *wstate, wb *workBuf, r region) *chunkResult {
 	j := sr.j
 	res := &chunkResult{hits: getHits(), invalidLine: -1}
-	capHits := j.e.opt.MaxRows + 1
+	capHits := j.capHits()
 	buf := wb.buf[:0]
 	capb := cap(wb.buf)
 	off := r.start
@@ -618,7 +621,7 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 			}
 		}
 		var full bool
-		res.hits, _, full = ws.scanBuf(line, lineStart, res.hits, lineIdx, j.e.opt.MaxRows+1, nil)
+		res.hits, _, full = ws.scanBuf(line, lineStart, res.hits, lineIdx, j.capHits(), nil)
 		res.full = full
 		ws.fold, ws.low, ws.lowPtr = nil, nil, nil // do not keep a giant copy around
 		return next, nil
@@ -651,7 +654,7 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 	}
 	if ws.lineHit(mask) {
 		res.hits = ws.addHit(res.hits, hit{line: lineIdx, start: lineStart, end: le, mask: mask, col: -1})
-		if len(res.hits) >= j.e.opt.MaxRows+1 {
+		if len(res.hits) >= j.capHits() {
 			res.full = true
 		}
 	}

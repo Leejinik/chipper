@@ -13,6 +13,9 @@ func (e *Engine) RowOfLine(id string, above, below int, line int64) (int, error)
 		return 0, err
 	}
 	j := v.j
+	if j.all {
+		return j.allRowOfLine(line), nil
+	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	if line < 1 {

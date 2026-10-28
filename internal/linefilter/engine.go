@@ -29,8 +29,21 @@ const (
 	DefaultMaxInflate     = 16 << 30
 	MaxContext            = 10_000 // largest above/below accepted
 	MaxPageRows           = 50_000 // largest count accepted by Rows
-	defaultIdleJobs       = 4
+	// Finished jobs kept for reuse: a tab switching 📖 읽기 ↔ 🏷 줄만 comes back
+	// to its other job at once (six panes × two modes). A finished job holds
+	// its hits only (and a temp copy for .gz / CP949 / UTF-16, which the disk
+	// check frees first when space runs short).
+	defaultIdleJobs = 12
+	// AllMaxHidden: lines a 「📖 읽기」 job can hide (Request.Exclude matches,
+	// 40 bytes each); past it the view stops there (Truncated) like MaxRows.
+	AllMaxHidden = 16_000_000
 )
+
+// ModeAll: Request.Mode of 「📖 읽기 보기」 — every line of the file is a row
+// (no MaxRows / MaxBytes caps, no context), except the lines Exclude matches,
+// which are hidden. The job keeps only where its regions start and the hidden
+// lines; rows are read from the file around the asked page (all.go).
+const ModeAll = "all"
 
 // Options tune the engine; zero values take the defaults. Tests shrink Chunk and
 // BufSize to exercise boundaries.
@@ -62,6 +75,9 @@ type Request struct {
 	// not the file. Its lines still show as context of other hits. Kinds and
 	// judging as for Rules (ANSI codes left out).
 	Exclude []Rule `json:"exclude,omitempty"`
+	// Mode "all" (ModeAll): 「📖 읽기 보기」 — every line, minus the lines an
+	// Exclude rule matches (hidden). Rules are not used. "" = 「🏷 줄만」.
+	Mode string `json:"mode,omitempty"`
 }
 
 // StartResult answers FilterStart.
@@ -88,8 +104,9 @@ type Progress struct {
 	ScannedBytes int64   `json:"scannedBytes"` // of TotalBytes (source file bytes; for .gz the compressed bytes)
 	TotalBytes   int64   `json:"totalBytes"`
 	ScannedLines int64   `json:"scannedLines"` // lines covered so far (in file order)
-	Hits         int64   `json:"hits"`         // matched lines so far (excluded ones not counted)
-	Excluded     int64   `json:"excluded"`     // matched lines left out by Request.Exclude (same part of the file as Hits)
+	Hits         int64   `json:"hits"`         // matched lines so far (excluded ones not counted); mode "all": lines shown so far
+	Excluded     int64   `json:"excluded"`     // matched lines left out by Request.Exclude (same part of the file as Hits); mode "all": lines hidden
+	Mode         string  `json:"mode,omitempty"`
 	RuleHits     []int64 `json:"ruleHits"`     // per request rule index: matched lines
 	Encoding     string  `json:"encoding"`     // encoding used ("" until known)
 	Compressed   string  `json:"compressed,omitempty"`
@@ -344,6 +361,12 @@ type job struct {
 	marks        map[[2]int64]*byteMarks
 	lay          *layout
 	layA, layB   int64
+	// mode "all" (all.go): the job's rules are Request.Exclude, so hits are the
+	// hidden lines. cps: the first line and offset of every published region
+	// (line starts, in order); seen: line starts learned while reading rows.
+	all  bool
+	cps  []linePos
+	seen []linePos
 }
 
 func newID() string {
@@ -362,7 +385,7 @@ func normPath(p string) string {
 	return p
 }
 
-func cacheKey(path string, st fileState, enc string, rules, exclude []Rule) string {
+func cacheKey(path string, st fileState, enc string, rules, exclude []Rule, mode ...string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\x00%d\x00%d\x00%s", normPath(path), st.size, st.mtime, enc)
 	for _, r := range rules {
@@ -381,6 +404,9 @@ func cacheKey(path string, st fileState, enc string, rules, exclude []Rule) stri
 		}
 		fmt.Fprintf(&b, "\x00x%d|%t|%s", r.kind(), r.CaseSensitive, r.Pattern)
 	}
+	if len(mode) > 0 && mode[0] == ModeAll {
+		b.WriteString("\x00all")
+	}
 	return b.String()
 }
 
@@ -398,11 +424,19 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 	if err := checkEncodingName(req.Encoding); err != nil {
 		return StartResult{}, err
 	}
+	all := req.Mode == ModeAll
+	if req.Mode != "" && !all {
+		return StartResult{}, fmt.Errorf("알 수 없는 보기: %q", req.Mode)
+	}
+	if all {
+		// the hidden lines are the job's hits: Exclude is what it looks for
+		req.Rules, req.Exclude = req.Exclude, nil
+	}
 	st, err := statFile(req.Path)
 	if err != nil {
 		return StartResult{}, err
 	}
-	key := cacheKey(req.Path, st, req.Encoding, req.Rules, req.Exclude)
+	key := cacheKey(req.Path, st, req.Encoding, req.Rules, req.Exclude, req.Mode)
 	e.ensureWatcher()
 	e.mu.Lock()
 	if e.closed {
@@ -416,7 +450,7 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 		if ok {
 			v := e.newViewLocked(j)
 			e.mu.Unlock()
-			return StartResult{JobID: v.id, Issues: j.issues, ExcludeIssues: j.exIssues, Cached: true, Progress: j.progressFor(v.id)}, nil
+			return j.startResult(v.id, true), nil
 		}
 		delete(e.keys, key)
 	}
@@ -435,7 +469,7 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 	j := &job{
 		e: e, id: newID(), key: key, path: req.Path, reqEnc: req.Encoding, m: newMatcher(rules), ex: ex, issues: issues, exIssues: exIssues,
 		nRules: len(rules), started: time.Now(), state: st, fp: fp, phase: "scan", ruleHits: make([]int64, len(req.Rules)),
-		firstHit: -1, nlTmp: -1, marks: map[[2]int64]*byteMarks{}, views: map[string]bool{},
+		firstHit: -1, nlTmp: -1, marks: map[[2]int64]*byteMarks{}, views: map[string]bool{}, all: all,
 	}
 	j.cond = sync.NewCond(&j.mu)
 	j.lastUse = time.Now()
@@ -450,7 +484,24 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 	e.evictIdleLocked()
 	e.mu.Unlock()
 	go j.run()
-	return StartResult{JobID: v.id, Issues: issues, ExcludeIssues: exIssues, Progress: j.progressFor(v.id)}, nil
+	return j.startResult(v.id, false), nil
+}
+
+func (j *job) startResult(id string, cached bool) StartResult {
+	r := StartResult{JobID: id, Issues: j.issues, ExcludeIssues: j.exIssues, Cached: cached, Progress: j.progressFor(id)}
+	if j.all {
+		// the job's rules are the request's Exclude
+		r.Issues, r.ExcludeIssues = nil, j.issues
+	}
+	return r
+}
+
+// capHits: matched lines a job keeps (MaxRows + 1 = "cut", or AllMaxHidden + 1).
+func (j *job) capHits() int {
+	if j.all {
+		return AllMaxHidden + 1
+	}
+	return j.e.opt.MaxRows + 1
 }
 
 func (e *Engine) newViewLocked(j *job) *view {
@@ -862,6 +913,12 @@ func (j *job) progressLocked() Progress {
 			p.SlowRules = append(p.SlowRules, j.m.rules[k].index)
 		}
 	}
+	if j.all {
+		p.Mode = ModeAll
+		p.Excluded = int64(len(j.hits))
+		p.Hits = j.allLinesLocked() - p.Excluded
+		p.SlowRules, p.SlowExclude = nil, p.SlowRules
+	}
 	if j.ex != nil {
 		for k := range j.ex.slow {
 			if j.ex.slow[k].Load() {
@@ -1104,6 +1161,10 @@ func (j *job) runAppend(st fileState, fp fingerprint) {
 	}
 	kl := sort.Search(len(j.longs), func(i int) bool { return j.longs[i].line >= rp.line })
 	j.longs = append([]longLine(nil), j.longs[:kl]...)
+	if j.all {
+		j.cps = cutPos(j.cps, rp.line)
+		j.seen = cutPos(j.seen, rp.line)
+	}
 	kc := sort.Search(len(j.commits), func(i int) bool { return j.commits[i].tmpEnd > rp.tmp })
 	j.commits = append([]commit(nil), j.commits[:kc]...)
 	j.scannedLines, j.scannedOff, j.totalLines = rp.line-1, rp.tmp, 0

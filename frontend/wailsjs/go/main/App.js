@@ -38,6 +38,18 @@ export function CloseWithSession(arg1) {
   return window['go']['main']['App']['CloseWithSession'](arg1);
 }
 
+export function EditOpenBegin(arg1, arg2) {
+  return window['go']['main']['App']['EditOpenBegin'](arg1, arg2);
+}
+
+export function EditOpenChunk(arg1, arg2) {
+  return window['go']['main']['App']['EditOpenChunk'](arg1, arg2);
+}
+
+export function EditOpenEnd(arg1) {
+  return window['go']['main']['App']['EditOpenEnd'](arg1);
+}
+
 export function ExportTagsDialog(arg1, arg2) {
   return window['go']['main']['App']['ExportTagsDialog'](arg1, arg2);
 }
@@ -120,6 +132,10 @@ export function LoadTags() {
 
 export function MarkReleaseNotesSeen() {
   return window['go']['main']['App']['MarkReleaseNotesSeen']();
+}
+
+export function MemInfo() {
+  return window['go']['main']['App']['MemInfo']();
 }
 
 export function OpenDefaultAppsSettings() {
