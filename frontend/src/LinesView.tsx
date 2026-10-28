@@ -5,6 +5,7 @@ import {
   FilterCancel,
   FilterClose,
   FilterRowOfLine,
+  FilterStatus,
 } from "../wailsjs/go/main/App";
 import { linefilter } from "../wailsjs/go/models";
 import { EventsOn, ClipboardSetText } from "../wailsjs/runtime";
@@ -89,6 +90,17 @@ function subscribe(id: string, fn: Listener): () => void {
   };
 }
 
+// A chip's identity (what it matches), for the engine's word about it.
+const exKey = (x: Pick<ExcludeRule, "pattern" | "kind" | "caseSensitive">) => JSON.stringify([x.kind, x.caseSensitive ? 1 : 0, x.pattern]);
+const exLabelOf = (k: string): string => {
+  try {
+    const [kind, cs, pattern] = JSON.parse(k);
+    return excludeLabel({ kind, caseSensitive: !!cs, pattern, on: true });
+  } catch {
+    return k;
+  }
+};
+
 export interface LinesViewProps {
   path: string;
   encoding: string; // "" = let the engine detect (a tab that was never read)
@@ -123,8 +135,11 @@ export default function LinesView(p: LinesViewProps) {
 
   const [prog, setProg] = useState<linefilter.Progress | null>(null);
   const [issues, setIssues] = useState<linefilter.RuleIssue[]>([]);
-  const [exIssues, setExIssues] = useState<Map<number, string>>(new Map()); // chip index → why the engine left it out
-  const exChip = useRef<number[]>([]); // Request.Exclude index → chip index (the scan running)
+  // chip (exKey) → why the engine left it out. By the chip itself, not its
+  // place: a chip that is off can be removed (×) without filtering again, and
+  // the places after it move (agy review: the warning then sat on another chip).
+  const [exIssues, setExIssues] = useState<Map<string, string>>(new Map());
+  const exChip = useRef<ExcludeRule[]>([]); // Request.Exclude index → the chip (the scan running)
   const [count, setCount] = useState(0);
   const [, setTick] = useState(0);
   const [startErr, setStartErr] = useState("");
@@ -154,6 +169,16 @@ export default function LinesView(p: LinesViewProps) {
   // it, the scroll is not there yet): what topLine() says until then, so a
   // second change before the first one landed keeps the place too.
   const anchorLine = useRef(0);
+  // The line the view last went back to (a chip, a tag or the context
+  // changed): the place to keep at the next change too, as long as the user
+  // has not moved since — what is on top may differ (that line left out, a
+  // 「⋯ 생략」 row on top), and taking that instead walked the view away a
+  // little more with every chip (.18 real logs, 10-28: thousands of lines).
+  const restLine = useRef(0);
+  // The user scrolled / moved (wheel, keys, the bar) just now: a scroll then is
+  // theirs, not the view settling.
+  const userAt = useRef(0);
+  const visRef = useRef(1);
   const scannedRef = useRef(0); // lines the scan has read (last progress)
   const scRef = useRef<HTMLDivElement | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
@@ -161,6 +186,7 @@ export default function LinesView(p: LinesViewProps) {
   const timing = useRef({ t0: 0, first: false, redraw0: 0 });
   const followRef = useRef(false); // stuck to the end (a growing log)
   const progQueued = useRef<linefilter.Progress | null>(null);
+  const progLast = useRef<linefilter.Progress | null>(null); // the newest progress taken (showProg)
 
   const bump = useCallback(() => setTick((t) => (t + 1) & 0xffff), []);
   const setCountBoth = useCallback((c: number) => {
@@ -170,6 +196,12 @@ export default function LinesView(p: LinesViewProps) {
   // Progress updates come every ~100ms and with every page: draw at most once a frame.
   const showProg = useCallback((x: linefilter.Progress) => {
     if (x.jobId === jobRef.current && x.scannedLines > scannedRef.current) scannedRef.current = x.scannedLines;
+    // A page asked for while scanning can be answered after the scan's end
+    // event: its older progress must not take the end back ("거르는 중 26%"
+    // for good — .18, 6 panes, a chip added: nothing more comes to fix it).
+    const last = progLast.current;
+    if (last && last.jobId === x.jobId && last.version === x.version && (last.done ? !x.done : x.scannedLines < last.scannedLines)) return;
+    progLast.current = x;
     const first = progQueued.current === null;
     progQueued.current = x;
     if (first)
@@ -186,13 +218,31 @@ export default function LinesView(p: LinesViewProps) {
   const first = Math.max(0, Math.floor(firstF));
   const vis = Math.ceil(viewH / rowH) + 1;
   firstRef.current = first;
+  visRef.current = vis;
 
   // The file line at the top of the view (where to come back after a change).
   const topLine = useCallback((): number => {
     if (anchorLine.current) return anchorLine.current;
+    if (restLine.current) return restLine.current;
+    // the first file line on screen: a 「⋯ 생략」 row on top stands for lines
+    // not shown — the line under it is what is being looked at
     const st = storeRef.current;
-    const r = st.get(firstRef.current) ?? st.get(firstRef.current + 1);
-    return r ? rowLine(r) : 0;
+    const f = firstRef.current;
+    let gap: FRow | undefined;
+    for (let i = f; i <= f + visRef.current; i++) {
+      const r = st.get(i);
+      if (!r) continue;
+      if (r.line > 0) return r.line;
+      gap = gap ?? r;
+    }
+    return gap ? rowLine(gap) : 0;
+  }, []);
+  // The user moved the view: what they see now is the place (no going back).
+  const released = useCallback(() => {
+    anchorLine.current = 0;
+    restLine.current = 0;
+    pendingLine.current = 0;
+    pendingRow.current = null;
   }, []);
 
   // --- talking to the engine ---------------------------------------------------------------
@@ -329,7 +379,6 @@ export default function LinesView(p: LinesViewProps) {
       if (line > 1 && !doneRef.current && line + B >= scannedRef.current) {
         pendingLine.current = line;
         anchorLine.current = line;
-        if (!storeRef.current.held(0)) await fetchPage(0, true);
         bump();
         return;
       }
@@ -348,6 +397,10 @@ export default function LinesView(p: LinesViewProps) {
         }
       } finally {
         seeking.current--;
+        // nothing more on its way (a seek given up for a newer job / layout
+        // does not land): the anchor must not stay — it would hold the place
+        // and the follow-the-end forever
+        if (!seeking.current && pendingRow.current === null && !pendingLine.current) anchorLine.current = 0;
         bump();
       }
     },
@@ -428,6 +481,13 @@ export default function LinesView(p: LinesViewProps) {
             seek(ln);
           }
         });
+      } else if (pendingLine.current && x.scannedLines > pendingLine.current + abRef.current.B) {
+        // the scan is past the line to go back to: its rows there are final
+        // (seek counts itself in at once: the view keeps holding — no start of
+        // the result on screen in between)
+        const ln = pendingLine.current;
+        pendingLine.current = 0;
+        seek(ln);
       } else probe();
     },
     [probe, seek, showProg, checkByteCap]
@@ -451,6 +511,7 @@ export default function LinesView(p: LinesViewProps) {
     countRef.current = 0;
     setCount(0);
     setProg(null);
+    progLast.current = null;
     setIssues([]);
     setExIssues(new Map());
     setStartErr("");
@@ -491,10 +552,20 @@ export default function LinesView(p: LinesViewProps) {
         tailRef.current = res.progress.tailLine;
         scannedRef.current = res.progress.scannedLines;
         setIssues(res.issues ?? []);
-        exChip.current = ex.chip;
-        setExIssues(new Map((res.excludeIssues ?? []).map((x) => [ex.chip[x.index], x.reason])));
+        exChip.current = ex.chip.map((k) => cur.exclude[k]);
+        setExIssues(new Map((res.excludeIssues ?? []).filter((x) => exChip.current[x.index]).map((x) => [exKey(exChip.current[x.index]), x.reason])));
         setProg(res.progress);
+        progLast.current = res.progress;
         unsub = subscribe(mine, (x) => onProgressRef.current(x));
+        // a scan quicker than this answer (a small part of a file, 6 panes at
+        // once) published its end before the subscription: catch up once — a
+        // view going back to a line waits for that progress, not for rows
+        if (!res.progress.done)
+          FilterStatus(mine)
+            .then((x) => {
+              if (alive && x) onProgressRef.current(x);
+            })
+            .catch(() => {});
         if (res.progress.done) {
           doneRef.current = true;
         }
@@ -502,6 +573,7 @@ export default function LinesView(p: LinesViewProps) {
         pendingLine.current = 0;
         restartsSeen.current++;
         anchorLine.current = ln > 1 ? ln : 0;
+        restLine.current = ln > 1 ? ln : 0;
         const go = ln > 1 ? seek(ln) : fetchPage(0, true);
         go.then(() => {
           if (doneRef.current) checkByteCap();
@@ -547,6 +619,7 @@ export default function LinesView(p: LinesViewProps) {
     // would be 0 (the top): the anchor keeps the line until the scroll lands.
     const line = topLine();
     anchorLine.current = line > 1 ? line : 0;
+    restLine.current = line > 1 ? line : 0;
     abRef.current = { A, B };
     epochRef.current++;
     storeRef.current.clear();
@@ -631,6 +704,9 @@ export default function LinesView(p: LinesViewProps) {
     const el = scRef.current;
     if (!el) return;
     setScrollTop(el.scrollTop);
+    // the user's own scroll (not the list emptied / filled while settling): the
+    // view stays where they put it, a seek still on its way does not pull it back
+    if (performance.now() - userAt.current < 300) released();
     // Not while the view is going back to a line: filtering again empties the
     // list, the browser clamps scrollTop to the short list, and with a scan
     // that is done at once (a cached one — a 「제외」 chip switched off) that
@@ -675,6 +751,7 @@ export default function LinesView(p: LinesViewProps) {
   const moveTo = (h: number, extend: boolean) => {
     const c = countRef.current;
     if (!c) return;
+    released();
     h = Math.max(0, Math.min(c - 1, h));
     setSel((s) => ({ a: extend && s ? s.a : h, h }));
     const el = scRef.current;
@@ -792,9 +869,14 @@ export default function LinesView(p: LinesViewProps) {
   const selLo = sel ? Math.min(sel.a, sel.h) : -1;
   const selHi = sel ? Math.max(sel.a, sel.h) : -1;
   const rowsEls: JSX.Element[] = [];
+  // Going back to a line (a chip / tag / context change) that the new scan has
+  // not placed yet: the rows on screen would be the start of the result for a
+  // moment, then the view jumps (.18: every chip, 0.1~0.3s) — show the waiting
+  // rows instead until it lands.
+  const holding = !!pendingLine.current || pendingRow.current !== null || seeking.current > 0;
   const end = Math.min(count, first + vis);
   for (let i = first; i < end; i++) {
-    const r = storeRef.current.get(i);
+    const r = holding ? undefined : storeRef.current.get(i);
     const top = geo.scaled ? scrollTop + (i - firstF) * rowH : i * rowH;
     const selected = i >= selLo && i <= selHi;
     const base = { top, height: rowH, lineHeight: rowH + "px" };
@@ -923,14 +1005,14 @@ export default function LinesView(p: LinesViewProps) {
       cls: "warn",
       text:
         `제외에 쓸 수 없는 칩 ${exIssues.size}개(빼고 거름): ` +
-        [...exIssues].map(([k, why]) => `「${p.exclude[k] ? excludeLabel(p.exclude[k]) : "#" + (k + 1)}」 ${why}`).join(" · "),
+        [...exIssues].map(([k, why]) => `「${exLabelOf(k)}」 ${why}`).join(" · "),
     });
   if (prog?.slowExclude?.length)
     notes.push({
       cls: "warn",
       text:
         `느린 제외 ${prog.slowExclude.length}개: ` +
-        prog.slowExclude.map((k) => `「${p.exclude[exChip.current[k]] ? excludeLabel(p.exclude[exChip.current[k]]) : "#" + (k + 1)}」`).join(", ") +
+        prog.slowExclude.map((k) => `「${exChip.current[k] ? excludeLabel(exChip.current[k]) : "#" + (k + 1)}」`).join(", ") +
         " — 정규식이 복잡해 느린 방식으로 봅니다(결과는 같음).",
     });
   if (prog?.slowRules?.length)
@@ -978,6 +1060,7 @@ export default function LinesView(p: LinesViewProps) {
       data-state={noRules ? "done" : startErr ? "error" : prog?.done ? "done" : "scan"}
       data-count={count}
       data-hits={hits}
+      data-holding={holding ? "1" : undefined}
     >
       <div className="lv-head">
         <button className="lv-btn" onClick={() => pr.current.onFull()} title="전체 파일 보기로 돌아가기 (줄을 두 번 누르거나 Enter 면 그 줄로)">
@@ -1056,6 +1139,7 @@ export default function LinesView(p: LinesViewProps) {
           done={!!prog?.done}
           version={prog?.version ?? 0}
           sel={sel ? sel.h : null}
+          top={first}
           focusNonce={findNonce}
           scroller={scRef}
           onGo={(row) => moveTo(row, false)}
@@ -1071,7 +1155,12 @@ export default function LinesView(p: LinesViewProps) {
         tabIndex={0}
         style={{ fontSize: p.fontSize + "px" }}
         onScroll={onScroll}
-        onKeyDown={onKeyDown}
+        onKeyDown={(e) => {
+          userAt.current = performance.now();
+          onKeyDown(e);
+        }}
+        onWheel={() => (userAt.current = performance.now())}
+        onPointerDown={() => (userAt.current = performance.now())}
       >
         <div className="lv-space" style={{ height: Math.max(geo.height, 1) }}>
           {rowsEls}
@@ -1105,7 +1194,7 @@ function ruleName(p: LinesViewProps, k: number): string {
 // opens a small input: Enter adds (글자 그대로 by default, Aa = case, the kind
 // select as in the tag window), Esc closes. A chip that cannot be used says
 // why (the tag rules' check; the engine's reason when it left one out).
-function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<number, string>; onChange: (next: ExcludeRule[]) => void }) {
+function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<string, string>; onChange: (next: ExcludeRule[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [text, setText] = useState("");
   const [kind, setKind] = useState<RuleKind>("text");
@@ -1132,13 +1221,13 @@ function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<number, string>; onC
         🚫 제외:
       </span>
       {p.list.map((x, i) => {
-        const why = p.issues.get(i) || (x.on ? excludeProblem(x) : "");
+        const why = (x.on ? p.issues.get(exKey(x)) : "") || (x.on ? excludeProblem(x) : "");
         return (
           <span key={i} className={"lv-chip" + (x.on ? "" : " off") + (why ? " bad" : "")} data-ex={i}>
             <button
               className="lv-chip-t"
               aria-pressed={x.on}
-              title={(why ? "쓸 수 없음: " + why + "\n" : "") + (x.on ? "누르면 끔 (다시 거름)" : "꺼짐 — 누르면 켬 (다시 거름)") + ` · ${kindName[x.kind]}${x.caseSensitive ? " · 대소문자 구분" : ""}`}
+              title={`「${x.pattern}」\n` + (why ? "쓸 수 없음: " + why + "\n" : "") + (x.on ? "누르면 끔 (다시 거름)" : "꺼짐 — 누르면 켬 (다시 거름)") + ` · ${kindName[x.kind]}${x.caseSensitive ? " · 대소문자 구분" : ""}`}
               onClick={() => p.onChange(toggleExclude(p.list, i))}
             >
               {excludeLabel(x)}

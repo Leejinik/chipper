@@ -110,6 +110,7 @@ export interface LinesFindProps {
   done: boolean; // the scan has ended
   version: number; // Progress.version (appends)
   sel: number | null; // the selected row
+  top: number; // the first row on screen (where 다음/이전 starts when no row is selected)
   focusNonce: number; // changes when Ctrl+F asks again → focus the box
   scroller: RefObject<HTMLDivElement>;
   onGo: (row: number) => void; // select and show a row
@@ -213,10 +214,14 @@ export default function LinesFind(p: LinesFindProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, p.done, tick]);
 
-  const rows = found?.rows ?? [];
+  // only rows of this job / layout: a chip switched (new job) or the context
+  // changed leaves the old rows wrong until the new answer (agy review)
+  const rows = found && found.key === key ? found.rows : [];
   const go = (dir: 1 | -1) => {
     if (!rows.length) return;
-    const cur = p.sel ?? -1;
+    // no row selected (a chip changed clears it): from what is on screen,
+    // not from the first match of the file (agy review)
+    const cur = p.sel ?? (dir > 0 ? p.top - 1 : p.top);
     let i: number;
     if (dir > 0) {
       i = after(rows, cur);
