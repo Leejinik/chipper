@@ -136,6 +136,9 @@ func releaseAssetName() string {
 		// e.g. chipper-linux-amd64. GOARCH keeps this honest if an arm64 job is
 		// ever added to the workflow.
 		return "chipper-linux-" + runtime.GOARCH
+	case "darwin":
+		// One universal .app (Intel + Apple Silicon), zipped by the macOS job.
+		return "chipper-macos-universal.zip"
 	default:
 		return "chipper.exe"
 	}
