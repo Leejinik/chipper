@@ -11,6 +11,7 @@ import { EventsOn, ClipboardSetText } from "../wailsjs/runtime";
 import type { LogRule, RuleLayers } from "./logHighlight";
 import "./LinesView.css";
 import LinesFind, { useLinesFindOpen } from "./LinesFind";
+import { useExcludeCtx } from "./ExcludeCtxMenu";
 import {
   clampContext,
   countFromPage,
@@ -767,6 +768,7 @@ export default function LinesView(p: LinesViewProps) {
 
   // --- drawing ------------------------------------------------------------------------------------------
   const [findOpen, closeFind, findNonce] = useLinesFindOpen(rootRef); // Ctrl+F (LinesFind.tsx)
+  const exCtx = useExcludeCtx(scRef, () => pr.current.exclude, (next) => pr.current.onExclude(next)); // right-click 「🚫 제외에 추가」 (ExcludeCtxMenu.tsx)
   const painter = useMemo(() => new RowPainter(p.layers), [p.layers]);
   useEffect(() => noteSlowFilterRules(p.rules, prog?.slowRules), [p.rules, prog?.slowRules?.length]); // for the tag window
   const paintText = (text: string) => {
@@ -1072,6 +1074,7 @@ export default function LinesView(p: LinesViewProps) {
         style={{ fontSize: p.fontSize + "px" }}
         onScroll={onScroll}
         onKeyDown={onKeyDown}
+        onContextMenu={exCtx.onContextMenu}
       >
         <div className="lv-space" style={{ height: Math.max(geo.height, 1) }}>
           {rowsEls}
@@ -1089,6 +1092,7 @@ export default function LinesView(p: LinesViewProps) {
           )
         )}
       </div>
+      {exCtx.menu}
     </div>
   );
 }
