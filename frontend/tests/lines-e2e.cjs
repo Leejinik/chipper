@@ -367,10 +367,23 @@ async function main() {
       ok("다시 「줄만」 → 위 3 아래 5 그대로", JSON.stringify(await waitRows(page, w)) === JSON.stringify(w));
       // Enter on a selected row, click on a line number
       await page.click('.lv-row[data-line="50"] .lv-text');
+      // Enter opens the SELECTED row: the click's selection must be on screen
+      // first (pressing before it is drawn opened nothing — the editor never came)
+      await until(async () => (await page.$('.lv-row.sel[data-line="50"]')) !== null, 4000);
       await page.focus(".lv-scroll");
       await page.keyboard.press("Enter");
+      // like the double-click above: the editor first (its mount may be slow on
+      // a busy PC), then the line
+      await page.waitForSelector(".cm-editor", { timeout: 15000 }).catch(() => {});
       await until(async () => (await page.$eval(".cm-activeLineGutter", (e) => e.textContent).catch(() => "")) === "50", 4000);
-      ok("Enter → 그 줄(50)", (await page.$eval(".cm-activeLineGutter", (e) => e.textContent).catch(() => "")) === "50");
+      const diag = async () => ({
+        gutter: await page.$eval(".cm-activeLineGutter", (e) => e.textContent).catch(() => null),
+        lines: !!(await page.$(".lines-view")),
+        editor: !!(await page.$(".cm-editor")),
+        sel: await page.$$eval(".lv-row.sel", (els) => els.map((e) => e.dataset.line)).catch(() => null),
+        focus: await page.evaluate(() => document.activeElement && document.activeElement.className),
+      });
+      ok("Enter → 그 줄(50)", (await page.$eval(".cm-activeLineGutter", (e) => e.textContent).catch(() => "")) === "50", await diag());
       await page.click(".lines-seg button:nth-child(2)");
       await page.waitForSelector(".lines-view");
       await waitDone(page);
@@ -1146,7 +1159,11 @@ async function main() {
         ok("규칙 0개 → FilterStart 안 함", calls(be, "FilterStart").length === n0, calls(be, "FilterStart").length - n0);
         ok("규칙 0개 → 「거를 규칙이 없습니다.」", ((await page.$eval(".lv-empty", (e) => e.textContent).catch(() => "")) || "").includes("거를 규칙이 없습니다"));
         await page.click('.lv-tag:has-text("common") input');
+        // the view said 「done」 already (nothing to scan): wait for the new scan
+        // to start, then for its end and rows — not the old state
+        await until(() => calls(be, "FilterStart").length > n0, 8000);
         await waitDone(page);
+        await until(async () => (await shownRows(page)).length > 0, 8000);
         ok("다시 켜면 거름", calls(be, "FilterStart").length === n0 + 1 && (await shownRows(page)).length > 0);
         await ctx.close();
       }
