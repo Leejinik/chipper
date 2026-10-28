@@ -80,6 +80,104 @@
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
+/* 「🚫 제외:」 chips */
+.lv-ex {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 6px;
+  padding: 2px 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+}
+.lv-ex-title {
+  cursor: help;
+}
+.lv-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 260px;
+  border: 1px solid #e06c75;
+  border-radius: 9px;
+  background: rgba(224, 108, 117, 0.14);
+  color: var(--text);
+}
+.lv-chip button {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.lv-chip-t {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Cascadia Code", "D2Coding", "Consolas", monospace;
+}
+.lv-chip-x {
+  color: var(--text-dim) !important;
+  padding: 0 5px 0 1px !important;
+}
+.lv-chip-x:hover {
+  color: var(--danger) !important;
+}
+.lv-chip.off {
+  opacity: 0.45;
+  border-style: dashed;
+  background: none;
+}
+.lv-chip.off .lv-chip-t {
+  text-decoration: line-through;
+}
+.lv-chip.bad {
+  border-color: #e5c07b;
+  background: rgba(229, 192, 123, 0.14);
+}
+.lv-ex-add {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 6px;
+}
+.lv-ex-in {
+  width: 220px;
+  max-width: 60vw;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 12px;
+}
+.lv-ex-in.bad {
+  border-color: #e5c07b;
+}
+.lv-ex-cs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+}
+.lv-ex-kind {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 12px;
+}
+.lv-ex-why {
+  color: #e5c07b;
+}
+.lv-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .lv-note {
   flex: none;
   padding: 2px 8px;

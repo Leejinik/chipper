@@ -28,8 +28,17 @@ import {
   scrollForRow,
   spanStyle,
   noteSlowFilterRules,
+  addExclude,
+  excludeKey,
+  excludeLabel,
+  excludeProblem,
+  excludeRequest,
+  removeExclude,
+  toggleExclude,
+  type ExcludeRule,
   type FRow,
 } from "./lineView";
+import { RULE_KINDS, type RuleKind } from "./logHighlight";
 
 // 「🏷 태그 줄만」: the lines of the file on disk that the applied tags' 「줄만」
 // rules match, with `above`/`below` lines around each, other stretches folded
@@ -87,6 +96,7 @@ export interface LinesViewProps {
   ruleTags: string[]; // the tag of each rule, for labels
   tagNames: string[]; // tags applied to the file (common first)
   off: string[]; // of those, the ones left out
+  exclude: ExcludeRule[]; // 「🚫 제외」 chips (the tab's); the ones on go to the engine
   above: number;
   below: number;
   layers: RuleLayers | null; // colours (the editor's), null = log colours off
@@ -96,6 +106,7 @@ export interface LinesViewProps {
   initialLine: number; // line to show first (coming back to the view)
   onContext: (above: number, below: number) => void;
   onToggleTag: (name: string) => void;
+  onExclude: (next: ExcludeRule[]) => void; // chips added / switched / removed
   onJump: (line: number) => void; // open the whole file at this line
   onFull: () => void; // back to the whole file
   onLeave: (line: number) => void; // the top line, when the view goes away
@@ -106,10 +117,14 @@ type Trunc = "" | "rows" | "bytes";
 export default function LinesView(p: LinesViewProps) {
   const pr = useRef(p);
   pr.current = p;
-  const key = filterKey(p.rules);
+  // the rules and the chips that are on: what is filtered (a chip switched
+  // on/off or added/removed = filter again, staying at the same line)
+  const key = filterKey(p.rules) + "|" + excludeKey(p.exclude);
 
   const [prog, setProg] = useState<linefilter.Progress | null>(null);
   const [issues, setIssues] = useState<linefilter.RuleIssue[]>([]);
+  const [exIssues, setExIssues] = useState<Map<number, string>>(new Map()); // chip index → why the engine left it out
+  const exChip = useRef<number[]>([]); // Request.Exclude index → chip index (the scan running)
   const [count, setCount] = useState(0);
   const [, setTick] = useState(0);
   const [startErr, setStartErr] = useState("");
@@ -437,6 +452,7 @@ export default function LinesView(p: LinesViewProps) {
     setCount(0);
     setProg(null);
     setIssues([]);
+    setExIssues(new Map());
     setStartErr("");
     setTrunc("");
     setSel(null);
@@ -455,10 +471,12 @@ export default function LinesView(p: LinesViewProps) {
         alive = false;
       };
     }
+    const ex = excludeRequest(cur.exclude);
     const req = linefilter.Request.createFrom({
       path: cur.path,
       encoding: cur.encoding,
       rules: cur.rules.map((r) => ({ id: r.id, kind: r.kind, pattern: r.pattern, caseSensitive: r.caseSensitive, on: true, filter: true })),
+      exclude: ex.rules,
     });
     FilterStart(req)
       .then((res) => {
@@ -473,6 +491,8 @@ export default function LinesView(p: LinesViewProps) {
         tailRef.current = res.progress.tailLine;
         scannedRef.current = res.progress.scannedLines;
         setIssues(res.issues ?? []);
+        exChip.current = ex.chip;
+        setExIssues(new Map((res.excludeIssues ?? []).map((x) => [ex.chip[x.index], x.reason])));
         setProg(res.progress);
         unsub = subscribe(mine, (x) => onProgressRef.current(x));
         if (res.progress.done) {
@@ -611,7 +631,12 @@ export default function LinesView(p: LinesViewProps) {
     const el = scRef.current;
     if (!el) return;
     setScrollTop(el.scrollTop);
-    followRef.current = doneRef.current && countRef.current > vis && el.scrollTop >= geo.height - el.clientHeight - rowH;
+    // Not while the view is going back to a line: filtering again empties the
+    // list, the browser clamps scrollTop to the short list, and with a scan
+    // that is done at once (a cached one — a 「제외」 chip switched off) that
+    // scroll looked like "at the end" and the view jumped to the last row.
+    const settling = !!anchorLine.current || !!pendingLine.current || pendingRow.current !== null || seeking.current > 0;
+    followRef.current = !settling && doneRef.current && countRef.current > vis && el.scrollTop >= geo.height - el.clientHeight - rowH;
   };
 
   // --- timing (read by the .18 measurements: data-start-ms / -rows-ms / -first-ms / -done-ms from the
@@ -850,22 +875,26 @@ export default function LinesView(p: LinesViewProps) {
   const scanning = !noRules && !!prog && !prog.done && !startErr;
   const pct = prog && prog.totalBytes > 0 ? Math.min(100, Math.floor((prog.scannedBytes / prog.totalBytes) * 100)) : 0;
   const hits = noRules ? 0 : prog?.hits ?? 0;
+  const exOn = p.exclude.some((x) => x.on);
+  // 「(제외 N)」: matched lines the chips left out (counted over the same part of the file)
+  const exText = exOn && prog && !noRules ? ` (제외 ${fmtN(prog.excluded ?? 0)})` : "";
   let stat = "준비 중…";
   if (noRules) stat = "거를 규칙 없음";
   else if (startErr) stat = "오류";
   else if (prog) {
-    if (prog.canceled) stat = `멈춤 — 여기까지 걸린 줄 ${fmtN(hits)} · ${fmtN(count)}행`;
-    else if (scanning && hits === 0) stat = `훑는 중 ${pct}% — 아직 걸린 줄 없음`;
-    else if (scanning) stat = `거르는 중 ${pct}% · 걸린 줄 ${fmtN(hits)}`;
+    if (prog.canceled) stat = `멈춤 — 여기까지 걸린 줄 ${fmtN(hits)}${exText} · ${fmtN(count)}행`;
+    else if (scanning && hits === 0) stat = `훑는 중 ${pct}% — 아직 걸린 줄 없음${exText}`;
+    else if (scanning) stat = `거르는 중 ${pct}% · 걸린 줄 ${fmtN(hits)}${exText}`;
     else
       stat =
-        `걸린 줄 ${fmtN(prog.truncated ? hits - 1 : hits)}${prog.truncated ? "+" : ""} · ${fmtN(count)}행` +
+        `걸린 줄 ${fmtN(prog.truncated ? hits - 1 : hits)}${prog.truncated ? "+" : ""}${exText} · ${fmtN(count)}행` +
         (prog.totalLines ? ` / 전체 ${fmtN(prog.totalLines)}줄` : "") +
         ` · ${(prog.elapsedMs / 1000).toFixed(2)}초`;
   }
-  const ruleHitTitle = p.rules
-    .map((r, k) => `${ruleName(p, k)}: ${fmtN(prog?.ruleHits?.[k] ?? 0)}줄${prog?.truncated ? " (앞부분 기준)" : ""}`)
-    .join("\n");
+  const ruleHitTitle =
+    p.rules.map((r, k) => `${ruleName(p, k)}: ${fmtN(prog?.ruleHits?.[k] ?? 0)}줄${prog?.truncated ? " (앞부분 기준)" : ""}`).join("\n") +
+    (exOn ? `\n🚫 제외로 뺀 걸린 줄: ${fmtN(prog?.excluded ?? 0)}줄${prog?.truncated ? " (앞부분 기준)" : ""}` : "") +
+    (exOn ? "\n(규칙별 수는 제외하고 남은 줄 기준)" : "");
   const commitCtx = (which: "a" | "b", text: string) => {
     if (which === "a") setAText(text);
     else setBText(text);
@@ -888,6 +917,21 @@ export default function LinesView(p: LinesViewProps) {
     notes.push({
       cls: "warn",
       text: `줄만 보기에서 쓸 수 없는 규칙 ${issues.length}개(빼고 거름): ` + issues.map((x) => `「${ruleName(p, x.index)}」 ${x.reason}`).join(" · "),
+    });
+  if (exIssues.size)
+    notes.push({
+      cls: "warn",
+      text:
+        `제외에 쓸 수 없는 칩 ${exIssues.size}개(빼고 거름): ` +
+        [...exIssues].map(([k, why]) => `「${p.exclude[k] ? excludeLabel(p.exclude[k]) : "#" + (k + 1)}」 ${why}`).join(" · "),
+    });
+  if (prog?.slowExclude?.length)
+    notes.push({
+      cls: "warn",
+      text:
+        `느린 제외 ${prog.slowExclude.length}개: ` +
+        prog.slowExclude.map((k) => `「${p.exclude[exChip.current[k]] ? excludeLabel(p.exclude[exChip.current[k]]) : "#" + (k + 1)}」`).join(", ") +
+        " — 정규식이 복잡해 느린 방식으로 봅니다(결과는 같음).",
     });
   if (prog?.slowRules?.length)
     notes.push({
@@ -997,6 +1041,7 @@ export default function LinesView(p: LinesViewProps) {
           </button>
         )}
       </div>
+      <ExcludeChips list={p.exclude} issues={exIssues} onChange={(next) => pr.current.onExclude(next)} />
       {notes.map((n, k) => (
         <div key={k} className={"lv-note " + n.cls}>
           {n.text}
@@ -1054,4 +1099,102 @@ function ruleName(p: LinesViewProps, k: number): string {
   const name = r.label || r.pattern;
   const tag = p.ruleTags[k];
   return tag ? `${tag} · ${name}` : name;
+}
+
+// 「🚫 제외:」 — the chips (click = on/off, × = remove) and 「+ 추가」, which
+// opens a small input: Enter adds (글자 그대로 by default, Aa = case, the kind
+// select as in the tag window), Esc closes. A chip that cannot be used says
+// why (the tag rules' check; the engine's reason when it left one out).
+function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<number, string>; onChange: (next: ExcludeRule[]) => void }) {
+  const [adding, setAdding] = useState(false);
+  const [text, setText] = useState("");
+  const [kind, setKind] = useState<RuleKind>("text");
+  const [cs, setCs] = useState(false);
+  const inRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (adding) inRef.current?.focus();
+  }, [adding]);
+  const problem = excludeProblem({ pattern: text, kind, caseSensitive: cs });
+  const can = text !== "" && !problem;
+  const add = () => {
+    if (!can) return;
+    p.onChange(addExclude(p.list, { pattern: text, kind, caseSensitive: cs }));
+    setText("");
+  };
+  const close = () => {
+    setAdding(false);
+    setText("");
+  };
+  const kindName: Record<RuleKind, string> = { text: "글자 그대로", word: "단어", regex: "정규식" };
+  return (
+    <div className="lv-ex" role="group" aria-label="제외">
+      <span className="lv-ex-title" title="걸린 줄 중 이 글자가 든 줄을 뺍니다 (그 줄 때문에 붙은 위·아래 줄도). 다른 걸린 줄의 위·아래 줄로는 남습니다. 칩을 누르면 켜고 끄고, ×로 지웁니다. 이 탭에만 저장됩니다.">
+        🚫 제외:
+      </span>
+      {p.list.map((x, i) => {
+        const why = p.issues.get(i) || (x.on ? excludeProblem(x) : "");
+        return (
+          <span key={i} className={"lv-chip" + (x.on ? "" : " off") + (why ? " bad" : "")} data-ex={i}>
+            <button
+              className="lv-chip-t"
+              aria-pressed={x.on}
+              title={(why ? "쓸 수 없음: " + why + "\n" : "") + (x.on ? "누르면 끔 (다시 거름)" : "꺼짐 — 누르면 켬 (다시 거름)") + ` · ${kindName[x.kind]}${x.caseSensitive ? " · 대소문자 구분" : ""}`}
+              onClick={() => p.onChange(toggleExclude(p.list, i))}
+            >
+              {excludeLabel(x)}
+            </button>
+            <button className="lv-chip-x" title="이 제외 지우기" aria-label={"제외 지우기: " + x.pattern} onClick={() => p.onChange(removeExclude(p.list, i))}>
+              ×
+            </button>
+          </span>
+        );
+      })}
+      {adding ? (
+        <span className="lv-ex-add">
+          <input
+            ref={inRef}
+            className={"lv-ex-in" + (problem ? " bad" : "")}
+            value={text}
+            placeholder="뺄 글자 (예: commonConnection)"
+            maxLength={1000}
+            spellCheck={false}
+            title={problem ? "쓸 수 없음: " + problem : "Enter = 추가, Esc = 닫기"}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                add();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                e.stopPropagation();
+                close();
+              }
+            }}
+          />
+          <label className="lv-ex-cs" title="대소문자 구분">
+            <input type="checkbox" checked={cs} onChange={(e) => setCs(e.target.checked)} />
+            Aa
+          </label>
+          <select className="lv-ex-kind" value={kind} onChange={(e) => setKind(e.target.value as RuleKind)} title="찾는 방식 (태그 규칙과 같음)">
+            {RULE_KINDS.map((k) => (
+              <option key={k} value={k}>
+                {kindName[k]}
+              </option>
+            ))}
+          </select>
+          <button className="lv-btn" disabled={!can} onClick={add}>
+            추가
+          </button>
+          <button className="lv-btn" onClick={close} title="닫기 (Esc)">
+            닫기
+          </button>
+          {problem && <span className="lv-ex-why">쓸 수 없음: {problem}</span>}
+        </span>
+      ) : (
+        <button className="lv-btn lv-ex-plus" onClick={() => setAdding(true)} title="걸린 줄에서 뺄 글자 추가">
+          + 추가
+        </button>
+      )}
+    </div>
+  );
 }

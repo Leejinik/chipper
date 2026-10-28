@@ -35,9 +35,9 @@ const eq = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 // --- normalizeLines ---
 ok("garbage → null", normalizeLines(null) === null && normalizeLines("x") === null);
-ok("defaults", eq(normalizeLines({}), { on: false, above: 0, below: 3, off: [] }));
-ok("clamps", eq(normalizeLines({ on: true, above: -5, below: 99999, off: ["a", 3, "b"] }), { on: true, above: 0, below: 1000, off: ["a", "b"] }));
-ok("strings → numbers", eq(normalizeLines({ above: "7", below: "x" }), { on: false, above: 7, below: 0, off: [] }));
+ok("defaults", eq(normalizeLines({}), { on: false, above: 0, below: 3, off: [], ex: [] }));
+ok("clamps", eq(normalizeLines({ on: true, above: -5, below: 99999, off: ["a", 3, "b"] }), { on: true, above: 0, below: 1000, off: ["a", "b"], ex: [] }));
+ok("strings → numbers", eq(normalizeLines({ above: "7", below: "x" }), { on: false, above: 7, below: 0, off: [], ex: [] }));
 ok("DEFAULT_LINES = 위 0 아래 3", DEFAULT_LINES.above === 0 && DEFAULT_LINES.below === 3);
 
 // --- which rules filter ---

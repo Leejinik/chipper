@@ -3572,6 +3572,8 @@ function App() {
         onToggleTag={(n) =>
           setLines(t.id, (x) => ({ ...x, off: x.off.includes(n) ? x.off.filter((y) => y !== n) : [...x.off, n] }))
         }
+        exclude={l.ex ?? []}
+        onExclude={(ex) => setLines(t.id, (x) => ({ ...x, ex }))}
         onJump={(line) => void showWhole(t.id, line)}
         onFull={() => void showWhole(t.id)}
         onLeave={(line) => linesAnchor.current.set(t.id, line)}
