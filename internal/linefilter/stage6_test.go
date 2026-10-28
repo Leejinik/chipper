@@ -231,6 +231,17 @@ func TestFindOverWholeResult(t *testing.T) {
 	if r := findRows(t, e, res.JobID, 0, 0, Rule{Kind: "text", Pattern: ""}); r.Total != 0 || r.Issue != "" {
 		t.Errorf("empty query: %+v", r)
 	}
+	// An empty query is how 찾기 (closed or cleared) stops a running Find: it must
+	// take over the view's find seq so the older Find sees itself stale.
+	if v, err := e.view(res.JobID); err != nil {
+		t.Errorf("view: %v", err)
+	} else {
+		before := v.findSeq.Load()
+		findRows(t, e, res.JobID, 0, 0, Rule{Kind: "text", Pattern: ""})
+		if v.findSeq.Load() == before {
+			t.Errorf("empty query did not stop the running Find (seq still %d)", before)
+		}
+	}
 	e.Close(res.JobID)
 	if _, err := e.Find(res.JobID, 0, 0, Rule{Kind: "text", Pattern: "x"}); err == nil {
 		t.Errorf("Find on a closed view: no error")

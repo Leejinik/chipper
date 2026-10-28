@@ -161,11 +161,23 @@ export default function LinesFind(p: LinesFindProps) {
     inputRef.current?.select();
   }, [p.focusNonce]);
 
+  // Stop a Find still running in Go (an empty query takes over the view's find
+  // seq): when the text is cleared and when 찾기 closes.
+  const searching = useRef(false);
+  const stopFind = () => {
+    const c = pr.current;
+    if (!searching.current || !c.job) return;
+    searching.current = false;
+    FilterFind(c.job, c.above, c.below, linefilter.Rule.createFrom({ kind: "text", pattern: "", caseSensitive: false })).catch(() => {});
+  };
+  useEffect(() => stopFind, []);
+
   // search (again) — debounced while typing; while the scan runs, again every 0.7s
   const rerun = useRef(0);
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (!q || !p.job) {
+      stopFind();
       setFound(null);
       setBusy(false);
       return;
@@ -178,8 +190,10 @@ export default function LinesFind(p: LinesFindProps) {
     let alive = true;
     setBusy(true);
     const t = window.setTimeout(() => {
+      searching.current = true;
       FilterFind(p.job, p.above, p.below, linefilter.Rule.createFrom({ kind: rule.kind, pattern: q, caseSensitive: cs }))
         .then((r) => {
+          if (alive && !r.partial) searching.current = false;
           if (!alive || r.canceled) return;
           setFound({ key, rows: r.rows ?? [], total: r.total, capped: !!r.capped, partial: !!r.partial, canceled: false, issue: r.issue ?? "" });
           setBusy(false);

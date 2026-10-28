@@ -41,6 +41,9 @@ func (e *Engine) Find(id string, above, below int, q Rule) (FindResult, error) {
 	}
 	out := FindResult{Rows: []int{}}
 	if q.Pattern == "" {
+		// An empty query is also how the view stops a running Find (찾기 closed
+		// or its text cleared): taking a new seq makes the older one stale.
+		v.findSeq.Store(findSeq.Add(1))
 		return out, nil
 	}
 	q.On, q.Filter = nil, nil
