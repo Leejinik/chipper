@@ -1,0 +1,31 @@
+/* Multi view with sized panes (MultiGrid.tsx): panes and boundary bars are
+   placed from custom properties set on the grid (paneSizes.ts gridVars). */
+.multi-grid.mv-sized {
+  display: block;
+}
+.multi-grid.mv-sized > .mpane {
+  position: absolute;
+}
+/* The bars look like the editor/preview .resizer (class kept on them). */
+.multi-grid.mv-sized > .mv-bar {
+  position: absolute;
+  z-index: 5;
+}
+.multi-grid.mv-sized > .mv-col {
+  width: 6px;
+}
+.multi-grid.mv-sized > .mv-row {
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 6px;
+  cursor: row-resize;
+}
+/* While dragging: the bar's cursor everywhere, and the panes under the mouse
+   don't react (selection, hover) — the window listeners do the work. */
+.multi-grid.mv-dragging > :not(.mv-active) {
+  pointer-events: none;
+}
+.multi-grid.mv-sized > .mv-bar.mv-active {
+  background: var(--accent);
+}

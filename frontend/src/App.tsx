@@ -48,6 +48,8 @@ import {
   type AssignTarget,
 } from "./tagAssign";
 import LinesView from "./LinesView";
+import MultiGrid, { paneStyle, usePaneSizes } from "./MultiGrid";
+import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import "./App.css";
 import {
@@ -356,12 +358,6 @@ const noop = () => {};
 // and it is what the 🔒 save tooltip tells the user to do.
 const LOCK_BLOCKED_CMDS = new Set<CmdId>(["save", "close", "replace", "inClause", "chips"]);
 
-function paneSpan(i: number, count: number): number {
-  if (count <= 3) return 6 / count;
-  const top = Math.ceil(count / 2);
-  return i < top ? 6 / top : 6 / (count - top);
-}
-
 interface Session {
   version: number;
   tabs: Tab[];
@@ -375,6 +371,8 @@ interface Session {
   // downgrade; what v1.2.0 then changes is not read back (tags.json wins).
   logRules?: unknown;
   multi?: MultiState;
+  // Multi-view pane sizes per pane count (MultiGrid). Unknown to v1.2.x; absent = equal.
+  paneSizes?: PaneSizes;
   // Log bundles opened recently (newest first), so tabs from an earlier bundle
   // keep their folder/file tags after switching bundles. Unknown to v1.2.0.
   bundles?: BundleRef[];
@@ -911,6 +909,7 @@ function App() {
   const [focusSlot, setFocusSlot] = useState<number>(0);
   const multiRef = useRef(multi);
   multiRef.current = multi;
+  const paneSizes = usePaneSizes();
   const focusSlotRef = useRef(focusSlot);
   focusSlotRef.current = focusSlot;
   const [paneCounts, setPaneCounts] = useState<Record<string, number>>({});
@@ -1074,6 +1073,7 @@ function App() {
           : {}),
       multi: multiRef.current,
       bundles: bundleHistory.current,
+      ...(Object.keys(paneSizes.ref.current).length ? { paneSizes: paneSizes.ref.current } : {}),
     };
     return JSON.stringify(s);
   }, [liveContent, sessionBytes]);
@@ -1187,6 +1187,7 @@ function App() {
             }
             setKeybinds(normalizeKeybinds(s.keybindings));
             setMulti(normalizeMulti(s.multi, new Set(restored.map((t) => t.id))));
+            paneSizes.restore(s.paneSizes);
             await initTags(legacy);
             setLoaded(true);
             return;
@@ -3422,7 +3423,7 @@ function App() {
         key={i}
         data-slot={i}
         className={`mpane mode-${slot.mode}${focused ? " focused" : ""}${dropSlot === i ? " drop-target" : ""}`}
-        style={{ gridColumn: `span ${paneSpan(i, multi.count)}` }}
+        style={paneStyle(i)}
         onMouseDownCapture={() => {
           if (focusSlotRef.current !== i || activeIdRef.current !== slot.tabId) focusPane(i);
         }}
@@ -3651,9 +3652,13 @@ function App() {
     });
   }
   const multiGrid = (
-    <div
-      className="multi-grid"
-      style={{ gridTemplateRows: multi.count <= 3 ? "1fr" : "1fr 1fr" }}
+    <MultiGrid
+      count={multi.count}
+      sizes={paneSizes.sizes}
+      onCommit={(n, lay) => {
+        paneSizes.commit(n, lay);
+        scheduleAutosave();
+      }}
       onKeyDownCapture={onGridKeyDown}
     >
       {visibleSlots.map(renderPane)}
@@ -3667,7 +3672,7 @@ function App() {
           onCounts={setPaneCounts}
         />
       )}
-    </div>
+    </MultiGrid>
   );
 
   // Current display string for a command's shortcut (reflects remaps live).
