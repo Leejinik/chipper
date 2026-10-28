@@ -597,6 +597,31 @@ async function main() {
       ok(`20만 줄: 상태 (제외 ${nEx.toLocaleString("en-US")})`, s.includes(`(제외 ${nEx.toLocaleString("en-US")})`), s);
       await ctx.close();
     }
+
+    // =============== D. appended lines go through the chips ===================================
+    if (want("D")) {
+      console.log("D. 덧붙음(tail): 새 줄도 제외 반영 · 마지막 줄이 커져 제외되면 빠짐");
+      const base = ["1 abc first", "2 abc commonConnection", "3 def grows"];
+      fs.writeFileSync(P("tail.log"), base.join("\n"));
+      const be = makeBackend();
+      be.st.tags = tags;
+      be.st.session = session([tab("t1", P("tail.log"), { lines: { on: true, above: 0, below: 0, off: [], ex: [{ pattern: "commonConnection", kind: "text", caseSensitive: true, on: true }] } })], "t1");
+      const { ctx, page } = await openPage(browser, url, be, TALL);
+      await page.waitForSelector(".lines-view");
+      await waitDone(page);
+      let all = base.slice();
+      let w = refRows(all, isHit([cc]), 0, 0);
+      ok("처음: 2 는 빠짐", JSON.stringify(await waitRows(page, w)) === JSON.stringify(w), await shownRows(page));
+      await sleep(50); // a later modification time
+      fs.appendFileSync(P("tail.log"), " commonConnection\n4 abc new\n5 def commonConnection\n6 def last");
+      all = ["1 abc first", "2 abc commonConnection", "3 def grows commonConnection", "4 abc new", "5 def commonConnection", "6 def last"];
+      w = refRows(all, isHit([cc]), 0, 0);
+      ok("덧붙인 뒤: 커진 3·새 5 는 빠지고 4·6 은 걸림", JSON.stringify(await waitRows(page, w, "", 10000)) === JSON.stringify(w), await shownRows(page));
+      const s = await until(async () => /\(제외 3\)/.test(await stat(page)) && (await stat(page)), 5000);
+      ok("상태 (제외 3) · 걸린 줄 3", !!s && s.startsWith("걸린 줄 3 (제외 3)"), await stat(page));
+      ok("FilterStart 는 한 번(다시 훑지 않고 덧붙음만)", calls(be, "FilterStart").length === 1);
+      await ctx.close();
+    }
   } finally {
     console.log("시간(ms):", JSON.stringify(timings));
     await browser.close();
