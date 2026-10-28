@@ -4059,6 +4059,8 @@ function App() {
         }
         exclude={l.ex ?? []}
         onExclude={(ex) => setLines(t.id, (x) => ({ ...x, ex }))}
+        open={l.open ?? []}
+        onOpen={(open) => setLines(t.id, (x) => ({ ...x, open }))}
         onJump={(line) => void showWhole(t.id, line)}
         onFull={() => void showWhole(t.id)}
         onLeave={(line) => linesAnchor.current.set(t.id, line)}

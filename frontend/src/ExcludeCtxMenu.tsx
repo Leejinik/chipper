@@ -44,7 +44,7 @@ export function rowsSelection(root: HTMLElement): { text: string; copy: string; 
     row = filled[0] ?? null;
     text = row?.textContent ?? "";
   }
-  if (row && (row.classList.contains("lv-gap") || row.classList.contains("lv-wait")))
+  if (row && (row.classList.contains("lv-gap") || row.classList.contains("lv-wait") || row.classList.contains("lv-fold")))
     return { text: "", copy, problem: "「⋯ 생략」 표시가 아니라 로그 줄의 글자를 고르세요" };
   return { text, copy, problem: "" };
 }

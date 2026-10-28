@@ -68,6 +68,7 @@ func TestFilterE2EServer(t *testing.T) {
 		}
 		var id string
 		var A, B, from, count int
+		var open []int64 // 「⋯ 생략」 펼치기 (the bindings' last argument)
 		var res any
 		var err error
 		switch req.Name {
@@ -81,7 +82,8 @@ func TestFilterE2EServer(t *testing.T) {
 			arg(2, &B)
 			arg(3, &from)
 			arg(4, &count)
-			res, err = a.FilterRows(id, A, B, from, count)
+			arg(5, &open)
+			res, err = a.FilterRows(id, A, B, from, count, open)
 		case "FilterStatus":
 			arg(0, &id)
 			res, err = a.FilterStatus(id)
@@ -97,14 +99,16 @@ func TestFilterE2EServer(t *testing.T) {
 			arg(1, &A)
 			arg(2, &B)
 			arg(3, &line)
-			res, err = a.FilterRowOfLine(id, A, B, line)
+			arg(4, &open)
+			res, err = a.FilterRowOfLine(id, A, B, line, open)
 		case "FilterFind":
 			var q linefilter.Rule
 			arg(0, &id)
 			arg(1, &A)
 			arg(2, &B)
 			arg(3, &q)
-			res, err = a.FilterFind(id, A, B, q)
+			arg(4, &open)
+			res, err = a.FilterFind(id, A, B, q, open)
 		case "ValidateFilterRules":
 			var rs []linefilter.Rule
 			arg(0, &rs)

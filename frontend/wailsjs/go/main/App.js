@@ -70,16 +70,16 @@ export function FilterClose(arg1) {
   return window['go']['main']['App']['FilterClose'](arg1);
 }
 
-export function FilterFind(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['FilterFind'](arg1, arg2, arg3, arg4);
+export function FilterFind(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['FilterFind'](arg1, arg2, arg3, arg4, arg5);
 }
 
-export function FilterRowOfLine(arg1, arg2, arg3, arg4) {
-  return window['go']['main']['App']['FilterRowOfLine'](arg1, arg2, arg3, arg4);
+export function FilterRowOfLine(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['FilterRowOfLine'](arg1, arg2, arg3, arg4, arg5);
 }
 
-export function FilterRows(arg1, arg2, arg3, arg4, arg5) {
-  return window['go']['main']['App']['FilterRows'](arg1, arg2, arg3, arg4, arg5);
+export function FilterRows(arg1, arg2, arg3, arg4, arg5, arg6) {
+  return window['go']['main']['App']['FilterRows'](arg1, arg2, arg3, arg4, arg5, arg6);
 }
 
 export function FilterStart(arg1) {

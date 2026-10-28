@@ -38,11 +38,11 @@ export function FilterCancel(arg1:string):Promise<void>;
 
 export function FilterClose(arg1:string):Promise<void>;
 
-export function FilterFind(arg1:string,arg2:number,arg3:number,arg4:linefilter.Rule):Promise<linefilter.FindResult>;
+export function FilterFind(arg1:string,arg2:number,arg3:number,arg4:linefilter.Rule,arg5:Array<number>):Promise<linefilter.FindResult>;
 
-export function FilterRowOfLine(arg1:string,arg2:number,arg3:number,arg4:number):Promise<number>;
+export function FilterRowOfLine(arg1:string,arg2:number,arg3:number,arg4:number,arg5:Array<number>):Promise<number>;
 
-export function FilterRows(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number):Promise<linefilter.Page>;
+export function FilterRows(arg1:string,arg2:number,arg3:number,arg4:number,arg5:number,arg6:Array<number>):Promise<linefilter.Page>;
 
 export function FilterStart(arg1:linefilter.Request):Promise<linefilter.StartResult>;
 

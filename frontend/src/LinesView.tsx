@@ -39,6 +39,18 @@ import {
   toggleExclude,
   type ExcludeRule,
   type FRow,
+  foldGroups,
+  foldText,
+  foldTitle,
+  groupsAt,
+  groupsBeside,
+  groupsStart,
+  OPEN_STEP,
+  openFlat,
+  openGap,
+  openKey,
+  type OpenHow,
+  type OpenSpan,
 } from "./lineView";
 import { RULE_KINDS, type RuleKind } from "./logHighlight";
 
@@ -51,8 +63,13 @@ import { RULE_KINDS, type RuleKind } from "./logHighlight";
 // result, and new context sizes redraw from one page.
 //
 // Keys: ↑↓ PgUp PgDn Home End move the selected row (Shift extends), Enter or
-// a double-click (or a click on the line number) opens the whole file at that
-// line, Ctrl+C copies the selected rows (or the selected text), Ctrl+A all rows.
+// a double-click on a line (or a click on the line number) opens the whole
+// file at that line, Ctrl+C copies the selected rows (or the selected text),
+// Ctrl+A all rows.
+// 「⋯ N줄 생략」 펼치기 (lineView.ts openGap): the gap row's [▲ 위로 20줄] [전부
+// 펼치기] [▼ 아래로 20줄], a double-click / → / + on it (2,000 lines or less:
+// all, else 20 from each end); 「▾ 접기」 (click, double-click), or ← / - on the
+// fold row, an opened line or the gap row folds what was opened from that gap.
 
 const PAGE = 500; // rows per page fetched
 const OVERSCAN = 150; // rows fetched beyond the viewport each way
@@ -130,6 +147,9 @@ export interface LinesViewProps {
   onEdit?: () => void;
   editWhy?: string;
   fullLabel?: string; // the 「📄 전체」 button of 「🏷 줄만」 (「📖 전체」 for a big file)
+  // 「⋯ 생략」 stretches opened (the tab's, file lines) and their change
+  open?: OpenSpan[];
+  onOpen?: (next: OpenSpan[]) => void;
 }
 
 type Trunc = "" | "rows" | "bytes";
@@ -196,6 +216,14 @@ export default function LinesView(p: LinesViewProps) {
   const followRef = useRef(false); // stuck to the end (a growing log)
   const progQueued = useRef<linefilter.Progress | null>(null);
   const progLast = useRef<linefilter.Progress | null>(null); // the newest progress taken (showProg)
+  // 「⋯ 생략」 펼치기: the stretches the rows are laid out with (FilterRows'
+  // last argument; changed together with epochRef, like abRef), and where the
+  // change the user just made starts (row, the line to keep, its screen offset)
+  const opRef = useRef<number[]>(openFlat(p.open));
+  const opKeyRef = useRef(openKey(p.open));
+  // (patch: a 「▾ 접기」 row above the change whose count changes with it)
+  const openChange = useRef<{ row: number; line: number; off: number; sel: boolean; patch: number } | null>(null);
+  const openedAt = useRef(0); // when a gap was opened (the 2nd click of a double-click on ▲ is not 「접기」)
 
   const bump = useCallback(() => setTick((t) => (t + 1) & 0xffff), []);
   const setCountBoth = useCallback((c: number) => {
@@ -301,7 +329,7 @@ export default function LinesView(p: LinesViewProps) {
       inflight.current.add(k);
       try {
         const { A, B } = abRef.current;
-        const pg = await FilterRows(job, A, B, from, n);
+        const pg = await FilterRows(job, A, B, from, n, opRef.current);
         if (job !== jobRef.current) return;
         if (applyPage(pg, ep)) {
           if (!pg.rows.length) emptyAt.current.set(k, countRef.current);
@@ -336,7 +364,7 @@ export default function LinesView(p: LinesViewProps) {
         if (!job) return;
         const ep = epochRef.current;
         const { A, B } = abRef.current;
-        const pg = await FilterRows(job, A, B, 0, 1);
+        const pg = await FilterRows(job, A, B, 0, 1, opRef.current);
         if (job !== jobRef.current) return;
         if (applyPage(pg, ep)) {
           storeRef.current.put(0, pg.rows as FRow[]);
@@ -365,9 +393,10 @@ export default function LinesView(p: LinesViewProps) {
     const job = jobRef.current;
     const ep = epochRef.current;
     const { A, B } = abRef.current;
+    const O = opRef.current;
     setTimeout(() => {
       if (job !== jobRef.current || ep !== epochRef.current) return;
-      FilterRows(job, A, B, Math.max(0, countRef.current - 1), 1)
+      FilterRows(job, A, B, Math.max(0, countRef.current - 1), 1, O)
         .then((pg) => {
           if (job === jobRef.current && applyPage(pg, ep)) bump();
         })
@@ -375,13 +404,16 @@ export default function LinesView(p: LinesViewProps) {
     }, 200);
   }, [applyPage, bump]);
 
-  // Go to file line `line` (the first row showing it or after it).
+  // Go to file line `line` (the first row showing it or after it), `off` rows
+  // below the top of the view (펼치기·접기 keep the row where it was); `select`:
+  // that row becomes the selected one.
   const seek = useCallback(
-    async (line: number) => {
+    async (line: number, off = 0, select = false) => {
       const job = jobRef.current;
       if (!job) return;
       const ep = epochRef.current;
       const { A, B } = abRef.current;
+      const O = opRef.current;
       // Not scanned that far yet: the engine would answer with the rows known
       // so far (some row near the scan's end). Show the start and go there when
       // the scan is done — no stop at a wrong place on the way.
@@ -394,9 +426,10 @@ export default function LinesView(p: LinesViewProps) {
       seeking.current++;
       try {
         let row = 0;
-        if (line > 1) row = await FilterRowOfLine(job, A, B, line);
+        if (line > 1) row = await FilterRowOfLine(job, A, B, line, O);
         if (job !== jobRef.current || ep !== epochRef.current) return;
-        pendingRow.current = row;
+        pendingRow.current = Math.max(0, row - off);
+        if (select) setSel({ a: row, h: row });
         await fetchPage(Math.floor(row / PAGE), true);
       } catch (e) {
         // a request of a job (or a layout) given up meanwhile: not this view's error
@@ -436,8 +469,16 @@ export default function LinesView(p: LinesViewProps) {
           if (!job || cur.version <= verRef.current) break;
           const T = tailRef.current;
           const { A, B } = abRef.current;
+          const O = opRef.current;
           let cut = 0;
-          if (T > 0) cut = await FilterRowOfLine(job, A, B, Math.max(1, T - A));
+          if (T > 0) {
+            // an opened stretch reaching the old end grows with the file: its
+            // run's 「▾ 접기」 row (above the cut) changes too
+            let L = Math.max(1, T - A);
+            for (let k = 0; k + 1 < O.length; k += 2) if (O[k] < L && O[k + 1] >= T - 1) L = O[k];
+            cut = await FilterRowOfLine(job, A, B, L, O);
+            if (L < Math.max(1, T - A)) cut = Math.max(0, cut - 1);
+          }
           if (job !== jobRef.current) return;
           storeRef.current.dropFrom(cut);
           emptyAt.current.clear();
@@ -543,6 +584,9 @@ export default function LinesView(p: LinesViewProps) {
       };
     }
     const ex = excludeRequest(cur.exclude);
+    // the opened stretches go on with the new scan (file lines)
+    opRef.current = allMode ? [] : openFlat(cur.open);
+    opKeyRef.current = allMode ? "" : openKey(cur.open);
     const req = linefilter.Request.createFrom({
       path: cur.path,
       encoding: cur.encoding,
@@ -643,6 +687,58 @@ export default function LinesView(p: LinesViewProps) {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.above, p.below]);
+
+  // --- 「⋯ 생략」 opened or folded: same scan, rows laid out again ----------------------------------
+  // Rows above the change are the same rows: when the change is on screen or
+  // below its top, the scroll stays and only the rows from the change on are
+  // fetched again (no flicker, nothing read twice). Otherwise (a fold from
+  // inside a long opened run, a scaled scroll bar) the changed row is put back
+  // at the same height of the view.
+  const opKey = all ? "" : openKey(p.open);
+  useEffect(() => {
+    if (opKey === opKeyRef.current) return;
+    const ch = openChange.current;
+    openChange.current = null;
+    opRef.current = openFlat(pr.current.open);
+    opKeyRef.current = opKey;
+    if (!jobRef.current) return; // a start on its way takes them
+    epochRef.current++;
+    emptyAt.current.clear();
+    setTrunc("");
+    timing.current.redraw0 = performance.now();
+    if (rootRef.current) delete rootRef.current.dataset.redrawMs;
+    if (ch && ch.row >= 0 && !geometry(countRef.current, rowH).scaled && firstRef.current <= ch.row) {
+      storeRef.current.dropFrom(ch.row);
+      if (ch.sel) setSel({ a: ch.row, h: ch.row });
+      fetchPage(Math.floor(ch.row / PAGE), true).then(() => {
+        if (doneRef.current) checkByteCap();
+      });
+      if (ch.patch >= 0) {
+        // the run above grew / shrank at its end: its 「▾ 접기」 count, in place
+        const job = jobRef.current;
+        const ep = epochRef.current;
+        const { A, B } = abRef.current;
+        FilterRows(job, A, B, ch.patch, 1, opRef.current)
+          .then((pg) => {
+            const x = pg.rows[0] as FRow | undefined;
+            const held = storeRef.current.pages.get(Math.floor(ch.patch / PAGE));
+            if (job !== jobRef.current || ep !== epochRef.current || pg.version !== verRef.current || !x?.fold || !held || held.length <= ch.patch % PAGE) return;
+            held[ch.patch % PAGE] = x;
+            bump();
+          })
+          .catch(() => {});
+      }
+      bump();
+      return;
+    }
+    const line = ch ? ch.line : topLine();
+    anchorLine.current = line > 1 ? line : 0;
+    storeRef.current.clear();
+    seek(line, ch ? ch.off : 0, !!ch?.sel).then(() => {
+      if (doneRef.current) checkByteCap();
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opKey]);
 
   // --- fetch what is on screen ---------------------------------------------------------------------
   useEffect(() => {
@@ -787,6 +883,7 @@ export default function LinesView(p: LinesViewProps) {
     }
     const out: FRow[] = [];
     const { A, B } = abRef.current;
+    const O = opRef.current;
     const ep = epochRef.current;
     for (let i = lo; i <= hi; ) {
       const r = storeRef.current.get(i);
@@ -795,17 +892,75 @@ export default function LinesView(p: LinesViewProps) {
         i++;
         continue;
       }
-      const pg = await FilterRows(job, A, B, i, Math.min(5000, hi - i + 1));
+      const pg = await FilterRows(job, A, B, i, Math.min(5000, hi - i + 1), O);
       if (job !== jobRef.current || ep !== epochRef.current || !pg.rows.length) break;
       out.push(...(pg.rows as FRow[]));
       i += pg.rows.length;
     }
     try {
       await ClipboardSetText(rowsText(out));
-      setNotice(`${fmtN(out.length)}행을 복사했습니다${cut ? ` (한 번에 ${fmtN(COPY_MAX)}행까지)` : ""}.`);
+      setNotice(`${fmtN(out.filter((r) => !r.fold).length)}행을 복사했습니다${cut ? ` (한 번에 ${fmtN(COPY_MAX)}행까지)` : ""}.`);
     } catch (e) {
       setNotice("복사하지 못했습니다: " + String(e));
     }
+  };
+  // 「⋯ 생략」 펼치기 — the gap row i: its lines from the top / bottom / all.
+  const changeOpen = (next: OpenSpan[], ch: { row: number; line: number; off: number; sel: boolean }) => {
+    const f = pr.current.onOpen;
+    if (!f || pr.current.mode === "all") return false;
+    released(); // the user's own move: what is on screen now is the place
+    openChange.current = { ...ch, patch: ch.row > 0 ? foldAbove(ch.row) : -1 };
+    f(next);
+    return true;
+  };
+  // The 「▾ 접기」 row of the opened run just above row i (its count changes when
+  // the run grows or shrinks at its end), -1 if none is held.
+  const foldAbove = (i: number): number => {
+    const st = storeRef.current;
+    for (let k = i - 1; k >= 0 && i - k <= 5000; k--) {
+      const x = st.get(k);
+      if (!x || !(x.open || x.fold)) return -1;
+      if (x.fold) return k;
+    }
+    return -1;
+  };
+  const openAt = (i: number, how: OpenHow): boolean => {
+    const r = storeRef.current.get(i);
+    if (!r || r.line !== 0 || r.fold || !r.from || !r.skip) return false;
+    openedAt.current = performance.now();
+    return changeOpen(openGap(pr.current.open, r.from, r.skip, how), { row: i, line: r.from, off: i - firstRef.current, sel: true });
+  };
+  // 「▾ 접기」 — row i is the fold row, an opened line, or a gap row next to
+  // pieces opened from it: everything opened from that gap folds again.
+  const foldAt = (i: number): boolean => {
+    const st = storeRef.current;
+    const r = st.get(i);
+    const list = pr.current.open ?? [];
+    if (!r || !list.length) return false;
+    let gs: Set<number>;
+    if (r.fold) gs = groupsAt(list, r.from ?? 0, (r.from ?? 0) + (r.skip ?? 0) - 1);
+    else if (r.line === 0) gs = groupsBeside(list, r.from ?? 0, r.skip ?? 0);
+    else if (r.open) gs = groupsAt(list, r.line, r.line);
+    else return false;
+    if (!gs.size) return false;
+    // the first row that changes: rows back from i as long as they show
+    // lines of the groups or come after their start (the gap row just above
+    // the first piece merges too); unknown (not fetched) = put back by line
+    const start = groupsStart(list, gs);
+    let row = i;
+    for (let k = i - 1; ; k--) {
+      if (k < 0) break;
+      const x = st.get(k);
+      if (!x || i - k > 5000) {
+        row = -1;
+        break;
+      }
+      const last = x.line > 0 ? x.line : (x.from ?? 0) + (x.fold ? 0 : (x.skip ?? 1) - 1);
+      if (last < start - 1 || (x.line > 0 && x.line < start)) break;
+      row = k;
+    }
+    const line = r.line > 0 ? r.line : r.from ?? 1;
+    return changeOpen(foldGroups(list, gs), { row, line, off: i - firstRef.current, sel: true });
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     const c = countRef.current;
@@ -813,6 +968,15 @@ export default function LinesView(p: LinesViewProps) {
     const page = Math.max(1, Math.floor(viewH / rowH) - 1);
     const ctrl = e.ctrlKey || e.metaKey;
     let handled = true;
+    // → / + opens the selected 「⋯ 생략」 row, ← / - folds (fold row, opened line, gap row)
+    if (sel && !all && !ctrl && !e.altKey && (e.key === "ArrowRight" || e.key === "+" || e.key === "ArrowLeft" || e.key === "-")) {
+      const done = e.key === "ArrowRight" || e.key === "+" ? openAt(sel.h, "auto") : foldAt(sel.h);
+      if (done) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+    }
     switch (e.key) {
       case "ArrowDown":
         moveTo(sel ? h + 1 : h, e.shiftKey);
@@ -906,7 +1070,47 @@ export default function LinesView(p: LinesViewProps) {
       );
       continue;
     }
+    if (r.fold) {
+      // 「▾ 접기」 above opened lines (the 2nd click of a double-click on ▲
+      // lands here: not taken as 「접기」 right after opening)
+      const fold = () => performance.now() - openedAt.current > 500 && foldAt(i);
+      rowsEls.push(
+        <div
+          key={i}
+          className={"lv-row lv-fold" + (selected ? " sel" : "")}
+          style={base}
+          title={foldTitle(r)}
+          data-row={i}
+          data-from={r.from}
+          onMouseDown={(e) => {
+            moveTo(i, e.shiftKey);
+            scRef.current?.focus();
+          }}
+          onDoubleClick={fold}
+        >
+          <span className="lv-no" style={{ width: gutterCh + "ch" }} />
+          <span className="lv-mark" />
+          <button className="lv-fold-btn" onClick={fold} onDoubleClick={(e) => e.stopPropagation()}>
+            {foldText(r)}
+          </button>
+        </div>
+      );
+      continue;
+    }
     if (r.line === 0) {
+      const canOpen = !all && !!p.onOpen;
+      const step = (r.skip ?? 0) > OPEN_STEP;
+      const btn = (how: OpenHow, label: string, title: string) => (
+        <button
+          className="lv-open-btn"
+          data-open={how}
+          title={title}
+          onClick={() => openAt(i, how)}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          {label}
+        </button>
+      );
       rowsEls.push(
         <div
           key={i}
@@ -918,11 +1122,18 @@ export default function LinesView(p: LinesViewProps) {
             moveTo(i, e.shiftKey);
             scRef.current?.focus();
           }}
-          onDoubleClick={() => jump(i)}
+          onDoubleClick={() => (canOpen ? openAt(i, "auto") : jump(i))}
         >
           <span className="lv-no" style={{ width: gutterCh + "ch" }} />
           <span className="lv-mark" />
           <span className="lv-text">{gapText(r)}</span>
+          {canOpen && (
+            <span className="lv-open-btns">
+              {step && btn("up", `▲ 위로 ${OPEN_STEP}줄`, `생략된 줄의 위쪽 끝(줄 ${fmtN(r.from ?? 0)})부터 ${OPEN_STEP}줄 펼치기`)}
+              {btn("all", "전부 펼치기", `생략된 ${fmtN(r.skip ?? 0)}줄을 모두 펼치기 (파일을 다시 훑지 않고 화면에 올 때 읽음)`)}
+              {step && btn("down", `▼ 아래로 ${OPEN_STEP}줄`, `생략된 줄의 아래쪽 끝(줄 ${fmtN((r.from ?? 0) + (r.skip ?? 0) - 1)})에서 ${OPEN_STEP}줄 펼치기`)}
+            </span>
+          )}
         </div>
       );
       continue;
@@ -933,7 +1144,7 @@ export default function LinesView(p: LinesViewProps) {
     rowsEls.push(
       <div
         key={i}
-        className={"lv-row" + (all ? " lv-all" : r.hit ? " lv-hit" : " lv-near") + (selected ? " sel" : "")}
+        className={"lv-row" + (all ? " lv-all" : r.hit ? " lv-hit" : r.open ? " lv-open" : " lv-near") + (selected ? " sel" : "")}
         style={tint ? { ...base, backgroundColor: tint + "1f" } : base}
         data-row={i}
         data-line={r.line}
@@ -959,7 +1170,9 @@ export default function LinesView(p: LinesViewProps) {
               ? undefined
               : r.hit
                 ? "걸린 규칙: " + (r.rules ?? []).map((k) => ruleName(p, k)).join(", ")
-                : "걸린 줄의 위·아래 줄"
+                : r.open
+                  ? "펼친 줄 (← 또는 - 로 접기)"
+                  : "걸린 줄의 위·아래 줄"
           }
         />
         <span className="lv-text">
@@ -1017,6 +1230,7 @@ export default function LinesView(p: LinesViewProps) {
   };
 
   const notes: { cls: string; text: string }[] = [];
+  const opened = !all && (p.open?.length ?? 0) > 0;
   const err = startErr || prog?.error;
   if (err) notes.push({ cls: "err", text: "거르지 못했습니다: " + err });
   if (noRules)
@@ -1068,13 +1282,19 @@ export default function LinesView(p: LinesViewProps) {
     notes.push({
       cls: "warn",
       text:
-        `보이는 줄(걸린 줄과 위·아래 줄)이 ${fmtN(MAX_ROWS)}행을 넘어 앞 ${fmtN(MAX_ROWS)}행까지만 보여 줍니다 — ` +
-        "그 뒤에도 걸린 줄이 더 있습니다. 위·아래 줄 수나 규칙·태그 체크를 줄이면 더 볼 수 있습니다.",
+        (opened
+          ? // opened lines count too (펼치기): what is cut may be only opened lines
+            `보이는 줄(걸린 줄과 위·아래 줄, 펼친 줄)이 ${fmtN(MAX_ROWS)}행을 넘어 앞 ${fmtN(MAX_ROWS)}행까지만 보여 줍니다 — ` +
+            "그 뒤의 줄은 보이지 않습니다. 펼친 곳을 접거나(▾ 접기) 위·아래 줄 수나 규칙·태그 체크를 줄이면 더 볼 수 있습니다."
+          : `보이는 줄(걸린 줄과 위·아래 줄)이 ${fmtN(MAX_ROWS)}행을 넘어 앞 ${fmtN(MAX_ROWS)}행까지만 보여 줍니다 — ` +
+            "그 뒤에도 걸린 줄이 더 있습니다. 위·아래 줄 수나 규칙·태그 체크를 줄이면 더 볼 수 있습니다."),
     });
   if (trunc === "bytes")
     notes.push({
       cls: "warn",
-      text: `결과가 64MB 를 넘어 앞 ${fmtN(count)}행까지만 보여 줍니다. 위·아래 줄 수를 줄이면 더 볼 수 있습니다.`,
+      text:
+        `결과가 64MB 를 넘어 앞 ${fmtN(count)}행까지만 보여 줍니다. ` +
+        (opened ? "펼친 곳을 접거나(▾ 접기) 위·아래 줄 수를 줄이면 더 볼 수 있습니다." : "위·아래 줄 수를 줄이면 더 볼 수 있습니다."),
     });
   if (prog && prog.invalidBytes > 0)
     notes.push({
@@ -1181,6 +1401,7 @@ export default function LinesView(p: LinesViewProps) {
           job={jobRef.current}
           above={abRef.current.A}
           below={abRef.current.B}
+          open={opRef.current}
           count={count}
           done={!!prog?.done}
           version={prog?.version ?? 0}

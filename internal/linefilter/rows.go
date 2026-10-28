@@ -19,8 +19,10 @@ type Row struct {
 	Rules         []int  `json:"rules,omitempty"`         // hit rows: indexes into the request's Rules that matched
 	Col           int32  `json:"col"`                     // hit rows: editor column (UTF-16 units) where the first match starts; -1 otherwise / unknown
 	TruncatedLine bool   `json:"truncatedLine,omitempty"` // Text is only the start of a longer line (MaxLineDisplay)
-	Skip          int64  `json:"skip,omitempty"`          // gap rows: how many lines are left out here
-	From          int64  `json:"from,omitempty"`          // gap rows: the first line left out
+	Skip          int64  `json:"skip,omitempty"`          // gap rows: how many lines are left out here; fold rows: lines of the open run below
+	From          int64  `json:"from,omitempty"`          // gap rows: the first line left out; fold rows: the open run's first line
+	Fold          bool   `json:"fold,omitempty"`          // a fold row (Line 0): 「▾ 접기」 above an open run (open.go)
+	Open          bool   `json:"open,omitempty"`          // a line shown only because the view opened it (not a hit nor its context)
 }
 
 // Page answers FilterRows.
@@ -42,6 +44,7 @@ type interval struct {
 	h0, h1   int   // hits[h0:h1] lie in [lo, hi]
 	gap      int64 // lines left out just before lo (0 = no gap row)
 	rowStart int   // row of the gap row, or of line lo when there is none
+	open     bool  // an open run (open.go): a fold row comes before line lo (after the gap row)
 }
 
 type layout struct {
@@ -64,13 +67,22 @@ type byteMarks struct {
 	rows    []int
 	bytes   []int64
 	capRow  int // -1 = MaxBytes not reached (so far)
+	open    []span
+	parent  *byteMarks // marks to start from (open.go inherit), until first used
+	keepTo  int
 }
 
-// layoutLocked computes the row layout for (above, below) from the hits found
-// so far. j.mu must be held.
-func (j *job) layoutLocked(above, below int64) *layout {
+// markKey: byte marks are per layout — context sizes and open stretches.
+type markKey struct {
+	A, B int64
+	open string
+}
+
+// layoutLocked computes the row layout for (above, below) and the open
+// stretches from the hits found so far. j.mu must be held.
+func (j *job) layoutLocked(above, below int64, op openSet) *layout {
 	done := j.done && !j.following
-	if l := j.lay; l != nil && l.version == j.version && l.done == done && j.layA == above && j.layB == below {
+	if l := j.lay; l != nil && l.version == j.version && l.done == done && j.layA == above && j.layB == below && j.layO == op.key {
 		if l.nh == len(j.hits) && l.scanned == j.scannedLines {
 			return l
 		}
@@ -102,6 +114,9 @@ func (j *job) layoutLocked(above, below int64) *layout {
 		}
 		l.ivs = append(l.ivs, interval{lo: lo, hi: hi, h0: i, h1: i + 1})
 	}
+	if len(op.spans) > 0 {
+		l.ivs = mergeOpen(l.ivs, op.spans, limit, len(hits))
+	}
 	maxRows := j.e.opt.MaxRows
 	row, lines := 0, 0
 	var prevHi int64
@@ -112,15 +127,20 @@ func (j *job) layoutLocked(above, below int64) *layout {
 		if iv.gap > 0 {
 			row++
 		}
+		if iv.open {
+			row++ // its fold row
+		}
 		cnt := int(iv.hi - iv.lo + 1)
 		if lines+cnt > maxRows {
 			cnt = maxRows - lines
 			iv.hi = iv.lo + int64(cnt) - 1
-			for iv.h1 > iv.h0+1 && hits[iv.h1-1].line > iv.hi {
-				iv.h1--
-			}
-			if hits[iv.h0].line > iv.hi {
-				iv.h1 = iv.h0 // only context lines above the first hit fit
+			if !iv.open {
+				for iv.h1 > iv.h0+1 && hits[iv.h1-1].line > iv.hi {
+					iv.h1--
+				}
+				if hits[iv.h0].line > iv.hi {
+					iv.h1 = iv.h0 // only context lines above the first hit fit
+				}
 			}
 			l.capped = true
 		}
@@ -146,7 +166,7 @@ func (j *job) layoutLocked(above, below int64) *layout {
 	// Rows already laid out never change while the version stays: a later hit
 	// can only extend the last block at its end or start a new block after it.
 	l.avail = row
-	j.lay, j.layA, j.layB = l, above, below
+	j.lay, j.layA, j.layB, j.layO = l, above, below, op.key
 	return l
 }
 
@@ -161,6 +181,9 @@ func (l *layout) rowAtLine(x int64) int {
 				return iv.rowStart
 			}
 			g = 1
+		}
+		if iv.open {
+			g++ // the fold row: the line's own row is the answer
 		}
 		y := x
 		if y < iv.lo {
@@ -190,6 +213,12 @@ func clampCtx(n int) int64 {
 // hold fewer rows than asked (MaxPageBytes, or rows not found yet): ask again
 // from from+len(rows) until End.
 func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
+	return e.RowsOpen(id, above, below, nil, from, count)
+}
+
+// RowsOpen is Rows with stretches of left-out lines opened (open.go): open =
+// [lo0, hi0, lo1, hi1, …], file lines, inclusive.
+func (e *Engine) RowsOpen(id string, above, below int, open []int64, from, count int) (Page, error) {
 	v, err := e.view(id)
 	if err != nil {
 		return Page{}, err
@@ -209,6 +238,7 @@ func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
 		return e.allRows(id, j, from, count)
 	}
 	A, B := clampCtx(above), clampCtx(below)
+	op := normOpen(open)
 	page := Page{JobID: id, From: from, Rows: []Row{}}
 	j.mu.Lock()
 	page.Progress = j.progressLocked()
@@ -221,15 +251,26 @@ func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
 		return page, nil
 	}
 	j.lastUse = time.Now()
-	lay := j.layoutLocked(A, B)
+	lay := j.layoutLocked(A, B, op)
 	hits := j.hits[:lay.nh:lay.nh]
 	ext := j.ext[:len(j.ext):len(j.ext)]
 	longs := j.longs[:len(j.longs):len(j.longs)]
+	cps, seen := j.cps[:len(j.cps):len(j.cps)], j.seen[:len(j.seen):len(j.seen)]
 	readPath, dataStart, size := j.readPath, j.dataStart, j.size
-	bm := j.marks[[2]int64{A, B}]
+	mk := markKey{A, B, op.key}
+	bm := j.marks[mk]
 	if bm == nil {
-		bm = &byteMarks{version: j.version, rows: []int{0}, bytes: []int64{0}, capRow: -1}
-		j.marks[[2]int64{A, B}] = bm
+		bm = &byteMarks{version: j.version, rows: []int{0}, bytes: []int64{0}, capRow: -1, open: op.spans}
+		bm.parent, bm.keepTo = j.pickParent(A, B, op, lay)
+		if len(j.marks) >= 64 {
+			// one per open set ever asked for: forget the others
+			for k := range j.marks {
+				if j.marks[k] != bm.parent {
+					delete(j.marks, k)
+				}
+			}
+		}
+		j.marks[mk] = bm
 	}
 	version := j.version
 	changeLine := int64(-1)
@@ -241,11 +282,14 @@ func (e *Engine) Rows(id string, above, below, from, count int) (Page, error) {
 
 	j.content.RLock()
 	defer j.content.RUnlock()
-	rd := &rowReader{j: j, lay: lay, hits: hits, ext: ext, longs: longs, path: readPath, dataStart: dataStart, size: size, maxText: e.opt.MaxLineDisplay}
+	rd := &rowReader{j: j, lay: lay, hits: hits, ext: ext, longs: longs, cps: cps, seen: seen, version: version, path: readPath, dataStart: dataStart, size: size, maxText: e.opt.MaxLineDisplay}
 	defer rd.close()
 
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
+	if bm.parent != nil {
+		bm.inherit()
+	}
 	if bm.version != version {
 		// Lines from the append's first changed line (minus the context above)
 		// may have changed rows; byte marks before them still hold.
@@ -328,6 +372,8 @@ type rowReader struct {
 	hits      []hit
 	ext       []uint64
 	longs     []longLine
+	cps, seen []linePos // known line starts (open runs far from any hit)
+	version   int
 	path      string
 	dataStart int64
 	size      int64
@@ -422,6 +468,14 @@ func (rd *rowReader) rows(from, to int, maxBytes int64) ([]Row, error) {
 			r++
 			continue
 		}
+		if iv.open {
+			if r == iv.rowStart+g {
+				out = append(out, Row{Fold: true, Skip: iv.hi - iv.lo + 1, From: iv.lo, Col: -1})
+				r++
+				continue
+			}
+			g++
+		}
 		x := iv.lo + int64(r-iv.rowStart-g)
 		if x > iv.hi {
 			idx++
@@ -478,14 +532,15 @@ func (rd *rowReader) readLines(out []Row, iv *interval, x, n int64) ([]Row, erro
 		return nil, err
 	}
 	hits := rd.hits
-	// The nearest hit at or above line x gives a known line start.
-	hk := sort.Search(iv.h1-iv.h0, func(i int) bool { return hits[iv.h0+i].line > x }) + iv.h0 - 1
-	var off int64
-	var skip int64
-	if hk >= iv.h0 {
-		off, skip = hits[hk].start, x-hits[hk].line
-	} else {
-		off, err = rd.backLines(hits[iv.h0].start, hits[iv.h0].line-x)
+	// The nearest known line start at or above line x (a hit, a region start,
+	// …), or the hit below it when that is much nearer (context above a hit:
+	// read backwards from it).
+	hk := sort.Search(len(hits), func(i int) bool { return hits[i].line > x }) - 1
+	at := rd.startNear(x, hk)
+	off, skip := at.off, x-at.line
+	if hn := hk + 1; hn < len(hits) && skip > 0 && (hits[hn].line-x)*4 < skip {
+		skip = 0
+		off, err = rd.backLines(hits[hn].start, hits[hn].line-x)
 		if err != nil {
 			return nil, err
 		}
@@ -496,14 +551,21 @@ func (rd *rowReader) readLines(out []Row, iv *interval, x, n int64) ([]Row, erro
 		rd.lr.seek(off)
 	}
 	lr := rd.lr
+	far := skip > 64
 	for ; skip > 0; skip-- {
 		if _, _, err := lr.next(0); err != nil {
 			return nil, err
 		}
 	}
+	if far {
+		rd.j.noteSeen(x, lr.pos(), rd.version) // the next page near here starts from it
+	}
 	hp := hk + 1
-	if hk >= iv.h0 && hits[hk].line == x {
+	if hk >= 0 && hits[hk].line == x {
 		hp = hk
+	}
+	if hp < iv.h0 {
+		hp = iv.h0
 	}
 	for i := int64(0); i < n; i++ {
 		ln := x + i
@@ -512,7 +574,7 @@ func (rd *rowReader) readLines(out []Row, iv *interval, x, n int64) ([]Row, erro
 		if err != nil {
 			return nil, err
 		}
-		row := Row{Line: ln, Text: text, TruncatedLine: cut, Col: -1}
+		row := Row{Line: ln, Text: text, TruncatedLine: cut, Col: -1, Open: iv.open}
 		if hp < iv.h1 && hits[hp].line == ln {
 			if hits[hp].start != start {
 				return nil, errInternal

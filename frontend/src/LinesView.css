@@ -444,3 +444,63 @@
 .mem-tabs .mem-n {
   text-align: right;
 }
+
+/* 「⋯ N줄 생략」 펼치기: the gap row's buttons, the 「▾ 접기」 row, opened lines.
+   Opened lines keep their log colours (tint) under a faint layer of their own
+   (background-image: on top of an inline tint colour) and a dotted mark, so
+   they read apart from hits and their context in a dark and a light scheme. */
+:root {
+  --lv-open-bg: rgba(97, 175, 239, 0.075);
+  --lv-open-mark: rgba(97, 175, 239, 0.55);
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .lines-view {
+    --lv-open-bg: rgba(38, 110, 190, 0.07);
+    --lv-open-mark: rgba(38, 110, 190, 0.6);
+  }
+}
+.lv-open-btns {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 2ch;
+  font-style: normal;
+}
+.lv-open-btn,
+.lv-fold-btn {
+  font: inherit;
+  font-size: 0.85em;
+  line-height: 1.25;
+  align-self: center;
+  padding: 0 6px;
+  color: #9da5b4;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid #3e4451;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.lv-open-btn:hover,
+.lv-fold-btn:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+.lv-fold {
+  background-image: linear-gradient(var(--lv-open-bg), var(--lv-open-bg));
+}
+.lv-fold .lv-mark,
+.lv-open .lv-mark {
+  border-left: 2px dotted var(--lv-open-mark);
+  width: 3px;
+}
+.lv-fold .lv-no {
+  cursor: default;
+  text-decoration: none;
+}
+.lv-fold-btn {
+  margin-left: 1ch;
+}
+.lv-open {
+  background-image: linear-gradient(var(--lv-open-bg), var(--lv-open-bg));
+}
+.lv-open .lv-text {
+  opacity: 0.9;
+}

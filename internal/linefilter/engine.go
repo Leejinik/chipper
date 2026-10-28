@@ -358,9 +358,10 @@ type job struct {
 	evClosed     bool
 	lastUse      time.Time
 	lastCheck    time.Time
-	marks        map[[2]int64]*byteMarks
+	marks        map[markKey]*byteMarks
 	lay          *layout
 	layA, layB   int64
+	layO         string // the layout's open stretches (openSet.key)
 	// mode "all" (all.go): the job's rules are Request.Exclude, so hits are the
 	// hidden lines. cps: the first line and offset of every published region
 	// (line starts, in order); seen: line starts learned while reading rows.
@@ -469,7 +470,7 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 	j := &job{
 		e: e, id: newID(), key: key, path: req.Path, reqEnc: req.Encoding, m: newMatcher(rules), ex: ex, issues: issues, exIssues: exIssues,
 		nRules: len(rules), started: time.Now(), state: st, fp: fp, phase: "scan", ruleHits: make([]int64, len(req.Rules)),
-		firstHit: -1, nlTmp: -1, marks: map[[2]int64]*byteMarks{}, views: map[string]bool{}, all: all,
+		firstHit: -1, nlTmp: -1, marks: map[markKey]*byteMarks{}, views: map[string]bool{}, all: all,
 	}
 	j.cond = sync.NewCond(&j.mu)
 	j.lastUse = time.Now()
@@ -1161,10 +1162,10 @@ func (j *job) runAppend(st fileState, fp fingerprint) {
 	}
 	kl := sort.Search(len(j.longs), func(i int) bool { return j.longs[i].line >= rp.line })
 	j.longs = append([]longLine(nil), j.longs[:kl]...)
-	if j.all {
-		j.cps = cutPos(j.cps, rp.line)
-		j.seen = cutPos(j.seen, rp.line)
-	}
+	// region starts and lines met while reading: 「📖 읽기」 rows, and the open
+	// runs of 「🏷 줄만」 (open.go)
+	j.cps = cutPos(j.cps, rp.line)
+	j.seen = cutPos(j.seen, rp.line)
 	kc := sort.Search(len(j.commits), func(i int) bool { return j.commits[i].tmpEnd > rp.tmp })
 	j.commits = append([]commit(nil), j.commits[:kc]...)
 	j.scannedLines, j.scannedOff, j.totalLines = rp.line-1, rp.tmp, 0

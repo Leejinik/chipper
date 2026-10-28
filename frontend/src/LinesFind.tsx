@@ -106,6 +106,7 @@ export interface LinesFindProps {
   job: string; // the view's FilterStart job ("" before it has one)
   above: number;
   below: number;
+  open?: number[]; // 「⋯ 생략」 stretches opened (FilterRows' last argument): opened lines are searched too
   count: number; // rows of the view now
   done: boolean; // the scan has ended
   version: number; // Progress.version (appends)
@@ -155,7 +156,7 @@ export default function LinesFind(p: LinesFindProps) {
 
   const rule: Pick<LogRule, "kind" | "pattern" | "caseSensitive"> = { kind: KIND_OF(word, regex), pattern: q, caseSensitive: cs };
   const check = q ? ruleCheck(rule) : { problem: "", reason: "" };
-  const key = `${p.job}\u0000${p.above}\u0000${p.below}\u0000${p.version}\u0000${rule.kind}\u0000${cs ? 1 : 0}\u0000${q}`;
+  const key = `${p.job}\u0000${p.above}\u0000${p.below}\u0000${(p.open ?? []).join(",")}\u0000${p.version}\u0000${rule.kind}\u0000${cs ? 1 : 0}\u0000${q}`;
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -169,7 +170,7 @@ export default function LinesFind(p: LinesFindProps) {
     const c = pr.current;
     if (!searching.current || !c.job) return;
     searching.current = false;
-    FilterFind(c.job, c.above, c.below, linefilter.Rule.createFrom({ kind: "text", pattern: "", caseSensitive: false })).catch(() => {});
+    FilterFind(c.job, c.above, c.below, linefilter.Rule.createFrom({ kind: "text", pattern: "", caseSensitive: false }), c.open ?? []).catch(() => {});
   };
   useEffect(() => stopFind, []);
 
@@ -192,7 +193,7 @@ export default function LinesFind(p: LinesFindProps) {
     setBusy(true);
     const t = window.setTimeout(() => {
       searching.current = true;
-      FilterFind(p.job, p.above, p.below, linefilter.Rule.createFrom({ kind: rule.kind, pattern: q, caseSensitive: cs }))
+      FilterFind(p.job, p.above, p.below, linefilter.Rule.createFrom({ kind: rule.kind, pattern: q, caseSensitive: cs }), p.open ?? [])
         .then((r) => {
           if (alive && !r.partial) searching.current = false;
           if (!alive || r.canceled) return;
@@ -293,7 +294,7 @@ export default function LinesFind(p: LinesFindProps) {
 
   return (
     <div className="lv-find" onKeyDown={onKey} role="search" aria-label="줄만 보기 안에서 찾기">
-      <span className="lv-find-title" title="걸러진 결과 전체(화면에 안 보이는 행 포함)에서 찾습니다. 「⋯ 생략」 줄 안은 찾지 않습니다">
+      <span className="lv-find-title" title="걸러진 결과 전체(화면에 안 보이는 행 포함)에서 찾습니다. 펼친 줄도 찾고, 「⋯ 생략」 줄 안(펼치지 않은 줄)은 찾지 않습니다">
         🔍
       </span>
       <input

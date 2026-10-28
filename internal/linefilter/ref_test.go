@@ -208,6 +208,7 @@ func refText(raw string, maxDisplay int) (string, bool) {
 type refOpts struct {
 	above, below, maxRows, maxDisplay int
 	exclude                           []Rule                 // Request.Exclude: a matched line one of these matches is not a hit
+	open                              []int64                // RowsOpen's open stretches [lo, hi, …] (open.go)
 	giantCol                          func(lineLen int) bool // col unknown (-1) allowed for this line
 }
 
@@ -258,11 +259,18 @@ func refFilter(text string, rules []Rule, o refOpts) ([]Row, bool) {
 			}
 		}
 	}
+	opened := make([]bool, len(lines))
+	for i := 0; i+1 < len(o.open); i += 2 {
+		for L := max(o.open[i], 1); L <= o.open[i+1] && L <= int64(len(lines)); L++ {
+			opened[L-1] = true
+		}
+	}
+	openOnly := func(li int) bool { return !show[li] && opened[li] }
 	var rows []Row
 	lineRows := 0
 	gap := int64(0)
 	for li, ln := range lines {
-		if !show[li] {
+		if !show[li] && !opened[li] {
 			gap++
 			continue
 		}
@@ -273,8 +281,17 @@ func refFilter(text string, rules []Rule, o refOpts) ([]Row, bool) {
 			rows = append(rows, Row{Skip: gap, From: int64(li) - gap + 1, Col: -1})
 			gap = 0
 		}
+		if openOnly(li) && (li == 0 || !openOnly(li-1)) {
+			// 「▾ 접기」 above a run of opened lines: its length (as far as it fits)
+			n := 0
+			for k := li; k < len(lines) && openOnly(k); k++ {
+				n++
+			}
+			n = min(n, o.maxRows-lineRows)
+			rows = append(rows, Row{Fold: true, Skip: int64(n), From: int64(li + 1), Col: -1})
+		}
 		t, cut := refText(ln, o.maxDisplay)
-		row := Row{Line: int64(li + 1), Text: t, Hit: hitRules[li] != nil, Rules: hitRules[li], TruncatedLine: cut, Col: -1}
+		row := Row{Line: int64(li + 1), Text: t, Hit: hitRules[li] != nil, Rules: hitRules[li], TruncatedLine: cut, Col: -1, Open: openOnly(li)}
 		if row.Hit {
 			row.Col = cols[li]
 		}

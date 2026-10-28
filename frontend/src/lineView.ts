@@ -24,6 +24,7 @@ export interface LinesState {
   below: number; // … after it (grep -A)
   off: string[]; // applied tags left out of the filter (e.g. "common")
   ex: ExcludeRule[]; // 「🚫 제외」 chips (this tab only, not the tags) — in 「📖 읽기」 they hide lines
+  open?: OpenSpan[]; // 「⋯ 생략」 stretches opened in 「🏷 줄만」 (file lines: they hold across chips / tags)
 }
 export const DEFAULT_LINES: LinesState = { on: false, read: false, big: false, above: 0, below: 3, off: [], ex: [] };
 
@@ -116,7 +117,102 @@ export function normalizeLines(raw: any): LinesState | null {
     below: clampContext(raw.below ?? DEFAULT_LINES.below),
     off: Array.isArray(raw.off) ? raw.off.filter((x: unknown): x is string => typeof x === "string").slice(0, 100) : [],
     ex: normalizeExclude(raw.ex), // a session from before 「제외」: none
+    ...openField(raw.open), // a session from before 펼치기 (or nothing opened): no field
   };
+}
+
+// (no field when nothing is opened: a tab state reads as before)
+function openField(raw: unknown): { open?: OpenSpan[] } {
+  const open = normalizeOpen(raw);
+  return open.length ? { open } : {};
+}
+// --- 「⋯ N줄 생략」 펼치기 ----------------------------------------------------------
+//
+// A gap row's buttons open lines of it — [▲ 위로 20줄] from its top, [▼ 아래로
+// 20줄] from its bottom, [전부 펼치기] — and the engine lays the opened lines
+// out with the hit blocks (FilterRows' last argument; nothing is scanned
+// again). The view keeps them as file line stretches [lo, hi, group]: the
+// pieces opened from one gap share a group, and 「▾ 접기」 folds the whole group
+// (the ▲ and the ▼ piece at once). Being file lines, they hold when chips or
+// tags change; where hits now show those lines, the hit rows win.
+
+export type OpenSpan = [number, number, number]; // first line, last line (inclusive), group
+export const OPEN_STEP = 20; // lines one ▲ / ▼ opens
+export const OPEN_ALL_MAX = 2_000; // a double-click opens a gap this big whole (bigger: OPEN_STEP each end)
+export const MAX_OPEN = 2_000; // stretches kept per tab (the engine takes 10,000)
+
+const okLine = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 1;
+
+// Sorted, the pieces of one group that overlap or touch merged.
+export function normalizeOpen(raw: unknown): OpenSpan[] {
+  if (!Array.isArray(raw)) return [];
+  const xs: OpenSpan[] = [];
+  for (const x of raw) {
+    if (!Array.isArray(x) || !okLine(x[0]) || !okLine(x[1]) || x[1] < x[0]) continue;
+    const g = typeof x[2] === "number" && Number.isSafeInteger(x[2]) && x[2] >= 0 ? x[2] : 0;
+    xs.push([x[0], x[1], g]);
+  }
+  xs.sort((a, b) => a[2] - b[2] || a[0] - b[0] || a[1] - b[1]);
+  const out: OpenSpan[] = [];
+  for (const x of xs) {
+    const last = out[out.length - 1];
+    if (last && last[2] === x[2] && last[1] >= x[0] - 1) {
+      last[1] = Math.max(last[1], x[1]);
+      continue;
+    }
+    out.push(x);
+  }
+  out.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  return out.length > MAX_OPEN ? out.slice(out.length - MAX_OPEN) : out;
+}
+
+// What the engine gets: [lo0, hi0, lo1, hi1, …] (it merges what overlaps).
+export function openFlat(list: OpenSpan[] | undefined): number[] {
+  const out: number[] = [];
+  for (const [lo, hi] of list ?? []) out.push(lo, hi);
+  return out;
+}
+export const openKey = (list: OpenSpan[] | undefined): string => openFlat(list).join(",");
+
+export type OpenHow = "up" | "down" | "all" | "auto";
+
+// Open lines of the gap row standing for lines from … from+skip-1. "auto" (a
+// double-click, →, +): the whole gap up to OPEN_ALL_MAX lines, else OPEN_STEP
+// from each end. A piece next to one opened from this gap before joins its group.
+export function openGap(list: OpenSpan[] | undefined, from: number, skip: number, how: OpenHow): OpenSpan[] {
+  const cur = list ?? [];
+  if (!okLine(from) || !(skip >= 1)) return cur;
+  const end = from + skip - 1;
+  const near = cur.find((x) => x[1] === from - 1 || x[0] === end + 1);
+  const g = near ? near[2] : cur.reduce((m, x) => Math.max(m, x[2] + 1), 0);
+  const add: OpenSpan[] = [];
+  const up = (): OpenSpan => [from, Math.min(end, from + OPEN_STEP - 1), g];
+  const down = (): OpenSpan => [Math.max(from, end - OPEN_STEP + 1), end, g];
+  if (how === "up") add.push(up());
+  else if (how === "down") add.push(down());
+  else if (how === "all" || skip <= OPEN_ALL_MAX) add.push([from, end, g]);
+  else add.push(up(), down());
+  return normalizeOpen([...cur, ...add]);
+}
+
+// The groups a line range touches (an open run's fold row, an opened line).
+export function groupsAt(list: OpenSpan[] | undefined, lo: number, hi: number): Set<number> {
+  const gs = new Set<number>();
+  for (const x of list ?? []) if (x[0] <= hi && x[1] >= lo) gs.add(x[2]);
+  return gs;
+}
+// The groups opened from the gap from … from+skip-1 (pieces next to it).
+export function groupsBeside(list: OpenSpan[] | undefined, from: number, skip: number): Set<number> {
+  const gs = new Set<number>();
+  for (const x of list ?? []) if (x[1] === from - 1 || x[0] === from + skip) gs.add(x[2]);
+  return gs;
+}
+export const foldGroups = (list: OpenSpan[] | undefined, gs: Set<number>): OpenSpan[] => (list ?? []).filter((x) => !gs.has(x[2]));
+// The first line of those groups (where the rows can start to change).
+export function groupsStart(list: OpenSpan[] | undefined, gs: Set<number>): number {
+  let lo = Infinity;
+  for (const x of list ?? []) if (gs.has(x[2]) && x[0] < lo) lo = x[0];
+  return lo;
 }
 
 // --- which rules filter ----------------------------------------------------------
@@ -156,8 +252,10 @@ export interface FRow {
   rules?: number[];
   col: number;
   truncatedLine?: boolean;
-  skip?: number; // gap rows: lines left out
-  from?: number; // gap rows: first line left out
+  skip?: number; // gap rows: lines left out; fold rows: lines of the opened run below
+  from?: number; // gap rows: first line left out; fold rows: the run's first line
+  fold?: boolean; // 「▾ 접기」 row above opened lines (line 0)
+  open?: boolean; // a line shown only because it was opened (펼치기)
 }
 
 // The rows fetched so far, in pages of `size` rows. A page holds a prefix of
@@ -263,14 +361,29 @@ export function gapText(r: FRow): string {
 export function gapTitle(r: FRow): string {
   const a = r.from ?? 0;
   const b = a + (r.skip ?? 0) - 1;
-  return a === b ? `줄 ${fmtN(a)} 생략` : `줄 ${fmtN(a)}–${fmtN(b)} 생략 (두 번 누르면 전체 보기로 그 자리)`;
+  const how =
+    (r.skip ?? 0) <= OPEN_ALL_MAX
+      ? "두 번 누르기·→·+ = 전부 펼치기"
+      : `두 번 누르기·→·+ = 위·아래 ${OPEN_STEP}줄씩 펼치기`;
+  // (one line: the bare range, as before — its double-click opens it)
+  return a === b ? `줄 ${fmtN(a)} 생략` : `줄 ${fmtN(a)}–${fmtN(b)} 생략\n${how} · ←·- = 여기서 펼친 것 접기 · Enter = 전체 보기로 그 자리`;
+}
+// 「▾ 접기」 row
+export const foldText = (r: FRow) => `▾ 접기 · 펼친 ${fmtN(r.skip ?? 0)}줄`;
+export function foldTitle(r: FRow): string {
+  const a = r.from ?? 0;
+  const b = a + (r.skip ?? 0) - 1;
+  return `줄 ${fmtN(a)}–${fmtN(b)} 은 펼친 줄입니다 (걸린 줄·위아래 줄이 아님)\n누르기·두 번 누르기·←·- = 다시 「⋯ 생략」으로 (같은 생략 줄에서 펼친 것 모두)`;
 }
 // The line a row stands for when jumping to the whole file.
 export const rowLine = (r: FRow) => (r.line > 0 ? r.line : r.from ?? 1);
 
-// Rows as copied text.
+// Rows as copied text (a 「▾ 접기」 row is the view's, not the file's: left out).
 export function rowsText(rows: FRow[]): string {
-  return rows.map((r) => (r.line > 0 ? r.text : gapText(r))).join("\n");
+  return rows
+    .filter((r) => !r.fold)
+    .map((r) => (r.line > 0 ? r.text : gapText(r)))
+    .join("\n");
 }
 
 // --- colouring -------------------------------------------------------------------------------

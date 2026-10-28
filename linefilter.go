@@ -32,6 +32,14 @@ import (
 //     file's size and modification time is not noticed (see the
 //     linefilter.Progress doc).
 //  5. FilterCancel stops a scan (for this view); FilterClose frees the view.
+//  6. 「⋯ N줄 생략」 펼치기: the last argument of FilterRows / FilterRowOfLine /
+//     FilterFind lists stretches of left-out lines the view opened, [lo0, hi0,
+//     lo1, hi1, …] (file lines, inclusive; [] = none). They are laid out like
+//     a context change (rows from 0 again, the file is not rescanned); an open
+//     run comes as a fold row (fold) and its lines (open) — see
+//     internal/linefilter/open.go. After an append, a fold row above the
+//     dropped rows can have grown (its run reached the old end): drop from the
+//     run's fold row too.
 
 // FilterProgressEvent is emitted with a linefilter.Progress payload: on the
 // first results, about every 100ms while scanning, and when a scan ends.
@@ -78,8 +86,8 @@ func (a *App) FilterStart(req linefilter.Request) (linefilter.StartResult, error
 
 // FilterRows returns rows [from, from+count) of a job's filtered view with
 // `above` lines before and `below` lines after each matched line.
-func (a *App) FilterRows(jobID string, above, below, from, count int) (linefilter.Page, error) {
-	return a.filters().Rows(jobID, above, below, from, count)
+func (a *App) FilterRows(jobID string, above, below, from, count int, open []int64) (linefilter.Page, error) {
+	return a.filters().RowsOpen(jobID, above, below, open, from, count)
 }
 
 // FilterStatus returns a job's progress (for a frontend that missed events).
@@ -98,14 +106,14 @@ func (a *App) FilterClose(jobID string) { a.filters().Close(jobID) }
 // file line `line`, or the first row after it — to keep the same place of the
 // file when the context sizes change, and to know which rows to fetch again
 // after lines were appended (progress.version went up).
-func (a *App) FilterRowOfLine(jobID string, above, below int, line int64) (int, error) {
-	return a.filters().RowOfLine(jobID, above, below, line)
+func (a *App) FilterRowOfLine(jobID string, above, below int, line int64, open []int64) (int, error) {
+	return a.filters().RowOfLineOpen(jobID, above, below, open, line)
 }
 
 // FilterFind lists the rows of a job's filtered view (with these above/below)
 // whose text matches query (a LogRule's kind, pattern, caseSensitive) — 「찾기」
 // in the 「태그 줄만」 view, over the whole result, not only the rows on screen.
 // A newer FilterFind on the same view stops the older one (canceled).
-func (a *App) FilterFind(jobID string, above, below int, query linefilter.Rule) (linefilter.FindResult, error) {
-	return a.filters().Find(jobID, above, below, query)
+func (a *App) FilterFind(jobID string, above, below int, query linefilter.Rule, open []int64) (linefilter.FindResult, error) {
+	return a.filters().FindOpen(jobID, above, below, open, query)
 }

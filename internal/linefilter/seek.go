@@ -8,6 +8,12 @@ package linefilter
 // can be ≥ the rows available so far (the line lies beyond what is known yet);
 // rows cut by MaxBytes are not taken into account (the caller clamps).
 func (e *Engine) RowOfLine(id string, above, below int, line int64) (int, error) {
+	return e.RowOfLineOpen(id, above, below, nil, line)
+}
+
+// RowOfLineOpen is RowOfLine for a view with open stretches (open.go). A line
+// of an open run is its own row (not the fold row above it).
+func (e *Engine) RowOfLineOpen(id string, above, below int, open []int64, line int64) (int, error) {
 	v, err := e.view(id)
 	if err != nil {
 		return 0, err
@@ -21,6 +27,6 @@ func (e *Engine) RowOfLine(id string, above, below int, line int64) (int, error)
 	if line < 1 {
 		line = 1
 	}
-	lay := j.layoutLocked(clampCtx(above), clampCtx(below))
+	lay := j.layoutLocked(clampCtx(above), clampCtx(below), normOpen(open))
 	return lay.rowAtLine(line), nil
 }

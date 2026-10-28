@@ -97,6 +97,8 @@ export namespace linefilter {
 	    truncatedLine?: boolean;
 	    skip?: number;
 	    from?: number;
+	    fold?: boolean;
+	    open?: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new Row(source);
@@ -112,6 +114,8 @@ export namespace linefilter {
 	        this.truncatedLine = source["truncatedLine"];
 	        this.skip = source["skip"];
 	        this.from = source["from"];
+	        this.fold = source["fold"];
+	        this.open = source["open"];
 	    }
 	}
 	export class Page {

@@ -335,9 +335,9 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 				j.excluded += r.excluded
 			}
 		}
-		if j.all {
-			j.notePosLocked(base, reg.start)
-		}
+		// where each region starts: 「📖 읽기」 rows, and the open runs of
+		// 「🏷 줄만」 read far from any hit (open.go) — one entry per ~2MB
+		j.notePosLocked(base, reg.start)
 		if trunc {
 			j.truncated = true
 			if lastLine >= 0 {

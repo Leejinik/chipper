@@ -35,6 +35,12 @@ var findSeq atomic.Int64
 // whose text matches q (kind, pattern, caseSensitive of a LogRule). A newer
 // Find on the same view stops this one (Canceled).
 func (e *Engine) Find(id string, above, below int, q Rule) (FindResult, error) {
+	return e.FindOpen(id, above, below, nil, q)
+}
+
+// FindOpen is Find over the rows of a view with open stretches (open.go): the
+// opened lines are rows of the view, so they are searched too.
+func (e *Engine) FindOpen(id string, above, below int, open []int64, q Rule) (FindResult, error) {
 	v, err := e.view(id)
 	if err != nil {
 		return FindResult{}, err
@@ -84,17 +90,19 @@ func (e *Engine) Find(id string, above, below int, q Rule) (FindResult, error) {
 		return out, nil
 	}
 	j.lastUse = time.Now()
-	lay := j.layoutLocked(A, B)
+	lay := j.layoutLocked(A, B, normOpen(open))
 	hits := j.hits[:lay.nh:lay.nh]
 	ext := j.ext[:len(j.ext):len(j.ext)]
 	longs := j.longs[:len(j.longs):len(j.longs)]
+	cps, seen := j.cps[:len(j.cps):len(j.cps)], j.seen[:len(j.seen):len(j.seen)]
 	readPath, dataStart, size := j.readPath, j.dataStart, j.size
+	version := j.version
 	j.mu.Unlock()
 	out.Partial = lay.total < 0
 
 	j.content.RLock()
 	defer j.content.RUnlock()
-	rd := &rowReader{j: j, lay: lay, hits: hits, ext: ext, longs: longs, path: readPath, dataStart: dataStart, size: size, maxText: e.opt.MaxLineDisplay}
+	rd := &rowReader{j: j, lay: lay, hits: hits, ext: ext, longs: longs, cps: cps, seen: seen, version: version, path: readPath, dataStart: dataStart, size: size, maxText: e.opt.MaxLineDisplay}
 	defer rd.close()
 
 	const batch = 2000
@@ -123,7 +131,7 @@ func (e *Engine) Find(id string, above, below int, q Rule) (FindResult, error) {
 				out.Partial = false
 				return out, nil
 			}
-			if r.Line == 0 || !match(r.Text) {
+			if r.Line == 0 || !match(r.Text) { // gap and fold rows: nothing to find
 				continue
 			}
 			out.Total++
