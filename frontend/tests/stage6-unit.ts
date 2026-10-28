@@ -261,7 +261,7 @@ const v1Store = (rules: LogRule[], extra: Partial<TagStore> = {}): TagStore => (
   noteRuleTrouble(ruleKey(r), "filter");
   ok("두 가지 다", eq(ruleTrouble(ruleKey(r)), ["editor", "filter"]));
   ok("패턴이 바뀌면 다른 규칙", ruleTrouble(ruleKey({ ...r, pattern: r.pattern + "x" })).length === 0);
-  ok("문구", /꺼졌습니다/.test(troubleText(["editor"])) && /느린 방식/.test(troubleText(["filter"])) && troubleText([]) === "");
+  ok("문구", /끈 적이 있습니다/.test(troubleText(["editor"])) && /느린 방식/.test(troubleText(["filter"])) && troubleText([]) === "");
   noteSlowFilterRules([r], [5, -1]);
   ok("없는 번호는 무시", true);
 }

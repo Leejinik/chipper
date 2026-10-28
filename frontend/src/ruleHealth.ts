@@ -3,8 +3,8 @@
 //
 // Two kinds of trouble, both known only once the rule has run on real text:
 //  - "editor": the editor's colouring gave up on the rule (more than 60ms in one
-//    pass, logHighlight.ts RULE_BUDGET_MS) and switched it off until restart —
-//    those matches are NOT coloured;
+//    pass, logHighlight.ts RULE_BUDGET_MS) and switched it off for that rule set
+//    (until the tags change or the app restarts) — those matches were NOT coloured;
 //  - "filter": the Go line filter had to fall back to its slow matcher for the
 //    rule (its DFA grew too big, Progress.slowRules) — same result, slower.
 // Keyed by what the rule matches (logHighlight.ruleKey: kind, case, pattern),
@@ -49,7 +49,7 @@ export function clearRuleTrouble(): void {
 export function troubleText(kinds: RuleTrouble[]): string {
   const out: string[] = [];
   if (kinds.includes("editor"))
-    out.push("편집기 색칠이 너무 느려 이번 실행 동안 꺼졌습니다 — 이 규칙의 색이 안 보입니다. 규칙을 단순하게 고치거나 앱을 다시 켜면 다시 시도합니다");
+    out.push("이번 실행에서 편집기 색칠이 너무 느려 이 규칙을 끈 적이 있습니다 — 그 화면에서는 이 규칙의 색이 빠졌습니다. 규칙을 단순하게 고치세요");
   if (kinds.includes("filter"))
     out.push("줄만 보기에서 느린 방식으로 걸렀습니다 (결과는 같음) — 정규식을 단순하게 하면 빨라집니다");
   return out.join(" / ");
