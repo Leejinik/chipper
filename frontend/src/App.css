@@ -928,6 +928,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden; /* what does not fit stays inside: never over the foot */
 }
 .mpane-body .empty {
   padding: 12px;

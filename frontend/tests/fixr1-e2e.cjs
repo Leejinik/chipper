@@ -779,13 +779,13 @@ async function main() {
       const { ctx, page } = await openSess(be);
       await page.waitForSelector('.lines-view[data-mode="all"]');
       const GB = 1 << 30;
-      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.0 * GB, limit: 4.1 * GB }), GB);
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.4 * GB, limit: 4.1 * GB }), GB);
       await page.click(".tabs-scroll .tab:nth-child(1)"); // re-render
       const w = await until(async () => {
         const x = await page.$eval(".lv-edit", (b) => [b.disabled, b.title]);
         return x[0] && x;
       }, 5000);
-      ok("힙 3.0GB / 4.1GB + 99MB → ✏️ 꺼짐 + 「화면 메모리」 이유", !!w && w[1].includes("화면 메모리"), w || (await page.$eval(".lv-edit", (b) => [b.disabled, b.title])));
+      ok("힙 3.4GB / 4.1GB(80% 넘음) → ✏️ 꺼짐 + 「화면 메모리」 이유", !!w && w[1].includes("화면 메모리"), w || (await page.$eval(".lv-edit", (b) => [b.disabled, b.title])));
       await page.evaluate(() => window.__chipperTest.requestEdit(document.querySelector(".lines-host").dataset.tab));
       await sleep(300);
       ok("눌러도 확인 창 없음", (await page.$(".choice-ask")) === null && calls(be, "EditOpenBegin").length === 0);
@@ -793,7 +793,7 @@ async function main() {
       const back = await until(async () => !(await page.$eval(".lv-edit", (b) => b.disabled)), 6000);
       ok("힙이 풀리면(1.0GB) 손대지 않아도 몇 초 안에 ✏️ 다시 켜짐", back === true);
       // a big plain file opened while the heap is full: the question offers 📖
-      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.0 * GB, limit: 4.1 * GB }), GB);
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.4 * GB, limit: 4.1 * GB }), GB);
       be.st.openFiles = [P("b.log")];
       await page.keyboard.press("Control+o");
       await page.waitForSelector(".big-ask", { timeout: 5000 }).catch(() => {});
@@ -803,6 +803,88 @@ async function main() {
       await sleep(400);
       ok("… 📖 로 열림(편집기로 안 읽음)", calls(be, "ReadFile").length === 0 && calls(be, "EditOpenBegin").length === 0);
       await ctx.close();
+    }
+    // =============== K. 6칸에서 칸 머리(칩 여러 줄·찾기 칸)가 길어도 칸 아래 단추 줄이 보이고 눌림 =========
+    if (want("K")) {
+      console.log("K. 6칸 · 칸 머리가 길어도(제외 칩 여러 줄·찾기 칸) 칸 아래 단추 줄을 목록이 덮지 않음 — 창 작게/크게");
+      const exs = ["java.lang.Object@", "port(502)", "Interface Converter", "ALL POINTS MISSED!!!", "uncollected :", "connection timed out", "POINTS", "LAST_DAY(", "checkpoint", "failed to connect"].map((pattern, k) => ({ pattern, kind: "text", caseSensitive: false, on: k % 3 !== 1 }));
+      for (const vp of [{ width: 1100, height: 560 }, { width: 1400, height: 900 }]) {
+        const be = makeBackend();
+        const names = ["a.log", "b.log", "c.log", "d.log", "e.log", "f.log"];
+        for (const n of names) be.st.sizes[P(n)] = 300 * MB;
+        const ts = names.map((n, k) => tab("t" + k, P(n), { lines: LN({ read: k % 2 === 0, ex: exs }) }));
+        be.st.session = session(ts, "t0", { multi: { on: true, count: 6, slots: ts.map((t) => ({ tabId: t.id, mode: "read", server: "" })), bundle: null } });
+        const { ctx, page } = await openSess(be, vp);
+        await until(async () => (await page.$$(".lines-view")).length === 6, 10000);
+        // the find bar open in every pane too
+        for (let i = 0; i < 6; i++) {
+          await page.click(`.mpane[data-slot="${i}"] .lv-scroll`, { position: { x: 5, y: 5 }, force: true }).catch(() => {});
+          await page.keyboard.press("Control+f");
+        }
+        await sleep(400);
+        const hit = await page.$$eval(".mpane", (ps) =>
+          ps.map((pn) => {
+            const foot = pn.querySelector(".mpane-foot");
+            const out = [];
+            for (const sel of [".lines-seg button:nth-child(2)", ".mp-pick", ".mp-modes button"]) {
+              const b = foot.querySelector(sel);
+              if (!b) {
+                out.push(sel + ":없음");
+                continue;
+              }
+              const r = b.getBoundingClientRect();
+              const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+              if (!e || !foot.contains(e)) out.push(sel + ":" + (e ? e.className : "null"));
+            }
+            return out;
+          })
+        );
+        ok(`6칸 ${vp.width}×${vp.height}: 칸 아래 단추(🏷·탭 고르기·칸 모드)를 누르면 그 단추가 받음`, hit.every((x) => x.length === 0), hit);
+        const rowsOver = await page.$$eval(".mpane", (ps) =>
+          ps.map((pn) => {
+            const f = pn.querySelector(".mpane-foot").getBoundingClientRect();
+            const sc = pn.querySelector(".lv-scroll");
+            return sc ? Math.round(sc.getBoundingClientRect().bottom - f.top) : -999;
+          })
+        );
+        ok(`6칸 ${vp.width}×${vp.height}: 목록이 단추 줄 위로 넘지 않음`, rowsOver.every((d) => d <= 1), rowsOver);
+        await ctx.close();
+      }
+    }
+    // =============== L. 제외 칩 바꾼 직후(다시 훑는 중·보던 자리로 돌아가는 중) End·Home 이 이김 (부하 시험 재현 1) ======
+    if (want("L")) {
+      console.log("L. 칩을 누른 직후 End → 끝으로 가서 훑기가 끝날 때까지 끝을 따라감 · Home 도 사용자 것이 이김");
+      const big = [];
+      for (let i = 1; i <= 400000; i++) big.push(`2026-10-29 01:00:00 INFO ${i % 3 === 0 ? "noise " : ""}line ${i} ${"x".repeat(40)}`);
+      fs.writeFileSync(P("big.log"), big.join("\n"));
+      const lastLine = 400000;
+      for (const key of ["End", "Home"]) {
+        const be = makeBackend();
+        be.st.sizes[P("big.log")] = 150 * MB;
+        be.st.session = session([Rt("t1", P("big.log"), { lines: LN({ ex: [{ pattern: "noise", kind: "text", caseSensitive: false, on: false }] }) })], "t1");
+        const { ctx, page } = await openSess(be);
+        await page.waitForSelector('.lines-view[data-mode="all"]');
+        await waitDone(page);
+        // about 30% down
+        await page.$eval(".lv-scroll", (e) => (e.scrollTop = e.scrollHeight * 0.3));
+        await sleep(500);
+        // the way back to the place comes late (a busy engine)
+        be.delay.FilterRowOfLine = 1500;
+        await page.click('.lv-chip[data-ex="0"] .lv-chip-t');
+        await sleep(60);
+        await page.focus(".lv-scroll");
+        await page.keyboard.press(key);
+        await sleep(2500);
+        await waitDone(page);
+        await sleep(500);
+        const vd = await viewData(page);
+        const lines = await page.$$eval(".lv-row[data-line]", (els) => els.map((e) => +e.dataset.line));
+        const sel = await page.$eval(".lv-row.sel", (e) => +e.dataset.line).catch(() => 0);
+        if (key === "End") ok(`칩 직후 End → 끝(마지막 줄 ${lastLine} 보임·선택)`, lines.includes(lastLine) && sel === lastLine, { last: Math.max(...lines), sel, count: vd.count });
+        else ok("칩 직후 Home → 맨 앞(1번째 줄 보임·선택)", lines.includes(1) && sel === 1, { first: Math.min(...lines), sel, vd, rows: (await page.$$eval(".lv-row", (els) => els.slice(0, 3).map((e) => e.className + "|" + e.dataset.row + "|" + e.textContent.slice(0, 30)))), top: await page.$eval(".lv-scroll", (e) => e.scrollTop) });
+        be.delay.FilterRowOfLine = 0;
+        await ctx.close();
+      }
     }
   } finally {
     await browser.close();

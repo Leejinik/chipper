@@ -74,8 +74,9 @@ ok("wait tiny ≥ 1초", wholeWaitText(1000).includes("약 1초"));
   ok("힙 값 없음(null) → 막지 않음(예산만)", heapWhyOf(null, 99 * MB, f) === "");
   ok("힙 한계 0·NaN → 막지 않음", heapWhyOf({ used: 1, limit: 0 }, 99 * MB, f) === "" && heapWhyOf({ used: 1, limit: NaN }, 99 * MB, f) === "");
   ok("힙 1.0/4.1GB + 99MB → 됨", heapWhyOf({ used: 1 * GB, limit: 4.1 * GB }, 99 * MB, f) === "");
-  const w = heapWhyOf({ used: 3.0 * GB, limit: 4.1 * GB }, 99 * MB, f);
-  ok("힙 3.0/4.1GB + 99MB → 막힘 + 「화면 메모리」", w.includes("화면 메모리"), w);
+  ok("힙 3.2/4.1GB(80% 아래) → 됨", heapWhyOf({ used: 3.2 * GB, limit: 4.1 * GB }, 99 * MB, f) === "");
+  const w = heapWhyOf({ used: 3.4 * GB, limit: 4.1 * GB }, 99 * MB, f);
+  ok("힙 3.4/4.1GB(80% 넘음) → 막힘 + 「화면 메모리」", w.includes("화면 메모리"), w);
   // node has performance but no performance.memory: like WKWebView / WebKitGTK
   ok("performance.memory 없음 → jsHeap() null", jsHeap() === null);
   ok("🧠 수준: 값 없음(0) → 표시 그대로", memLevel(0) === "");

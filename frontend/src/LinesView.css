@@ -4,10 +4,17 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  /* never painted past its pane: the pane's foot ([📖|🏷|✏️], tags, 탭 고르기)
+     stays visible and takes its clicks (.18 부하 시험 10-29 — rows over the foot) */
+  overflow: hidden;
   background: #282c34; /* the editor's (one dark) background */
 }
 .lv-head {
-  flex: none;
+  /* a short pane: the head (buttons, tag checks) gives way — scrolling inside —
+     before the rows do, like the chips and notes below it */
+  flex: 0 1 auto;
+  min-height: 20px;
+  overflow-y: auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -85,7 +92,7 @@
   /* in a short pane (6 panes, a bar dragged) the chips and notes give way —
      scrolling inside — before the rows do (.lv-scroll keeps some rows) */
   flex: 0 1 auto;
-  min-height: 22px;
+  min-height: 20px;
   overflow-y: auto;
   display: flex;
   flex-wrap: wrap;
@@ -206,7 +213,7 @@
   /* basis 0: the rows' height (millions of px) must not make the chips and
      notes above shrink when there is room for them */
   flex: 1 1 0;
-  min-height: 88px;
+  min-height: 80px;
   overflow: auto;
   position: relative;
   outline: none;

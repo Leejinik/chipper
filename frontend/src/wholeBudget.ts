@@ -76,14 +76,17 @@ export function editAskText(size: number, held: number, fmt: (n: number) => stri
 
 // The window's JS memory has a hard ceiling (~4GB, then 「Out of Memory」). Text
 // let go (✏️ → 📖, a closed tab) leaves the budget at once but the memory only
-// when the engine collects it: with 99MB×7 held (693MB, heap 2.7GB) 📖 ↔ ✏️
-// killed the window on the 4th round (.18 10-29). So reading a file in also
-// waits for room in the heap itself: used + the file × HEAP_PER_BYTE ≤ HEAP_MAX
-// of the limit. heap null (no performance.memory: macOS WKWebView, Linux
-// WebKitGTK) = only the budget counts.
-export const HEAP_PER_BYTE = 4; // .18 10-29: 7 × 99MB held = 2.7GB
+// when the engine collects it, and it collects late: on the test PC (.18 10-29)
+// with 99MB×7 held and three 300MB 📖 panes in use the heap went 2.3 → 3.8GB in
+// four ✏️ ↔ 📖 rounds without a collection and the fifth read killed the window
+// (with the pieces kept unjoined it collected at 3.7GB in a lighter run). So no
+// new read into the editor while the heap is over HEAP_MAX of its limit (≈3.3GB);
+// what is already open stays. Letting text go does not bring the heap down (.18:
+// 60s idle, a tab to 📖, two tabs closed — 3.43GB all along); only reopening the
+// app does, and the message says so. heap null (no performance.memory: macOS WKWebView,
+// Linux WebKitGTK) = only the budget counts.
 export const HEAP_MAX = 0.8;
 export function heapWhyOf(heap: { used: number; limit: number } | null, size: number, fmt: (n: number) => string): string {
-  if (!heap || !(heap.limit > 0) || size <= 0 || heap.used + size * HEAP_PER_BYTE <= heap.limit * HEAP_MAX) return "";
-  return `화면 메모리가 ${fmt(heap.used)} / 약 ${fmt(heap.limit)} 이라 ${fmt(size)} 를 더 읽어 들이면 창이 죽을 수 있습니다 — 내려놓은 글자가 풀릴 때까지 잠시 기다리거나, 편집 중인 다른 탭을 📖 읽기로 돌리거나 닫으세요`;
+  if (!heap || !(heap.limit > 0) || size <= 0 || heap.used <= heap.limit * HEAP_MAX) return "";
+  return `화면 메모리가 ${fmt(heap.used)} / 약 ${fmt(heap.limit)} 로 한계에 가까워 새로 편집기로 읽어 들이지 않습니다 — 이미 연 편집은 그대로 쓸 수 있습니다. 내려놓은 글자는 창이 스스로 치울 때까지 메모리에 남아 있어(몇 분이 지나도 안 치울 수 있음), 계속 꺼져 있으면 고친 것을 저장하고 앱을 다시 여세요 — 다시 열면 화면 메모리가 비워집니다`;
 }

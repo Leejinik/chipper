@@ -712,6 +712,8 @@ async function main() {
       // .gz: 「전체」 = 「📖 읽기 보기」 (readview) — was refused before; the editor never
       await page.click('.lv-btn:has-text("전체")');
       await page.waitForSelector('.lines-view[data-mode="all"]');
+      // the rows come a moment after the view (a busy PC): wait for them, the check stays the same
+      await until(async () => (await shownRows(page)).some((r) => r.startsWith("1:info 1")), 5000);
       ok(".gz 의 전체 = 📖 읽기(압축 풀어 모든 줄) · 편집 꺼짐", !gzRead && (await page.$eval(".lv-edit", (e) => e.disabled).catch(() => true)) && (await shownRows(page)).some((r) => r.startsWith("1:info 1")), (await shownRows(page)).slice(0, 3));
       await ctx.close();
     }

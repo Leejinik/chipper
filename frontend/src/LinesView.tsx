@@ -189,6 +189,15 @@ export default function LinesView(p: LinesViewProps) {
   // The user scrolled / moved (wheel, keys, the bar) just now: a scroll then is
   // theirs, not the view settling.
   const userAt = useRef(0);
+  // Bumped by the user's own move (released): a way back to a place asked
+  // before it (a chip, a context change) does not land over it — End / Home
+  // pressed while the view was going back was lost (.18 부하 시험 10-29).
+  const moveSeq = useRef(0);
+  // End pressed while the scan runs: the end keeps moving, follow it until the
+  // scan is done (the count End saw was only how far it had got).
+  const endWant = useRef(false);
+  const homeWant = useRef(false); // Home pressed while the rows were not there yet (a restart)
+  const ownScroll = useRef(false); // the scroll the end-following made (not the user's)
   const visRef = useRef(1);
   const scannedRef = useRef(0); // lines the scan has read (last progress)
   const scRef = useRef<HTMLDivElement | null>(null);
@@ -254,6 +263,9 @@ export default function LinesView(p: LinesViewProps) {
     restLine.current = 0;
     pendingLine.current = 0;
     pendingRow.current = null;
+    moveSeq.current++;
+    endWant.current = false;
+    homeWant.current = false;
   }, []);
 
   // --- talking to the engine ---------------------------------------------------------------
@@ -394,10 +406,17 @@ export default function LinesView(p: LinesViewProps) {
         return;
       }
       seeking.current++;
+      const ms = moveSeq.current;
       try {
         let row = 0;
         if (line > 1) row = await FilterRowOfLine(job, A, B, line);
         if (job !== jobRef.current || ep !== epochRef.current) return;
+        // the user moved meanwhile (Home / End / keys): their place wins — the
+        // rows there, not the line this was going back to
+        if (ms !== moveSeq.current) {
+          await fetchPage(Math.floor(firstRef.current / PAGE), true);
+          return;
+        }
         pendingRow.current = row;
         await fetchPage(Math.floor(row / PAGE), true);
       } catch (e) {
@@ -701,6 +720,21 @@ export default function LinesView(p: LinesViewProps) {
   useLayoutEffect(() => {
     if (followRef.current && count > 0) scrollToRow(count);
   }, [count, scrollToRow]);
+  // End while scanning: the last row as the count grows, until the scan is done.
+  useLayoutEffect(() => {
+    if (!endWant.current || count <= 0) return;
+    ownScroll.current = true;
+    requestAnimationFrame(() => (ownScroll.current = false));
+    scrollToRow(count);
+    setSel((s) => (s && s.h === count - 1 && s.a === count - 1 ? s : { a: count - 1, h: count - 1 }));
+    if (doneRef.current) endWant.current = false;
+  }, [count, prog?.done, scrollToRow]);
+  useLayoutEffect(() => {
+    if (!homeWant.current || count <= 0) return;
+    homeWant.current = false;
+    scrollToRow(0);
+    setSel({ a: 0, h: 0 });
+  }, [count, scrollToRow]);
 
   // Past MAX_SCROLL the bar is scaled; the wheel then moves by rows, not pixels.
   useEffect(() => {
@@ -722,7 +756,8 @@ export default function LinesView(p: LinesViewProps) {
     setScrollTop(el.scrollTop);
     // the user's own scroll (not the list emptied / filled while settling): the
     // view stays where they put it, a seek still on its way does not pull it back
-    if (performance.now() - userAt.current < 300) released();
+    if (ownScroll.current) ownScroll.current = false;
+    else if (performance.now() - userAt.current < 300) released();
     // Not while the view is going back to a line: filtering again empties the
     // list, the browser clamps scrollTop to the short list, and with a scan
     // that is done at once (a cached one — a 「제외」 chip switched off) that
@@ -828,11 +863,17 @@ export default function LinesView(p: LinesViewProps) {
       case "PageUp":
         moveTo(h - page, e.shiftKey);
         break;
+      // Home / End say where to be whatever the view was going back to: they
+      // win over it even before the rows of a restart are there (count 0)
       case "Home":
+        released();
         moveTo(0, e.shiftKey);
+        if (!c) homeWant.current = true;
         break;
       case "End":
+        released();
         moveTo(c - 1, e.shiftKey);
+        if (!doneRef.current && !e.shiftKey) endWant.current = true; // the end is still moving
         break;
       case "Enter":
         if (sel) jump(sel.h);
