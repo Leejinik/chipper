@@ -113,6 +113,14 @@ func TestANSIRandomAgainstReference(t *testing.T) {
 			decSizes: [][]int64{{64 << 10, 256 << 10, 1 << 20}, {1, 3, 7}, {}}[rng.Intn(3)],
 			dec1:     []int64{1 << 20, 5}[rng.Intn(2)],
 		}
+		var exclude []Rule // 「🚫 제외」 judges the line without its codes too
+		if rng.Intn(2) == 0 {
+			for _, r := range randExcludes {
+				if rng.Intn(4) == 0 {
+					exclude = append(exclude, r)
+				}
+			}
+		}
 		restore := setKnobs(k)
 		chunk := []int64{3, 17, 1 << 20}[rng.Intn(3)]
 		bufSize := []int{8, 33, 1 << 16}[rng.Intn(3)]
@@ -124,7 +132,7 @@ func TestANSIRandomAgainstReference(t *testing.T) {
 			fileData = gzipBytes(data)
 		}
 		p := writeTemp(t, fileData)
-		res, err := e.Start(Request{Path: p, Encoding: enc, Rules: rules})
+		res, err := e.Start(Request{Path: p, Encoding: enc, Rules: rules, Exclude: exclude})
 		if err != nil {
 			restore()
 			t.Fatal(err)
@@ -134,7 +142,7 @@ func TestANSIRandomAgainstReference(t *testing.T) {
 			defer restore()
 			defer func() {
 				if t.Failed() {
-					t.Logf("iter %d chunk=%d buf=%d knobs=%+v enc=%q gz=%v rules=%+v\ndoc=%q", it, chunk, bufSize, k, enc, gz, rules, doc)
+					t.Logf("iter %d chunk=%d buf=%d knobs=%+v enc=%q gz=%v rules=%+v exclude=%+v\ndoc=%q", it, chunk, bufSize, k, enc, gz, rules, exclude, doc)
 				}
 			}()
 			if prog.Error != "" {
@@ -142,8 +150,11 @@ func TestANSIRandomAgainstReference(t *testing.T) {
 			}
 			text := refDecode(data, prog.Encoding)
 			got, _ := collect(t, e, res.JobID, above, below, rng)
-			want, _ := refFilter(text, rules, refOpts{above: above, below: below, maxRows: 1 << 20, maxDisplay: 1 << 20})
+			want, _ := refFilter(text, rules, refOpts{above: above, below: below, maxRows: 1 << 20, maxDisplay: 1 << 20, exclude: exclude})
 			diffRows(t, got, want, nil)
+			if wh, wx, _, _ := refCounts(text, rules, refOpts{maxRows: 1 << 20, exclude: exclude}); prog.Hits != wh || prog.Excluded != wx {
+				t.Fatalf("hits %d excluded %d, want %d %d", prog.Hits, prog.Excluded, wh, wx)
+			}
 		}()
 		e.CloseAll(time.Second)
 		if t.Failed() {

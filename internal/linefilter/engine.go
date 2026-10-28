@@ -57,12 +57,19 @@ type Request struct {
 	Path     string `json:"path"`
 	Encoding string `json:"encoding,omitempty"` // "" = detect; otherwise the tab's encoding
 	Rules    []Rule `json:"rules"`
+	// Exclude: a line that matches a rule but also one of these is not a hit
+	// (「🚫 제외」): only matched lines are checked, so the cost follows the hits,
+	// not the file. Its lines still show as context of other hits. Kinds and
+	// judging as for Rules (ANSI codes left out).
+	Exclude []Rule `json:"exclude,omitempty"`
 }
 
 // StartResult answers FilterStart.
 type StartResult struct {
 	JobID    string      `json:"jobId"`
 	Issues   []RuleIssue `json:"issues,omitempty"` // rules left out (the rest still run)
+	// ExcludeIssues: exclude rules left out (Index = position in Exclude)
+	ExcludeIssues []RuleIssue `json:"excludeIssues,omitempty"`
 	Cached   bool        `json:"cached"`           // an identical scan (same file state, rules, encoding) was reused
 	Progress Progress    `json:"progress"`
 }
@@ -81,7 +88,8 @@ type Progress struct {
 	ScannedBytes int64   `json:"scannedBytes"` // of TotalBytes (source file bytes; for .gz the compressed bytes)
 	TotalBytes   int64   `json:"totalBytes"`
 	ScannedLines int64   `json:"scannedLines"` // lines covered so far (in file order)
-	Hits         int64   `json:"hits"`         // matched lines so far
+	Hits         int64   `json:"hits"`         // matched lines so far (excluded ones not counted)
+	Excluded     int64   `json:"excluded"`     // matched lines left out by Request.Exclude (same part of the file as Hits)
 	RuleHits     []int64 `json:"ruleHits"`     // per request rule index: matched lines
 	Encoding     string  `json:"encoding"`     // encoding used ("" until known)
 	Compressed   string  `json:"compressed,omitempty"`
@@ -94,6 +102,7 @@ type Progress struct {
 	Error        string  `json:"error,omitempty"`
 	TotalLines   int64   `json:"totalLines"`          // lines in the file (editor count); 0 until known (done and not truncated)
 	SlowRules    []int   `json:"slowRules,omitempty"` // request rule indexes too complex for the fast matcher (state explosion): judged by the slow standard regexp
+	SlowExclude  []int   `json:"slowExclude,omitempty"` // the same for Request.Exclude indexes
 	Version      int     `json:"version"`             // +1 each time lines appended to the file are taken in
 	TailLine     int64   `json:"tailLine"`            // the next append can change lines ≥ TailLine
 	ElapsedMs    int64   `json:"elapsedMs"`
@@ -277,7 +286,9 @@ type job struct {
 	path    string
 	reqEnc  string
 	m       *matcher
+	ex      *matcher // Request.Exclude (nil: none)
 	issues  []RuleIssue
+	exIssues []RuleIssue
 	nRules  int
 	started time.Time
 	stop    atomic.Bool
@@ -306,6 +317,7 @@ type job struct {
 	hits         []hit
 	ext          []uint64 // arena of hits' rules past the 64th (hit.ext); append only, replaced when cut
 	ruleHits     []int64
+	excluded     int64 // matched lines left out by ex (in the published part)
 	longs        []longLine
 	invalid      int64
 	invalidLine  int64
@@ -350,7 +362,7 @@ func normPath(p string) string {
 	return p
 }
 
-func cacheKey(path string, st fileState, enc string, rules []Rule) string {
+func cacheKey(path string, st fileState, enc string, rules, exclude []Rule) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s\x00%d\x00%d\x00%s", normPath(path), st.size, st.mtime, enc)
 	for _, r := range rules {
@@ -359,6 +371,15 @@ func cacheKey(path string, st fileState, enc string, rules []Rule) string {
 			continue
 		}
 		fmt.Fprintf(&b, "\x00%d|%t|%s", r.kind(), r.CaseSensitive, r.Pattern)
+	}
+	// No exclude rule: the same key as before they existed (rekey keeps
+	// everything after the encoding, these too).
+	for _, r := range exclude {
+		if !r.enabled() || r.Pattern == "" {
+			b.WriteString("\x00x-")
+			continue
+		}
+		fmt.Fprintf(&b, "\x00x%d|%t|%s", r.kind(), r.CaseSensitive, r.Pattern)
 	}
 	return b.String()
 }
@@ -381,7 +402,7 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 	if err != nil {
 		return StartResult{}, err
 	}
-	key := cacheKey(req.Path, st, req.Encoding, req.Rules)
+	key := cacheKey(req.Path, st, req.Encoding, req.Rules, req.Exclude)
 	e.ensureWatcher()
 	e.mu.Lock()
 	if e.closed {
@@ -395,7 +416,7 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 		if ok {
 			v := e.newViewLocked(j)
 			e.mu.Unlock()
-			return StartResult{JobID: v.id, Issues: j.issues, Cached: true, Progress: j.progressFor(v.id)}, nil
+			return StartResult{JobID: v.id, Issues: j.issues, ExcludeIssues: j.exIssues, Cached: true, Progress: j.progressFor(v.id)}, nil
 		}
 		delete(e.keys, key)
 	}
@@ -406,8 +427,13 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 		return StartResult{}, err
 	}
 	rules, issues := compileRules(req.Rules)
+	exRules, exIssues := compileRules(req.Exclude)
+	var ex *matcher
+	if len(exRules) > 0 {
+		ex = newMatcher(exRules)
+	}
 	j := &job{
-		e: e, id: newID(), key: key, path: req.Path, reqEnc: req.Encoding, m: newMatcher(rules), issues: issues,
+		e: e, id: newID(), key: key, path: req.Path, reqEnc: req.Encoding, m: newMatcher(rules), ex: ex, issues: issues, exIssues: exIssues,
 		nRules: len(rules), started: time.Now(), state: st, fp: fp, phase: "scan", ruleHits: make([]int64, len(req.Rules)),
 		firstHit: -1, nlTmp: -1, marks: map[[2]int64]*byteMarks{}, views: map[string]bool{},
 	}
@@ -424,7 +450,7 @@ func (e *Engine) Start(req Request) (StartResult, error) {
 	e.evictIdleLocked()
 	e.mu.Unlock()
 	go j.run()
-	return StartResult{JobID: v.id, Issues: issues, Progress: j.progressFor(v.id)}, nil
+	return StartResult{JobID: v.id, Issues: issues, ExcludeIssues: exIssues, Progress: j.progressFor(v.id)}, nil
 }
 
 func (e *Engine) newViewLocked(j *job) *view {
@@ -788,7 +814,7 @@ func (j *job) srcOffsetLocked(off int64) int64 {
 
 func (j *job) progressLocked() Progress {
 	p := Progress{
-		Phase: j.phase, TotalBytes: j.state.size, ScannedLines: j.scannedLines, Hits: int64(len(j.hits)),
+		Phase: j.phase, TotalBytes: j.state.size, ScannedLines: j.scannedLines, Hits: int64(len(j.hits)), Excluded: j.excluded,
 		RuleHits: append([]int64(nil), j.ruleHits...), Encoding: j.enc, InvalidBytes: j.invalid, InvalidLine: j.invalidLine,
 		Done: j.done && !j.following, Truncated: j.truncated, Canceled: j.canceled, Changed: j.changed,
 		TotalLines: j.totalLines, Version: j.version, TailLine: j.restart.line, FirstHitMs: -1,
@@ -799,6 +825,13 @@ func (j *job) progressLocked() Progress {
 	for k := range j.m.slow {
 		if j.m.slow[k].Load() {
 			p.SlowRules = append(p.SlowRules, j.m.rules[k].index)
+		}
+	}
+	if j.ex != nil {
+		for k := range j.ex.slow {
+			if j.ex.slow[k].Load() {
+				p.SlowExclude = append(p.SlowExclude, j.ex.rules[k].index)
+			}
 		}
 	}
 	p.ScannedBytes = j.srcOffsetLocked(j.scannedOff)
@@ -1005,7 +1038,17 @@ func (j *job) scanGzip(f *os.File, size int64) (*scanRun, error) {
 // runAppend filters what was appended to the file: from the restart point
 // (the start of the last line that could still change) to the new end.
 func (j *job) runAppend(st fileState, fp fingerprint) {
+	// The lines from the restart point on are judged again: take their
+	// excluded lines out of the count first (they are not in the hit list).
+	var exTail int64
+	if j.ex != nil {
+		j.mu.Lock()
+		rp, path, size := j.restart, j.readPath, j.size
+		j.mu.Unlock()
+		exTail = j.excludedIn(path, rp.tmp, size)
+	}
 	j.mu.Lock()
+	j.excluded -= exTail
 	rp := j.restart
 	keep := sort.Search(len(j.hits), func(i int) bool { return j.hits[i].line >= rp.line })
 	nh := make([]hit, keep, keep+1024)

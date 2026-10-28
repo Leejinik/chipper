@@ -35,6 +35,7 @@ export namespace linefilter {
 	    totalBytes: number;
 	    scannedLines: number;
 	    hits: number;
+	    excluded: number;
 	    ruleHits: number[];
 	    encoding: string;
 	    compressed?: string;
@@ -47,6 +48,7 @@ export namespace linefilter {
 	    error?: string;
 	    totalLines: number;
 	    slowRules?: number[];
+	    slowExclude?: number[];
 	    version: number;
 	    tailLine: number;
 	    elapsedMs: number;
@@ -64,6 +66,7 @@ export namespace linefilter {
 	        this.totalBytes = source["totalBytes"];
 	        this.scannedLines = source["scannedLines"];
 	        this.hits = source["hits"];
+	        this.excluded = source["excluded"];
 	        this.ruleHits = source["ruleHits"];
 	        this.encoding = source["encoding"];
 	        this.compressed = source["compressed"];
@@ -76,6 +79,7 @@ export namespace linefilter {
 	        this.error = source["error"];
 	        this.totalLines = source["totalLines"];
 	        this.slowRules = source["slowRules"];
+	        this.slowExclude = source["slowExclude"];
 	        this.version = source["version"];
 	        this.tailLine = source["tailLine"];
 	        this.elapsedMs = source["elapsedMs"];
@@ -185,6 +189,7 @@ export namespace linefilter {
 	    path: string;
 	    encoding?: string;
 	    rules: Rule[];
+	    exclude?: Rule[];
 	
 	    static createFrom(source: any = {}) {
 	        return new Request(source);
@@ -195,6 +200,7 @@ export namespace linefilter {
 	        this.path = source["path"];
 	        this.encoding = source["encoding"];
 	        this.rules = this.convertValues(source["rules"], Rule);
+	        this.exclude = this.convertValues(source["exclude"], Rule);
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -236,6 +242,7 @@ export namespace linefilter {
 	export class StartResult {
 	    jobId: string;
 	    issues?: RuleIssue[];
+	    excludeIssues?: RuleIssue[];
 	    cached: boolean;
 	    progress: Progress;
 	
@@ -247,6 +254,7 @@ export namespace linefilter {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.jobId = source["jobId"];
 	        this.issues = this.convertValues(source["issues"], RuleIssue);
+	        this.excludeIssues = this.convertValues(source["excludeIssues"], RuleIssue);
 	        this.cached = source["cached"];
 	        this.progress = this.convertValues(source["progress"], Progress);
 	    }

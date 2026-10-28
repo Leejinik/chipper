@@ -190,6 +190,13 @@ type wstate struct {
 	// a line without its ANSI sequences, and where each byte came from (ansi.go)
 	ansiBuf []byte
 	ansiPos []int32
+	// Request.Exclude (nil: none): its own state, run only on lines that hit.
+	// exN counts the hits it removed in this region; exBefore[i] = exN when
+	// the region's i-th kept hit was added (the count before it, for a cut
+	// at the hit cap).
+	ex       *wstate
+	exN      int64
+	exBefore []int64
 }
 
 // setRule marks rule k (position in m.rules) as matching the current line:
@@ -224,12 +231,58 @@ func (ws *wstate) clearHi() {
 
 // addHit appends h (whose rules are mask plus ws.hi) to out.
 func (ws *wstate) addHit(out []hit, h hit) []hit {
+	if ws.ex != nil {
+		ws.exBefore = append(ws.exBefore, ws.exN)
+	}
 	if ws.hiSet {
 		ws.ext = append(ws.ext, ws.hi...)
 		h.ext = uint32(len(ws.ext) / len(ws.hi))
 		ws.clearHi()
 	}
 	return append(out, h)
+}
+
+// keep says whether the current line, which matched (judge = the text the
+// rules saw), stays a hit: not when an exclude rule matches it too — then its
+// rules are forgotten and it is counted in exN. Only called for matched lines.
+func (ws *wstate) keep(judge []byte) bool {
+	if ws.ex == nil || !ws.ex.anyMatch(judge) {
+		return true
+	}
+	ws.clearHi()
+	ws.exN++
+	return false
+}
+
+// anyMatch: does any of the matcher's rules match line (no positions)? Same
+// decisions as a hit: literal rules by search, the others by their DFAs (the
+// combined one first when the matcher has groups).
+func (ws *wstate) anyMatch(line []byte) bool {
+	ws.lowPtr = nil // line is in a buffer that is reused: no cached lower-cased copy
+	if len(ws.groups) == 0 {
+		for ri := range ws.m.rules {
+			if ok, _ := ws.ruleStart(ri, line, 0, -1); ok {
+				return true
+			}
+		}
+		return false
+	}
+	for gi := 0; gi < len(ws.groups); gi++ {
+		gm, retry := ws.groupMatch(gi, line)
+		if retry {
+			gi--
+			continue
+		}
+		for k, ri := range ws.groups[gi].rules {
+			if gm&(1<<uint(k)) == 0 {
+				continue
+			}
+			if ok, _ := ws.ruleStart(ri, line, 0, int(ws.ends[k])); ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // newWState: mem is this worker's DFA memory budget.
@@ -720,7 +773,7 @@ func (ws *wstate) scanBuf(data []byte, base int64, out []hit, lineBase int64, ca
 		for pos := 0; pos < len(data); idx++ {
 			le, next := lineEnd(data, pos, hasCR)
 			line := data[pos:le]
-			if mask, s := ws.lineHitDFA(line); ws.lineHit(mask) {
+			if mask, s := ws.lineHitDFA(line); ws.lineHit(mask) && ws.keep(line) {
 				out = ws.addHit(out, hit{line: lineBase + idx, start: base + int64(pos), end: base + int64(le), mask: mask, col: utf16Col(line, s)})
 				if len(out) >= capHits {
 					return out, nlines, true
@@ -791,7 +844,7 @@ func (ws *wstate) scanBuf(data []byte, base int64, out []hit, lineBase int64, ca
 				}
 			}
 		}
-		if ws.lineHit(got) {
+		if ws.lineHit(got) && ws.keep(line) {
 			out = ws.addHit(out, hit{line: lineBase + idx, start: base + int64(ls), end: base + int64(curEnd), mask: got, col: utf16Col(line, best)})
 			if len(out) >= capHits {
 				return out, nlines, true
