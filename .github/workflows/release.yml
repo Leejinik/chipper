@@ -6,7 +6,14 @@ on:
       - 'v*'
   # Lets us smoke-test the build jobs without cutting a release. On a manual run
   # the `release` job is skipped and the binaries are left as artifacts.
+  # `version` lets a manual run stamp a real version (e.g. to add a platform's
+  # binary to an existing release); left empty the build stays "dev".
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to stamp (e.g. v1.2.1); empty = dev'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -36,6 +43,8 @@ jobs:
           # so a smoke-test binary never nags about updates.
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
             echo "version=dev" >> "$GITHUB_OUTPUT"
           fi
@@ -85,6 +94,8 @@ jobs:
         run: |
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
           else
             echo "version=dev" >> "$GITHUB_OUTPUT"
           fi
@@ -123,8 +134,58 @@ jobs:
           path: build/bin/chipper-linux-amd64
           if-no-files-found: error
 
+  build-macos:
+    # One universal .app (Intel + Apple Silicon). Not signed or notarized, so
+    # Gatekeeper warns on first open; the release notes explain right-click → Open.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm install
+
+      - name: Build
+        run: |
+          wails build -platform darwin/universal             -ldflags "-X main.Version=${{ steps.ver.outputs.version }}"
+          test -d build/bin/chipper.app
+          lipo -info build/bin/chipper.app/Contents/MacOS/chipper
+          # ditto keeps the bundle's permissions and symlinks intact (zip -r does not).
+          ditto -c -k --keepParent build/bin/chipper.app build/bin/chipper-macos-universal.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chipper-macos
+          path: build/bin/chipper-macos-universal.zip
+          if-no-files-found: error
+
   release:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
@@ -164,5 +225,6 @@ jobs:
           files: |
             dist/chipper.exe
             dist/chipper-linux-amd64
+            dist/chipper-macos-universal.zip
           draft: false
           prerelease: false
