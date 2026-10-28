@@ -227,16 +227,21 @@ const TreeRow = memo(function TreeRow({ row, isCur, panes, tags, bigFile, ctx }:
   };
   const chips = tags ? <Chips row={row} t={tags} /> : null;
   if (n.rel) {
+    // .gz opens as 「🏷 태그 줄만」 (the line filter reads it); other archives don't open
+    const gz = !!n.compressed && /\.(gz|tgz)$/i.test(n.rel);
+    const off = !!n.compressed && !gz;
     return (
       <div
         {...common}
-        className={"bt-row file" + (paneList.length ? " shown" : "") + (n.compressed ? " off" : "")}
+        className={"bt-row file" + (paneList.length ? " shown" : "") + (off ? " off" : "")}
         title={
-          n.compressed
+          off
             ? "압축 파일은 열 수 없습니다"
-            : `${n.server}/${n.rel} — 눌러서 ${n.server} 칸에 열기, 또는 원하는 칸으로 끌어다 놓기 · 우클릭: 태그 지정`
+            : gz
+              ? `${n.server}/${n.rel} — 압축(.gz) 파일: 눌러서 ${n.server} 칸에 「🏷 태그 줄만」 보기로 열림 (전체로는 열 수 없음), 또는 원하는 칸으로 끌어다 놓기 · 우클릭: 태그 지정`
+              : `${n.server}/${n.rel} — 눌러서 ${n.server} 칸에 열기, 또는 원하는 칸으로 끌어다 놓기 · 우클릭: 태그 지정`
         }
-        draggable={!n.compressed}
+        draggable={!off}
         onDragStart={(e) => {
           e.dataTransfer.setData(TREE_DRAG_TYPE, JSON.stringify({ server: n.server, rel: n.rel }));
           e.dataTransfer.effectAllowed = "copy";
@@ -250,7 +255,7 @@ const TreeRow = memo(function TreeRow({ row, isCur, panes, tags, bigFile, ctx }:
             {i + 1}
           </span>
         ))}
-        {!n.compressed && (
+        {!off && (
           <button
             className="bt-all"
             tabIndex={-1}
@@ -263,7 +268,7 @@ const TreeRow = memo(function TreeRow({ row, isCur, panes, tags, bigFile, ctx }:
             ⇉
           </button>
         )}
-        <span className={n.size! >= bigFile ? "bt-size big" : "bt-size"}>{n.compressed ? "압축" : ctx.current.fmtSize(n.size!)}</span>
+        <span className={n.size! >= bigFile ? "bt-size big" : "bt-size"}>{off ? "압축" : gz ? `압축 ${ctx.current.fmtSize(n.size!)}` : ctx.current.fmtSize(n.size!)}</span>
       </div>
     );
   }
@@ -648,7 +653,7 @@ export default function BundleTree(p: Props) {
           >
             🏷 태그 지정…
           </button>
-          {mn.rel && !mn.compressed && (
+          {mn.rel && !(mn.compressed && !/\.(gz|tgz)$/i.test(mn.rel)) && (
             <>
               <div className="menu-sep" role="separator" />
               <button

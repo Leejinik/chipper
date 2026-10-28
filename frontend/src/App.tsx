@@ -276,10 +276,27 @@ function tooBigText(files: { name: string; size: number }[]): string {
     (files.length === 1
       ? `"${files[0].name}" 은(는) 너무 커서 열 수 없습니다 (${sizeText(files[0].size)}).`
       : "다음 파일은 너무 커서 열 수 없습니다:\n" + files.map((f) => `- ${f.name} (${sizeText(f.size)})`).join("\n")) +
-    `\n${LIMIT_TEXT} 까지만 열 수 있습니다. 다음 버전의 『태그 줄만 보기』로 걸린 줄만 볼 수 있습니다.`
+    `\n전체로는 ${LIMIT_TEXT} 까지만 열 수 있습니다. 「🏷 태그 줄만」으로는 걸린 줄을 볼 수 있습니다.`
   );
 }
-const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니다. 계속할까요?";
+// Files that never open whole: over the open limit, or .gz.
+const noWhole = (x: { path: string; size: number }) => isGz(x.path) || x.size > TOO_BIG_FILE;
+// The size question's text when some of the files can only be shown as 「태그 줄만」.
+function linesOnlyText(files: { path: string; name: string; size: number }[], canFull: boolean): string {
+  const over = files.filter((x) => !isGz(x.path) && x.size > TOO_BIG_FILE);
+  const gz = files.filter((x) => isGz(x.path));
+  const out: string[] = [];
+  if (over.length)
+    out.push(`${over.map((x) => x.name).join(", ")} — ${LIMIT_TEXT} 를 넘어 전체로 열 수 없습니다.`);
+  if (gz.length) out.push(`${gz.map((x) => x.name).join(", ")} — 압축(.gz) 파일이라 전체로 열 수 없습니다.`);
+  out.push(
+    canFull
+      ? `${files.length > 1 ? "이 파일들은" : "이 파일은"} 「전체 열기」를 골라도 「🏷 태그 줄만」으로 열립니다.`
+      : "「🏷 태그 줄만」으로만 열 수 있습니다 — 파일을 읽어 들이지 않고, 태그 규칙에 걸린 줄과 그 위·아래 줄만 보여 줍니다."
+  );
+  return out.join("\n");
+}
+const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니다.";
 // Over this, the open confirm also says what editing costs: on the test PC
 // (.18) saving an edited 384MB log took WebView 3.2GB + Go 4.5GB.
 const EDIT_MEM_FILE = 128 << 20;
@@ -887,7 +904,12 @@ function App() {
   const bundleHistory = useRef<BundleRef[]>([]);
   const [tagsOpen, setTagsOpen] = useState<string | null>(null); // tag window, with the tag to select
   // The big-file question (whole / tag lines only / cancel), answered through `resolve`.
-  const [bigAsk, setBigAsk] = useState<{ title: string; text: string; noLines: boolean; resolve: (c: BigChoice) => void } | null>(null);
+  // The size question (one at a time: a second one answers the first 「취소」).
+  // noLines: no 「태그 줄만」 (going back to the whole file); noFull: no
+  // 「전체 열기」 (only files that never open whole: over the limit, .gz).
+  type BigAsk = { title: string; text: string; noLines: boolean; noFull: boolean; resolve: (c: BigChoice) => void };
+  const [bigAsk, setBigAsk] = useState<BigAsk | null>(null);
+  const bigAskRef = useRef<BigAsk | null>(null);
   const [treeOpen, setTreeOpen] = useState<boolean>(true); // log bundle tree beside the panes
   const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
   const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
@@ -1476,12 +1498,22 @@ function App() {
   }, []);
 
   const askBig = useCallback(
-    (title: string, text: string, noLines = false) =>
-      new Promise<BigChoice>((resolve) => setBigAsk({ title, text, noLines, resolve })),
+    (title: string, text: string, opt: { noLines?: boolean; noFull?: boolean } = {}) =>
+      new Promise<BigChoice>((resolve) => {
+        // A question already up (the window's shortcuts still work under it):
+        // the newer one takes its place and the older one ends as 「취소」,
+        // so whatever waited on it is not left hanging.
+        const prev = bigAskRef.current;
+        const next: BigAsk = { title, text, noLines: !!opt.noLines, noFull: !!opt.noFull, resolve };
+        bigAskRef.current = next;
+        setBigAsk(next);
+        prev?.resolve("cancel");
+      }),
     []
   );
   const answerBig = (c: BigChoice) => {
-    const b = bigAsk;
+    const b = bigAskRef.current;
+    bigAskRef.current = null;
     setBigAsk(null);
     b?.resolve(c);
   };
@@ -1549,7 +1581,7 @@ function App() {
           const c = await askBig(
             `큰 파일입니다 (${t.label || t.title} ${fmtSize(size)})`,
             "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n큰 파일의 그 줄 주변만 여는 기능은 아직 없습니다.",
-            true
+            { noLines: true }
           );
           if (c !== "full") return false;
           // The deferred loader enforces the same threshold. Remember this
@@ -1569,14 +1601,20 @@ function App() {
   // an empty pane), Explorer drag & drop, a second launch (-Open) / associated
   // file, the bundle tree (click, ⇉, drag). The deferred read of tabs restored
   // from the session (loadTabFromDisk) applies the same two limits but asks
-  // inside the pane instead of a dialog. Files over TOO_BIG_FILE are
-  // refused (one message for all of them); files of BIG_FILE or more need one
-  // confirm for the whole batch. `size` may be given (the bundle scan knows it);
-  // otherwise the file is stat'ed. `restat`: stat even so and use the larger of
-  // the two (a bundle's scan size may be old: the log grew since).
+  // inside the pane instead of a dialog. Files of BIG_FILE or more need one
+  // confirm for the whole batch: 「🏷 태그 줄만 열기 / 전체 열기 / 취소」. Files
+  // that never open whole — over TOO_BIG_FILE, or .gz — still open as
+  // 「태그 줄만」 (whatever is chosen but 「취소」); when only such files are
+  // asked about there is no 「전체 열기」. A small .gz opens as 「태그 줄만」
+  // without asking. `size` may be given (the bundle scan knows it); otherwise
+  // the file is stat'ed. `restat`: stat even so and use the larger of the two
+  // (a bundle's scan size may be old: the log grew since). `wholeOnly`: the
+  // caller reads the file whole or not at all (another encoding): no
+  // 「태그 줄만」, and files over the limit are refused (told).
   const gateSizes = useCallback(
     async (
-      items: { path: string; size?: number; name?: string; restat?: boolean }[]
+      items: { path: string; size?: number; name?: string; restat?: boolean }[],
+      wholeOnly = false
     ): Promise<{ allowed: Set<string>; tooBig: Set<string>; lines: Set<string>; declined: boolean; sizes: Map<string, number> }> => {
       const sized = await Promise.all(
         items.map(async (x) => {
@@ -1599,25 +1637,48 @@ function App() {
           return { path: x.path, name: x.name || baseName(x.path), size };
         })
       );
-      const tooBig = sized.filter((x) => x.size > TOO_BIG_FILE);
-      const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
-      if (tooBig.length) alert(tooBigText(tooBig));
+      const sizes = new Map(sized.map((x) => [x.path, x.size]));
+      const askTitle = (xs: typeof sized) => `큰 파일입니다 (${xs.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")})`;
+      if (wholeOnly) {
+        const tooBig = sized.filter((x) => x.size > TOO_BIG_FILE);
+        const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
+        if (tooBig.length) alert(tooBigText(tooBig));
+        const choice: BigChoice = big.length
+          ? await askBig(askTitle(big), (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") + BIG_TEXT, { noLines: true })
+          : "full";
+        const declined = choice === "cancel";
+        return {
+          allowed: new Set(sized.filter((x) => x.size <= TOO_BIG_FILE && !isGz(x.path) && !(declined && x.size >= BIG_FILE)).map((x) => x.path)),
+          tooBig: new Set(tooBig.map((x) => x.path)),
+          lines: new Set(),
+          declined,
+          sizes,
+        };
+      }
+      const big = sized.filter((x) => x.size >= BIG_FILE);
+      const canFull = big.some((x) => !noWhole(x));
       let choice: BigChoice = "full";
       if (big.length) {
-        choice = await askBig(
-          `큰 파일입니다 (${big.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")})`,
-          (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") + BIG_TEXT
-        );
+        const only = big.filter(noWhole);
+        const text =
+          (big.some((x) => !noWhole(x) && x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") +
+          (canFull ? BIG_TEXT : "") +
+          (only.length ? (canFull ? "\n" : "") + linesOnlyText(only, canFull) : "");
+        choice = await askBig(askTitle(big), text, { noFull: !canFull });
       }
       const declined = choice === "cancel";
-      const lines = new Set(big.filter((x) => choice === "lines").map((x) => x.path));
-      for (const x of sized) if (isGz(x.path)) lines.add(x.path);
+      const lines = new Set<string>();
+      for (const x of sized) {
+        if (x.size >= BIG_FILE) {
+          if (choice === "lines" || (choice === "full" && noWhole(x))) lines.add(x.path);
+        } else if (isGz(x.path)) lines.add(x.path); // small .gz: no question
+      }
       return {
-        allowed: new Set(sized.filter((x) => x.size <= TOO_BIG_FILE && !(declined && x.size >= BIG_FILE) && !lines.has(x.path)).map((x) => x.path)),
-        tooBig: new Set(tooBig.map((x) => x.path)),
+        allowed: new Set(sized.filter((x) => !noWhole(x) && !lines.has(x.path) && !(declined && x.size >= BIG_FILE)).map((x) => x.path)),
+        tooBig: new Set(), // nothing is refused for its size: it opens as 「태그 줄만」 (or the question was declined)
         lines,
         declined,
-        sizes: new Map(sized.map((x) => [x.path, x.size])),
+        sizes,
       };
     },
     [askBig]
@@ -1648,15 +1709,9 @@ function App() {
         continue;
       }
       if (seen.has(path)) continue; // duplicate within this drop batch
-      // Gzip logs are never read into the editor. Keep this path explicit as
-      // well as represented in gate.lines so every file-open route agrees.
-      if (isGz(path)) {
-        const id = openLinesOnly(path, "");
-        seen.add(path);
-        lastId = id;
-        ids.push(id);
-        continue;
-      }
+      // Gzip logs are never read into the editor: 「태그 줄만」 (gate.lines) or,
+      // when the size question was declined, nothing — every file-open route agrees.
+      if (isGz(path) && !gate?.lines.has(path)) continue;
       if (gate?.lines.has(path)) {
         const id = openLinesOnly(path, "");
         seen.add(path);
@@ -1664,7 +1719,7 @@ function App() {
         ids.push(id);
         continue;
       }
-      if (gate && !gate.allowed.has(path)) continue; // too big (told) or big and declined
+      if (gate && !gate.allowed.has(path)) continue; // big and declined
       try {
         const res = await ReadFile(path);
         if (!res) continue;
@@ -1973,13 +2028,9 @@ function App() {
         size = 0;
       }
       if (size >= BIG_FILE) {
+        // the pane asks (bigPrompt): 「🏷 태그 줄만」, and 「전체 열기」 up to the limit
         loadingIds.current.delete(t.id);
-        const tooBig = size > TOO_BIG_FILE ? tooBigText([{ name: t.title, size }]) : "";
-        setTabs((prev) =>
-          prev.map((x) =>
-            x.id !== t.id || !x.needsLoad ? x : tooBig ? { ...x, loadError: tooBig } : { ...x, bigSize: size }
-          )
-        );
+        setTabs((prev) => prev.map((x) => (x.id !== t.id || !x.needsLoad ? x : { ...x, bigSize: size })));
         return;
       }
     }
@@ -2017,10 +2068,18 @@ function App() {
     );
   }, []);
 
-  // 「열기」 on a big restored tab: read it now.
+  // 「전체 열기」 on a big restored tab: read it now.
   const approveBig = useCallback((id: string) => {
     bigApproved.current.add(id);
     setTabs((prev) => prev.map((x) => (x.id === id ? { ...x, bigSize: 0 } : x)));
+  }, []);
+  // 「🏷 줄만」 of a tab (the [전체 | 🏷 줄만] switch, the big restored tab's
+  // question). The question is answered: going back to 「전체」 asks again
+  // (showWhole) instead of stopping at the question in the pane.
+  const toLines = useCallback((id: string) => {
+    setTabs((prev) =>
+      prev.map((x) => (x.id === id ? { ...x, bigSize: 0, lines: { ...(x.lines ?? DEFAULT_LINES), on: true } } : x))
+    );
   }, []);
 
   useEffect(() => {
@@ -2187,11 +2246,12 @@ function App() {
       const serverOf = (i: number) => (serverFor && serverFor.slot === i ? serverFor.server : m.slots[i]?.server ?? "");
       const targets = (only != null ? [only] : Array.from({ length: m.count }, (_, i) => i)).filter((i) => serverOf(i));
       const picks = targets.map((i) => ({ i, server: serverOf(i), file: resolveInServer(scan, serverOf(i), rel) }));
-      // Size check (shared gateSizes) for the files this switch would read.
+      // Size check (shared gateSizes) for the files this switch would open —
+      // .gz too (「태그 줄만」 only, asked about when big, like 📂 열기).
       const toRead = picks.filter(
         (x) =>
           x.file &&
-          !x.file.compressed &&
+          (!x.file.compressed || isGz(x.file.rel)) &&
           !tabsRef.current.some((t) => samePath(t.path, bundlePath(root, x.server, x.file!.rel)))
       );
       // Sizes are stat'ed again (restat): a log may have grown past a limit
@@ -2204,9 +2264,8 @@ function App() {
           name: `${x.server} ${x.file!.rel.split("/").pop()}`,
         }))
       );
-      // Declined the big-file confirm, or the one file asked for is too big:
-      // leave the panes as they are.
-      if (gate.declined || (picks.length === 1 && gate.tooBig.size === 1) || gen !== bundleGen.current) return;
+      // Declined the big-file confirm: leave the panes as they are.
+      if (gate.declined || gen !== bundleGen.current) return;
       const base = rel.split("/").pop() || rel;
       const result = new Map<number, { tabId: string; note: string; server: string }>();
       // tab id → visible pane showing it. Panes outside this switch keep theirs;
@@ -2219,8 +2278,6 @@ function App() {
         let r = { tabId: "", note: "", server: x.server };
         if (!x.file) r.note = `${x.server}에는 ${base} 가 없습니다`;
         else if (x.file.compressed && !isGz(x.file.rel)) r.note = `${x.file.rel} 은 압축 파일이라 전체로 열 수 없습니다 (풀어서 여세요)`;
-        else if (gate.tooBig.has(bundlePath(root, x.server, x.file.rel)))
-          r.note = `${x.file.rel} 은 너무 커서 열 수 없습니다 (${sizeText(gate.sizes.get(bundlePath(root, x.server, x.file.rel)) ?? x.file.size)}, ${LIMIT_TEXT} 까지)`;
         else {
           let id: string | null = null;
           const fp = bundlePath(root, x.server, x.file.rel);
@@ -2408,8 +2465,8 @@ function App() {
     if (!multi.on) return;
     for (const x of multi.slots.slice(0, multi.count)) {
       const t = tabs.find((y) => y.id === x.tabId);
-      if (t && t.needsLoad && !t.loadError && !t.lines?.on) loadTabFromDisk(t);
-      if (t && t.needsLoad && !t.loadError && !t.bigSize) loadTabFromDisk(t);
+      // not a 「태그 줄만」 tab (never read), not one waiting at the big-file question
+      if (t && t.needsLoad && !t.loadError && !t.lines?.on && !t.bigSize) loadTabFromDisk(t);
     }
   }, [multi, tabs, loadTabFromDisk]);
 
@@ -2481,7 +2538,7 @@ function App() {
         return;
       }
       // The same size check as every other read (big → confirm, too big → no).
-      const g = await gateSizes([{ path: t.path, name: t.title }]);
+      const g = await gateSizes([{ path: t.path, name: t.title }], true);
       if (!g.allowed.has(t.path)) return;
       if (t.needsLoad) bigApproved.current.add(t.id); // 「열기」 waiting in the pane: this answers it
       const before = liveContent(t);
@@ -3375,7 +3432,7 @@ function App() {
         <button
           className={on ? "on" : ""}
           title="🏷 태그 줄만 — 이 파일에 붙은 태그(common 포함)의 「줄만」 규칙에 걸린 줄과 그 위·아래 줄만. 디스크의 파일을 걸러서 큰 파일도 바로 봅니다"
-          onClick={() => !on && setLines(t.id, (x) => ({ ...x, on: true }))}
+          onClick={() => !on && toLines(t.id)}
         >
           🏷 줄만
         </button>
@@ -3385,24 +3442,45 @@ function App() {
   const toggleLogColors = (t: Tab) =>
     setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: logOn(t) ? "off" : "on" } : x)));
 
-  // A restored tab whose file is big waits for 「열기」 (the size confirm, asked
-  // in the pane instead of a dialog).
-  const bigPrompt = (t: Tab) => (
-    <>
-      <div className="empty-title">큰 파일입니다 ({fmtSize(t.bigSize)})</div>
-      <div className="empty-sub">{t.path}</div>
-      {t.bigSize > EDIT_MEM_FILE && <div className="empty-sub">{EDIT_MEM_NOTE}</div>}
-      <div className="empty-sub">{BIG_CONFIRM_TAIL}</div>
-      <div className="empty-actions">
-        <button className="tb-btn" onClick={() => approveBig(t.id)}>
-          열기
-        </button>
-        <button className="tb-btn" onClick={() => doCloseTab(t.id)}>
-          × 탭 닫기
-        </button>
-      </div>
-    </>
-  );
+  // A restored tab whose file is big waits here (the size question, asked in
+  // the pane instead of a dialog): 「🏷 태그 줄만」, or 「전체 열기」 up to the limit.
+  const bigPrompt = (t: Tab) => {
+    const over = t.bigSize > TOO_BIG_FILE;
+    return (
+      <>
+        <div className="empty-title">
+          {over ? "너무 커서 전체로는 열 수 없습니다" : "큰 파일입니다"} ({fmtSize(t.bigSize)})
+        </div>
+        <div className="empty-sub">{t.path}</div>
+        {over ? (
+          <div className="empty-sub">
+            전체로는 {LIMIT_TEXT} 까지만 열 수 있습니다. 「🏷 태그 줄만」은 파일을 읽어 들이지 않고 태그 규칙에 걸린 줄과 그
+            위·아래 줄만 보여 줍니다.
+          </div>
+        ) : (
+          <>
+            {t.bigSize > EDIT_MEM_FILE && <div className="empty-sub">{EDIT_MEM_NOTE}</div>}
+            <div className="empty-sub">
+              「전체 열기」는 {BIG_CONFIRM_TAIL} 「🏷 태그 줄만」은 파일을 읽어 들이지 않고 걸린 줄만 바로 보여 줍니다.
+            </div>
+          </>
+        )}
+        <div className="empty-actions">
+          <button className="tb-btn primary" onClick={() => toLines(t.id)}>
+            🏷 태그 줄만
+          </button>
+          {!over && (
+            <button className="tb-btn" onClick={() => approveBig(t.id)}>
+              전체 열기
+            </button>
+          )}
+          <button className="tb-btn" onClick={() => doCloseTab(t.id)}>
+            × 탭 닫기
+          </button>
+        </div>
+      </>
+    );
+  };
 
   // --- multi-view panes ------------------------------------------------------
   const visibleSlots = multi.slots.slice(0, multi.count);
@@ -3555,7 +3633,7 @@ function App() {
           <span className="mp-title" title={t ? t.path || t.title : ""}>
             {t ? (multi.bundle && slot.server && t.label ? t.title : t.label || t.title) : "빈 칸"}
           </span>
-          {t && !t.needsLoad && paneTagChips(t)}
+          {t && (!t.needsLoad || (t.lines?.on && t.path)) && paneTagChips(t)}
           {t && t.path && linesSeg(t)}
           {findOpen && t && (
             <span className="mp-count" title={slot.mode === "lock" ? "잠긴 칸은 찾지 않습니다" : "이 칸에서 찾은 개수"}>
@@ -4087,7 +4165,10 @@ function App() {
                   {active.path && linesSeg(active)}
                 </div>
                 {active.lines?.on && active.path ? (
-                  renderLines(active, true)
+                  // like a pane of the multi view: a render error stays in here
+                  <ErrorBoundary what="태그 줄만 보기" resetKey={active.id + "#lines"}>
+                    {renderLines(active, true)}
+                  </ErrorBoundary>
                 ) : (
                   <ErrorBoundary what="편집기" resetKey={active.id + "#" + active.reloadSeq}>
                     <CodeEditor
@@ -4602,9 +4683,11 @@ function App() {
                   🏷 태그 줄만 열기
                 </button>
               )}
-              <button className="tb-btn" autoFocus={bigAsk.noLines} onClick={() => answerBig("full")}>
-                전체 열기
-              </button>
+              {!bigAsk.noFull && (
+                <button className="tb-btn" autoFocus={bigAsk.noLines} onClick={() => answerBig("full")}>
+                  전체 열기
+                </button>
+              )}
               <button className="tb-btn" onClick={() => answerBig("cancel")}>
                 취소
               </button>
