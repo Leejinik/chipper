@@ -141,7 +141,7 @@ function makeBackend() {
     SupportedFileTypes: () => [],
     AssociationStatus: () => ({}),
   };
-  const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules"]);
+  const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules", "FilterFind", "EditOpenBegin", "EditOpenChunk", "EditOpenEnd", "MemInfo"]);
   // delay[name] = ms: hold that call before it goes out (late answers, races)
   const delay = {};
   return {
@@ -609,7 +609,7 @@ async function main() {
     }
 
     // =============== 8. big file from the tree: 「태그 줄만 열기」 · .gz ==========================
-    console.log("8. 큰 파일 확인 창의 「태그 줄만 열기」 · .gz");
+    console.log("8. 큰 파일(트리) = 확인 창 없이 📖 읽기 · 🏷 줄만 · ✏️ 편집으로 열기 · .gz");
     if (want("8")) {
       const root = P("bundle");
       fs.mkdirSync(path.join(root, "server1", "modules", "lizcollector"), { recursive: true });
@@ -654,17 +654,15 @@ async function main() {
       await page.waitForSelector(".bundle-tree");
       await page.fill(".bt-filter", "collector.log"); // opens the folders
       await page.click('.bt-row.file:has-text("collector.log") >> nth=0');
-      await page.waitForSelector(".big-ask");
-      const btns = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
-      ok("726MB 확인 창: 태그 줄만 / 취소 (전체 열기 없음)", JSON.stringify(btns) === '["🏷 태그 줄만 열기","취소"]', btns);
-      const title = await page.$eval(".big-ask h3", (e) => e.textContent);
-      ok("확인 창에 크기", title.includes("726.0MB"), title);
-      const askText = await page.$eval(".big-ask p", (e) => e.textContent);
-      ok("확인 창: 전체로는 열 수 없다고 알림", askText.includes("전체로 열 수 없") && askText.includes("384MB"), askText);
-      ok("「너무 커서 열 수 없습니다」 알림 없이 물음", !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
+      // readview (user 10-28): 100MB 이상은 확인 창 없이 「📖 읽기 보기」 — 예전 「태그 줄만 열기 / 취소」 확인 창은 없음
+      await page.waitForSelector('.lines-view[data-mode="all"]', { timeout: 10000 });
+      ok("726MB → 확인 창 없이 📖 읽기 보기", !(await page.$(".big-ask")) && !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
+      ok("큰 파일을 읽지 않음", calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
+      const why726 = await page.$eval(".lv-edit", (e) => [e.disabled, e.title]);
+      ok("726MB: ✏️ 편집으로 열기 꺼짐 + 이유(384MB)", why726[0] === true && why726[1].includes("384MB"), why726);
       await shot(page, "lines-big-ask.png");
-      await page.click('.big-ask button:has-text("태그 줄만")');
-      await page.waitForSelector(".lines-view");
+      await page.click('.mpane-foot .lines-seg button:has-text("줄만")');
+      await page.waitForSelector('.lines-view[data-mode="lines"]');
       await waitDone(page);
       ok("큰 파일을 읽지 않고 줄만 보기", calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
       const tagsShown = await page.$$eval(".lv-tag", (els) => els.map((e) => e.textContent.trim()));
@@ -679,33 +677,27 @@ async function main() {
       ok(`기본 위 0 아래 3 (보이는 ${head ? head.length : 0}행 / 전체 ${w.length}행)`, !!head, (await shownRows(page)).slice(0, 8));
       ok("행 수 = grep 행 수", +(await viewData(page)).count === w.length, (await viewData(page)).count);
       await shot(page, "lines-bundle.png");
-      ok("칸 아래 [전체|줄만] 에서 줄만이 켜짐", await page.$eval(".mpane-foot .lines-seg button.on", (e) => e.textContent.includes("줄만")));
-      // whole file of a file over the open limit: refused, the view stays
+      ok("칸 아래 [📖 읽기|🏷 줄만|✏️ 편집] 에서 줄만이 켜짐", await page.$eval(".mpane-foot .lines-seg button.on", (e) => e.textContent.includes("줄만")));
+      // 「📖 전체」 of a file over the open limit: the 📖 view (nothing read) — was refused before
       await page.click('.lv-btn:has-text("전체")');
-      await until(() => page.__dialogs.length > 0, 3000);
-      ok("726MB → 「전체」 는 거절 (이 판 문구)", page.__dialogs.some((d) => d.includes("너무 커서") && d.includes("태그 줄만") && !d.includes("다음 버전")), page.__dialogs);
-      ok("거절 뒤 줄만 보기 그대로 · 읽지 않음", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")) && calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
-      // a 200MB log of the same folder: 3 choices; its whole file then asks (no 「태그 줄만」 choice), cancel keeps the view
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      ok("726MB → 「📖 전체」 = 읽기 보기 · 읽지 않음", !(await page.$(".big-ask")) && calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
+      // a 200MB log of the same folder: 📖 at once; ✏️ asks (C) and reads it in pieces
       await page.fill(".bt-filter", "mid.log");
       await page.click('.bt-row.file:has-text("mid.log") >> nth=0');
-      await page.waitForSelector(".big-ask");
-      const btnsM = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
-      ok("200MB 확인 창: 태그 줄만 / 전체 / 취소", JSON.stringify(btnsM) === '["🏷 태그 줄만 열기","전체 열기","취소"]', btnsM);
-      ok("확인 창에 크기 (200MB)", (await page.$eval(".big-ask h3", (e) => e.textContent)).includes("200.0MB"));
-      await page.click('.big-ask button:has-text("태그 줄만")');
       await until(async () => (calls(be, "FilterStart").pop() || { args: [{}] }).args[0].path === mid, 4000);
-      await waitDone(page);
-      await page.click('.lv-btn:has-text("전체")');
-      await page.waitForSelector(".big-ask");
-      const btns2 = await page.$$eval(".big-ask button", (els) => els.map((e) => e.textContent.trim()));
-      ok("전체로 갈 때도 확인 (전체 / 취소)", JSON.stringify(btns2) === '["전체 열기","취소"]', btns2);
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      ok("200MB → 확인 창 없이 📖", !(await page.$(".big-ask")));
+      await page.click(".lv-edit");
+      await page.waitForSelector('.choice-ask[data-kind="edit"]');
+      ok("✏️ → 확인 창(크기 200MB)", (await page.$eval(".choice-ask h3", (e) => e.textContent)).includes("200.0MB"));
       await page.keyboard.press("Escape");
       await sleep(200);
-      ok("Esc = 취소 → 줄만 보기 그대로", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")));
-      await page.click('.lv-btn:has-text("전체")');
-      await page.click('.big-ask button:has-text("전체 열기")');
-      await page.waitForSelector(".mpane .cm-editor");
-      ok("「전체 열기」 → 읽어서 편집기", calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 1);
+      ok("Esc = 취소 → 📖 그대로", !!(await page.$('.lines-view[data-mode="all"]')) && !(await page.$(".choice-ask")));
+      await page.click(".lv-edit");
+      await page.click('.choice-ask [data-choice="edit"]');
+      await page.waitForSelector(".mpane .cm-editor", { timeout: 15000 });
+      ok("「✏️ 편집으로 열기」 → 조각으로 읽어서 편집기", calls(be, "EditOpenBegin").length === 1 && calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
       // .gz through 「📂 파일 열기」 of an empty pane (multi view)
       await page.click(".mp-x"); // empty the pane
       const readsBeforeGz = calls(be, "ReadFile").length + calls(be, "ReadFileAs").length;
@@ -723,9 +715,10 @@ async function main() {
         return r.some((x) => x.startsWith("70:")) && r;
       }, 5000)) || (await shownRows(page));
       ok(".gz 풀린 내용으로 거름", shownGz.some((r) => r.startsWith("50:kafka rebalance 50")) && shownGz.some((r) => r.startsWith("70:ERROR e70")), shownGz.slice(0, 8));
+      // .gz: 「전체」 = 「📖 읽기 보기」 (readview) — was refused before; the editor never
       await page.click('.lv-btn:has-text("전체")');
-      await sleep(200);
-      ok(".gz 는 전체 보기 안 됨 (안내)", page.__dialogs.some((d) => d.includes("압축(.gz)")), page.__dialogs);
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      ok(".gz 의 전체 = 📖 읽기(압축 풀어 모든 줄) · 편집 꺼짐", !gzRead && (await page.$eval(".lv-edit", (e) => e.disabled).catch(() => true)) && (await shownRows(page)).some((r) => r.startsWith("1:info 1")), (await shownRows(page)).slice(0, 3));
       await ctx.close();
     }
 
@@ -829,7 +822,7 @@ async function main() {
     const hasRow = async (page, prefix, ms = 5000) => !!(await until(async () => (await shownRows(page)).some((r) => r.startsWith(prefix)), ms));
 
     // H1 · a file over 384MB through 📂 열기 (single view) and the multi-file dialog
-    console.log("10a. 384MB 넘는 파일 — 📂 파일 열기 · 여러 파일 한 번에 · 취소");
+    console.log("10a. 384MB 넘는 파일 — 📂 파일 열기 · 여러 파일 한 번에 → 📖 읽기");
     if (want("10a")) {
       const huge = P("huge.log");
       const midF = P("mid10.log");
@@ -842,20 +835,18 @@ async function main() {
       be.st.session = session([], "");
       be.st.openFiles = [huge];
       const { ctx, page } = await openPage(browser, url, be);
+      // readview (user 10-28): 100MB 이상은 확인 창 없이 「📖 읽기 보기」 — 예전의
+      // 「태그 줄만 / 취소」 확인 창(과 그 「취소」)은 없음
       await page.click('.empty-actions button:has-text("파일 열기")');
-      await until(async () => (await page.$(".big-ask")) || page.__dialogs.length, 3000);
-      ok("726MB 📂 열기 → 「태그 줄만 / 취소」 확인 창", JSON.stringify(await askBtns(page)) === '["🏷 태그 줄만 열기","취소"]', { btns: await askBtns(page), dialogs: page.__dialogs });
+      await page.waitForSelector('.lines-view[data-mode="all"]', { timeout: 5000 }).catch(() => {});
+      ok("726MB 📂 열기 → 확인 창 없이 📖 읽기", !(await page.$(".big-ask")) && !!(await page.$('.lines-view[data-mode="all"]')), { dialogs: page.__dialogs });
       ok("726MB 📂 열기 → 「너무 커서」 알림 없음", !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
-      if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("취소")');
-      await sleep(300);
-      ok("취소 → 아무것도 안 열림", (await tabCount(page)) === 0 && !(await page.$(".lines-view")) && reads(be).length === 0);
-      await page.click('.empty-actions button:has-text("파일 열기")');
-      await page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
-      if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("태그 줄만")');
-      await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
-      ok("「태그 줄만 열기」 → 726MB 줄만 보기 (읽지 않음)", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0, reads(be).length);
+      ok("726MB 📖 → 모든 줄 (읽지 않음)", (await hasRow(page, "1:info 1")) && reads(be).length === 0, reads(be).length);
+      await page.click('.lines-seg button:has-text("줄만")');
+      await page.waitForSelector('.lines-view[data-mode="lines"]', { timeout: 3000 }).catch(() => {});
+      ok("🏷 줄만 → 726MB 줄만 보기 (읽지 않음)", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0, reads(be).length);
       await ctx.close();
-      // several files at once (multi view, empty pane → 📂 파일 열기): 200MB + 726MB, 「전체 열기」
+      // several files at once (multi view, empty pane → 📂 파일 열기): 200MB + 726MB → both 📖, nothing read
       const be2 = makeBackend();
       be2.st.tags = TAGS1;
       be2.st.sizes[huge] = 726 << 20;
@@ -864,19 +855,13 @@ async function main() {
       be2.st.openFiles = [midF, huge];
       const r2 = await openPage(browser, url, be2);
       await r2.page.click('.mpane .empty-actions button:has-text("파일 열기")');
-      await r2.page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
-      ok("200MB + 726MB 한 번에 → 확인 창 하나 (줄만 / 전체 / 취소)", JSON.stringify(await askBtns(r2.page)) === '["🏷 태그 줄만 열기","전체 열기","취소"]', { btns: await askBtns(r2.page), dialogs: r2.page.__dialogs });
-      const t2 = (await r2.page.$eval(".big-ask p", (e) => e.textContent).catch(() => "")) || "";
-      ok("확인 창: 726MB 는 줄만으로 열린다고 알림", t2.includes("huge.log") && t2.includes("태그 줄만"), t2);
-      if (await r2.page.$(".big-ask")) await r2.page.click('.big-ask button:has-text("전체 열기")');
       await until(async () => (await tabCount(r2.page)) === 2, 3000);
-      const rd = reads(be2).map((x) => path.basename(x.args[0]));
-      ok("「전체 열기」 → 200MB 는 읽고 726MB 는 줄만 탭", JSON.stringify(rd) === '["mid10.log"]' && (await tabCount(r2.page)) === 2, { rd, tabs: await tabCount(r2.page), dialogs: r2.page.__dialogs });
+      ok("200MB + 726MB 한 번에 → 확인 창 없이 둘 다 📖 탭, 읽지 않음", !(await r2.page.$(".big-ask")) && (await tabCount(r2.page)) === 2 && reads(be2).length === 0, { tabs: await tabCount(r2.page), dialogs: r2.page.__dialogs });
       await r2.ctx.close();
     }
 
     // M2 · big .gz: never 「전체 열기」, 「취소」 is kept, no 「너무 커서」 — 📂 열기 and the tree alike
-    console.log("10b. 큰 .gz — 확인 창은 「태그 줄만 / 취소」, 취소 지킴 (📂 열기 · 트리)");
+    console.log("10b. 큰 .gz — 확인 창 없이 📖 읽기 (📂 열기 · 트리), 작은 .gz 는 줄만");
     if (want("10b")) {
       const gz = P("big10.log.gz");
       fs.writeFileSync(gz, zlib.gzipSync(Buffer.from(small.join("\n"))));
@@ -889,11 +874,10 @@ async function main() {
         const { ctx, page } = await openPage(browser, url, be);
         await page.click('.empty-actions button:has-text("파일 열기")');
         await until(async () => (await page.$(".big-ask")) || (await page.$(".lines-view")) || page.__dialogs.length, 3000);
-        ok(`.gz ${sz >> 20}MB 📂 열기 → 「태그 줄만 / 취소」`, JSON.stringify(await askBtns(page)) === '["🏷 태그 줄만 열기","취소"]', { btns: await askBtns(page), dialogs: page.__dialogs });
+        // readview: a big .gz opens as 📖 (decompressed by the engine) without a question
+        ok(`.gz ${sz >> 20}MB 📂 열기 → 확인 창 없이 📖 읽기`, !(await page.$(".big-ask")) && (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all", { dialogs: page.__dialogs });
         ok(`.gz ${sz >> 20}MB → 「너무 커서」 알림 없음`, !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
-        if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("취소")');
-        await sleep(400);
-        ok(`.gz ${sz >> 20}MB 「취소」 → 열리지 않음`, !(await page.$(".lines-view")) && (await tabCount(page)) === 0);
+        ok(`.gz ${sz >> 20}MB 📖 → 풀린 모든 줄 · 편집 꺼짐`, (await hasRow(page, "1:info 1")) && (await page.$(".lv-edit")) === null, await shownRows(page));
         await ctx.close();
       }
       // a small .gz: no question, straight to 줄만 보기
@@ -944,10 +928,8 @@ async function main() {
       ok("트리 .gz 행: 흐리지 않음 · 「줄만 보기로 열림」 풍선 · 끌기·⇉", !rowInfo.off && !rowInfo.title.includes("열 수 없습니다") && rowInfo.title.includes("줄만") && rowInfo.drag && rowInfo.all, rowInfo);
       await row.click();
       await until(async () => (await page.$(".big-ask")) || (await page.$(".lines-view")), 3000);
-      ok("트리 150MB .gz → 「태그 줄만 / 취소」", JSON.stringify(await askBtns(page)) === '["🏷 태그 줄만 열기","취소"]', await askBtns(page));
-      if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("취소")');
-      await sleep(400);
-      ok("트리 .gz 「취소」 → 칸 그대로 (안 열림)", !(await page.$(".lines-view")));
+      ok("트리 150MB .gz → 확인 창 없이 📖 읽기", !(await page.$(".big-ask")) && (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all");
+      await page.click(".mp-x"); // empty the pane
       await page.click('.bt-row.file:has-text("app.log.2.gz")');
       await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
       ok("트리 작은 .gz → 묻지 않고 줄만 보기", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")));
@@ -955,7 +937,7 @@ async function main() {
     }
 
     // H1 · M3 · restored big tabs (single view): 「🏷 태그 줄만」 in the pane
-    console.log("10c. 복원된 큰 탭 (한 칸 보기) — 「🏷 태그 줄만」 · 384MB 넘으면 전체 열기 없음");
+    console.log("10c. 복원된 큰 탭 (한 칸 보기) — 예산 안이면 ✏️, 384MB 넘으면 📖 + 안내");
     if (want("10c")) {
       const f = P("rest10.log");
       fs.writeFileSync(f, small.join("\n"));
@@ -965,20 +947,13 @@ async function main() {
         be.st.sizes[f] = 200 << 20;
         be.st.session = session([tab("t1", f)], "t1");
         const { ctx, page } = await openPage(browser, url, be);
-        await sleep(600);
-        const b = await emptyBtns(page);
-        ok("200MB 복원 탭: 줄만 / 전체 열기 / 탭 닫기", JSON.stringify(b) === '["🏷 태그 줄만","전체 열기","× 탭 닫기"]', b);
-        if (b.some((x) => x.includes("줄만"))) await page.click('.empty-actions button:has-text("태그 줄만")');
+        // readview: an editor tab of a big file (the session keeps its path)
+        // comes back ✏️ when the budget allows — read in pieces, no question
+        await page.waitForSelector(".cm-editor", { timeout: 8000 }).catch(() => {});
+        ok("200MB 복원 탭(편집이던 탭) → 예산 안 → 묻지 않고 ✏️ (조각 읽기)", !!(await page.$(".cm-editor")) && calls(be, "EditOpenBegin").length === 1 && reads(be).length === 0 && !(await page.$(".big-ask")), calls(be, "EditOpenBegin").length);
+        await page.click('.lines-seg button:has-text("줄만")');
         await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
-        ok("「🏷 태그 줄만」 → 줄만 보기 (읽지 않음)", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0, reads(be).length);
-        // and back to the whole file: asks once, then reads
-        if (await page.$(".lines-view")) {
-          await page.click('.lv-btn:has-text("전체")');
-          await page.waitForSelector(".big-ask", { timeout: 3000 }).catch(() => {});
-          if (await page.$(".big-ask")) await page.click('.big-ask button:has-text("전체 열기")');
-          await page.waitForSelector(".cm-editor", { timeout: 3000 }).catch(() => {});
-          ok("줄만 → 전체: 한 번 묻고 읽음", !!(await page.$(".cm-editor")) && reads(be).length === 1, reads(be).length);
-        }
+        ok("🏷 줄만 → 줄만 보기", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")));
         await ctx.close();
       }
       {
@@ -987,13 +962,12 @@ async function main() {
         be.st.sizes[f] = 726 << 20;
         be.st.session = session([tab("t1", f)], "t1");
         const { ctx, page } = await openPage(browser, url, be);
-        await sleep(600);
-        const b = await emptyBtns(page);
-        ok("726MB 복원 탭: 줄만 / 탭 닫기 (전체 열기 없음)", JSON.stringify(b) === '["🏷 태그 줄만","× 탭 닫기"]', b);
-        const txt = await page.$eval(".empty", (e) => e.textContent).catch(() => "");
-        ok("726MB 복원 탭 문구: 384MB 까지 · 「다음 버전」 없음", txt.includes("384MB") && !txt.includes("다음 버전"), txt);
-        if (b.some((x) => x.includes("줄만"))) await page.click('.empty-actions button:has-text("태그 줄만")');
-        await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
+        await page.waitForSelector(".lines-view", { timeout: 8000 }).catch(() => {});
+        ok("726MB 복원 탭 → 📖 읽기 (편집으로 못 엶)", (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all" && calls(be, "EditOpenBegin").length === 0 && reads(be).length === 0);
+        const fl = await page.$eval(".st-flash", (e) => e.textContent).catch(() => "");
+        ok("726MB 복원 탭 안내: 편집이던 탭을 📖 로 연 이유(384MB)", fl.includes("📖 읽기 보기로 열었습니다") && fl.includes("384MB"), fl);
+        await page.click('.lines-seg button:has-text("줄만")');
+        await page.waitForSelector('.lines-view[data-mode="lines"]', { timeout: 3000 }).catch(() => {});
         ok("726MB 복원 탭 → 줄만 보기", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0);
         await ctx.close();
       }
@@ -1016,12 +990,9 @@ async function main() {
         await sleep(1500);
         const b = calls(be, "StatFile").length;
         ok(`멀티 칸 ${sz >> 20}MB 복원 탭: StatFile 이 멈춰 있음`, b - a <= 1, { a, b });
-        const btn = (await emptyBtns(page, ".mpane")).filter((x) => !x.includes("파일 열기")); // the other, empty pane
-        ok(
-          `멀티 칸 ${sz >> 20}MB 복원 탭: 칸 안에 「🏷 태그 줄만」`,
-          JSON.stringify(btn) === (sz > 384 << 20 ? '["🏷 태그 줄만","× 탭 닫기"]' : '["🏷 태그 줄만","전체 열기","× 탭 닫기"]'),
-          btn
-        );
+        // readview: 200MB comes back ✏️ (budget), 726MB 📖 — in the pane, no question
+        const ed = sz > 384 << 20 ? !!(await page.$('.mpane .lines-view[data-mode="all"]')) : !!(await until(async () => await page.$(".mpane .cm-editor"), 6000));
+        ok(`멀티 칸 ${sz >> 20}MB 복원 탭: 칸 안에 ${sz > 384 << 20 ? "📖 읽기" : "✏️ 편집기"} (묻지 않음)`, ed && !(await page.$(".big-ask")), await emptyBtns(page, ".mpane"));
         // a change that the session keeps: the other tab into the focused pane → autosave
         const s0 = calls(be, "SaveSession").length;
         await page.click(".tabs-scroll .tab >> nth=1");

@@ -123,6 +123,13 @@ export interface LinesViewProps {
   onJump: (line: number) => void; // open the whole file at this line
   onFull: () => void; // back to the whole file
   onLeave: (line: number) => void; // the top line, when the view goes away
+  // 「📖 읽기 보기」: every line of the file (the chips hide lines) — no tags,
+  // no context sizes, no row caps. "lines" (default) = 「🏷 줄만」.
+  mode?: "lines" | "all";
+  // 「✏️ 편집으로 열기」 in the head (big files): editWhy "" = can, else why not
+  onEdit?: () => void;
+  editWhy?: string;
+  fullLabel?: string; // the 「📄 전체」 button of 「🏷 줄만」 (「📖 전체」 for a big file)
 }
 
 type Trunc = "" | "rows" | "bytes";
@@ -130,9 +137,10 @@ type Trunc = "" | "rows" | "bytes";
 export default function LinesView(p: LinesViewProps) {
   const pr = useRef(p);
   pr.current = p;
+  const all = p.mode === "all";
   // the rules and the chips that are on: what is filtered (a chip switched
   // on/off or added/removed = filter again, staying at the same line)
-  const key = filterKey(p.rules) + "|" + excludeKey(p.exclude);
+  const key = (all ? "all" : filterKey(p.rules)) + "|" + excludeKey(p.exclude);
 
   const [prog, setProg] = useState<linefilter.Progress | null>(null);
   const [issues, setIssues] = useState<linefilter.RuleIssue[]>([]);
@@ -526,9 +534,10 @@ export default function LinesView(p: LinesViewProps) {
       delete rootRef.current.dataset.rowsMs;
     }
     const cur = pr.current;
+    const allMode = cur.mode === "all";
     // No rule to filter with (every tag unticked, or no 「줄만」 rule): nothing
     // to scan for — don't read the whole file (a temp copy for CP949/UTF-16) for it.
-    if (!cur.rules.length) {
+    if (!allMode && !cur.rules.length) {
       return () => {
         alive = false;
       };
@@ -537,8 +546,9 @@ export default function LinesView(p: LinesViewProps) {
     const req = linefilter.Request.createFrom({
       path: cur.path,
       encoding: cur.encoding,
-      rules: cur.rules.map((r) => ({ id: r.id, kind: r.kind, pattern: r.pattern, caseSensitive: r.caseSensitive, on: true, filter: true })),
+      rules: allMode ? [] : cur.rules.map((r) => ({ id: r.id, kind: r.kind, pattern: r.pattern, caseSensitive: r.caseSensitive, on: true, filter: true })),
       exclude: ex.rules,
+      mode: allMode ? "all" : undefined,
     });
     FilterStart(req)
       .then((res) => {
@@ -748,7 +758,9 @@ export default function LinesView(p: LinesViewProps) {
   });
 
   // --- selection, keys, copying -----------------------------------------------------------------------
+  // (「📖 읽기」 is the whole file already: a row opens nothing)
   const jump = (i: number) => {
+    if (pr.current.mode === "all") return;
     const r = storeRef.current.get(i);
     if (r) pr.current.onJump(rowLine(r));
   };
@@ -916,12 +928,12 @@ export default function LinesView(p: LinesViewProps) {
       continue;
     }
     const { node, tint } = paintText(r.text);
-    const rule = r.hit && r.rules?.length ? p.rules[r.rules[0]] : undefined;
-    const far = r.hit && r.col > r.text.length;
+    const rule = !all && r.hit && r.rules?.length ? p.rules[r.rules[0]] : undefined;
+    const far = !all && r.hit && r.col > r.text.length;
     rowsEls.push(
       <div
         key={i}
-        className={"lv-row" + (r.hit ? " lv-hit" : " lv-near") + (selected ? " sel" : "")}
+        className={"lv-row" + (all ? " lv-all" : r.hit ? " lv-hit" : " lv-near") + (selected ? " sel" : "")}
         style={tint ? { ...base, backgroundColor: tint + "1f" } : base}
         data-row={i}
         data-line={r.line}
@@ -934,7 +946,7 @@ export default function LinesView(p: LinesViewProps) {
         <span
           className="lv-no"
           style={{ width: gutterCh + "ch" }}
-          title="눌러서 전체 보기로 이 줄 열기"
+          title={all ? undefined : "눌러서 전체 보기로 이 줄 열기"}
           onClick={() => jump(i)}
         >
           {r.line}
@@ -943,9 +955,11 @@ export default function LinesView(p: LinesViewProps) {
           className="lv-mark"
           style={rule ? { background: rule.color } : undefined}
           title={
-            r.hit
-              ? "걸린 규칙: " + (r.rules ?? []).map((k) => ruleName(p, k)).join(", ")
-              : "걸린 줄의 위·아래 줄"
+            all
+              ? undefined
+              : r.hit
+                ? "걸린 규칙: " + (r.rules ?? []).map((k) => ruleName(p, k)).join(", ")
+                : "걸린 줄의 위·아래 줄"
           }
         />
         <span className="lv-text">
@@ -958,7 +972,7 @@ export default function LinesView(p: LinesViewProps) {
   }
 
   // --- header ------------------------------------------------------------------------------------------------
-  const noRules = !p.rules.length; // nothing is scanned (see the start effect)
+  const noRules = !all && !p.rules.length; // nothing is scanned (see the start effect)
   const scanning = !noRules && !!prog && !prog.done && !startErr;
   const pct = prog && prog.totalBytes > 0 ? Math.min(100, Math.floor((prog.scannedBytes / prog.totalBytes) * 100)) : 0;
   const hits = noRules ? 0 : prog?.hits ?? 0;
@@ -966,7 +980,16 @@ export default function LinesView(p: LinesViewProps) {
   // 「(제외 N)」: matched lines the chips left out (counted over the same part of the file)
   const exText = exOn && prog && !noRules ? ` (제외 ${fmtN(prog.excluded ?? 0)})` : "";
   let stat = "준비 중…";
-  if (noRules) stat = "거를 규칙 없음";
+  if (all) {
+    // 「📖 읽기」: hits = lines shown, excluded = lines hidden
+    const hid = exOn && prog ? ` (숨김 ${fmtN(prog.excluded ?? 0)})` : "";
+    if (startErr) stat = "오류";
+    else if (prog) {
+      if (prog.canceled) stat = `멈춤 — 여기까지 ${fmtN(count)}줄${hid}`;
+      else if (scanning) stat = `읽는 중 ${pct}% · ${fmtN(count)}줄${hid}`;
+      else stat = `${fmtN(count)}줄${hid}` + (prog.totalLines ? ` / 전체 ${fmtN(prog.totalLines)}줄` : "") + ` · ${(prog.elapsedMs / 1000).toFixed(2)}초`;
+    }
+  } else if (noRules) stat = "거를 규칙 없음";
   else if (startErr) stat = "오류";
   else if (prog) {
     if (prog.canceled) stat = `멈춤 — 여기까지 걸린 줄 ${fmtN(hits)}${exText} · ${fmtN(count)}행`;
@@ -978,8 +1001,9 @@ export default function LinesView(p: LinesViewProps) {
         (prog.totalLines ? ` / 전체 ${fmtN(prog.totalLines)}줄` : "") +
         ` · ${(prog.elapsedMs / 1000).toFixed(2)}초`;
   }
-  const ruleHitTitle =
-    p.rules.map((r, k) => `${ruleName(p, k)}: ${fmtN(prog?.ruleHits?.[k] ?? 0)}줄${prog?.truncated ? " (앞부분 기준)" : ""}`).join("\n") +
+  const ruleHitTitle = all
+    ? "📖 읽기 보기 — 파일의 모든 줄" + (exOn ? `\n🚫 제외 칩으로 숨긴 줄: ${fmtN(prog?.excluded ?? 0)}줄` : "")
+    : p.rules.map((r, k) => `${ruleName(p, k)}: ${fmtN(prog?.ruleHits?.[k] ?? 0)}줄${prog?.truncated ? " (앞부분 기준)" : ""}`).join("\n") +
     (exOn ? `\n🚫 제외로 뺀 걸린 줄: ${fmtN(prog?.excluded ?? 0)}줄${prog?.truncated ? " (앞부분 기준)" : ""}` : "") +
     (exOn ? "\n(규칙별 수는 제외하고 남은 줄 기준)" : "");
   const commitCtx = (which: "a" | "b", text: string) => {
@@ -995,7 +1019,7 @@ export default function LinesView(p: LinesViewProps) {
   const notes: { cls: string; text: string }[] = [];
   const err = startErr || prog?.error;
   if (err) notes.push({ cls: "err", text: "거르지 못했습니다: " + err });
-  if (!p.rules.length)
+  if (noRules)
     notes.push({
       cls: "warn",
       text: "줄만 보기에 쓰는 규칙이 없습니다 — 위의 태그 체크를 켜거나, 태그 창(🏷)에서 규칙의 「줄만」을 켜세요.",
@@ -1028,7 +1052,9 @@ export default function LinesView(p: LinesViewProps) {
         prog.slowRules.map((k) => `「${ruleName(p, k)}」`).join(", ") +
         " — 정규식이 복잡해 느린 방식으로 거릅니다(결과는 같음). 규칙을 단순하게 하면 빨라집니다.",
     });
-  if (prog?.truncated)
+  if (all && prog?.truncated)
+    notes.push({ cls: "warn", text: `숨길 줄이 너무 많아(${fmtN(prog.excluded ?? 0)}줄) 앞부분만 보여 줍니다. 제외 칩을 줄이세요.` });
+  else if (prog?.truncated)
     notes.push({
       cls: "warn",
       text:
@@ -1055,7 +1081,7 @@ export default function LinesView(p: LinesViewProps) {
       cls: "info",
       text: `UTF-8 이 아닌 바이트 ${fmtN(prog.invalidBytes)}개(줄 ${fmtN(prog.invalidLine)}부터)는 �로 보입니다 — 다른 인코딩이면 상태 표시줄에서 바꾸세요.`,
     });
-  if (p.dirty) notes.push({ cls: "info", text: "고친 내용이 있는 탭입니다 — 줄만 보기는 저장된 파일 기준입니다." });
+  if (p.dirty) notes.push({ cls: "info", text: `고친 내용이 있는 탭입니다 — ${all ? "읽기" : "줄만"} 보기는 저장된 파일 기준입니다.` });
   if (notice) notes.push({ cls: "info", text: notice });
 
   return (
@@ -1065,13 +1091,27 @@ export default function LinesView(p: LinesViewProps) {
       data-state={noRules ? "done" : startErr ? "error" : prog?.done ? "done" : "scan"}
       data-count={count}
       data-hits={hits}
+      data-mode={all ? "all" : "lines"}
       data-holding={holding ? "1" : undefined}
     >
       <div className="lv-head">
-        <button className="lv-btn" onClick={() => pr.current.onFull()} title="전체 파일 보기로 돌아가기 (줄을 두 번 누르거나 Enter 면 그 줄로)">
-          📄 전체
-        </button>
-        <span className="lv-title">🏷 줄만</span>
+        {!all && (
+          <button className="lv-btn lv-full" onClick={() => pr.current.onFull()} title="전체 파일 보기로 돌아가기 (줄을 두 번 누르거나 Enter 면 그 줄로)">
+            {p.fullLabel || "📄 전체"}
+          </button>
+        )}
+        <span className="lv-title">{all ? "📖 읽기" : "🏷 줄만"}</span>
+        {p.onEdit && (
+          <button
+            className="lv-btn lv-edit"
+            disabled={!!p.editWhy}
+            title={p.editWhy ? "편집으로 열 수 없음: " + p.editWhy : "이 파일을 편집기로 읽어 들여 고칩니다 (확인 창에 걸리는 시간·메모리)"}
+            onClick={() => pr.current.onEdit?.()}
+          >
+            ✏️ 편집으로 열기
+          </button>
+        )}
+        {!all && (<>
         <span className="lv-tags" role="group" aria-label="거를 때 쓸 태그">
           {p.tagNames.map((n) => (
             <label key={n} className={"lv-tag" + (p.off.includes(n) ? " off" : "")} title={`「${n}」 태그의 「줄만」 규칙으로 거르기`}>
@@ -1102,13 +1142,14 @@ export default function LinesView(p: LinesViewProps) {
             onBlur={() => setBText(String(clampContext(p.below)))}
           />
         </label>
+        </>)}
         <span className="lv-stat" title={ruleHitTitle}>
           {stat}
         </span>
         {scanning ? (
           <button
             className="lv-btn"
-            title="거르기 멈추기 (여기까지 찾은 줄은 남음)"
+            title={all ? "읽기 멈추기 (여기까지 읽은 줄은 남음)" : "거르기 멈추기 (여기까지 찾은 줄은 남음)"}
             onClick={() => {
               if (jobRef.current) FilterCancel(jobRef.current);
             }}
@@ -1118,7 +1159,7 @@ export default function LinesView(p: LinesViewProps) {
         ) : (
           <button
             className="lv-btn"
-            title="처음부터 다시 거르기"
+            title={all ? "처음부터 다시 읽기" : "처음부터 다시 거르기"}
             onClick={() => {
               pendingLine.current = topLine();
               setNotice("");
@@ -1129,7 +1170,7 @@ export default function LinesView(p: LinesViewProps) {
           </button>
         )}
       </div>
-      <ExcludeChips list={p.exclude} issues={exIssues} onChange={(next) => pr.current.onExclude(next)} />
+      <ExcludeChips list={p.exclude} issues={exIssues} all={all} onChange={(next) => pr.current.onExclude(next)} />
       {notes.map((n, k) => (
         <div key={k} className={"lv-note " + n.cls}>
           {n.text}
@@ -1173,6 +1214,8 @@ export default function LinesView(p: LinesViewProps) {
         </div>
         {noRules ? (
           <div className="lv-empty">거를 규칙이 없습니다.</div>
+        ) : all ? (
+          prog?.done && !err && count === 0 && <div className="lv-empty">{exOn ? "보일 줄이 없습니다 (제외 칩이 모두 숨김)." : "빈 파일입니다."}</div>
         ) : (
           // no hit: the one 「⋯ N줄 생략」 row (or none) and this
           prog?.done &&
@@ -1201,7 +1244,7 @@ function ruleName(p: LinesViewProps, k: number): string {
 // opens a small input: Enter adds (글자 그대로 by default, Aa = case, the kind
 // select as in the tag window), Esc closes. A chip that cannot be used says
 // why (the tag rules' check; the engine's reason when it left one out).
-function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<string, string>; onChange: (next: ExcludeRule[]) => void }) {
+function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<string, string>; all?: boolean; onChange: (next: ExcludeRule[]) => void }) {
   const [adding, setAdding] = useState(false);
   const [text, setText] = useState("");
   const [kind, setKind] = useState<RuleKind>("text");
@@ -1224,7 +1267,14 @@ function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<string, string>; onC
   const kindName: Record<RuleKind, string> = { text: "글자 그대로", word: "단어", regex: "정규식" };
   return (
     <div className="lv-ex" role="group" aria-label="제외">
-      <span className="lv-ex-title" title="걸린 줄 중 이 글자가 든 줄을 뺍니다 (그 줄 때문에 붙은 위·아래 줄도). 다른 걸린 줄의 위·아래 줄로는 남습니다. 칩을 누르면 켜고 끄고, ×로 지웁니다. 이 탭에만 저장됩니다.">
+      <span
+        className="lv-ex-title"
+        title={
+          p.all
+            ? "이 글자가 든 줄을 숨깁니다(📖 읽기). 🏷 줄만에서는 걸린 줄에서 뺍니다. 칩을 누르면 켜고 끄고, ×로 지웁니다. 이 탭에만 저장됩니다."
+            : "걸린 줄 중 이 글자가 든 줄을 뺍니다 (그 줄 때문에 붙은 위·아래 줄도). 다른 걸린 줄의 위·아래 줄로는 남습니다. 칩을 누르면 켜고 끄고, ×로 지웁니다. 이 탭에만 저장됩니다."
+        }
+      >
         🚫 제외:
       </span>
       {p.list.map((x, i) => {
@@ -1287,7 +1337,7 @@ function ExcludeChips(p: { list: ExcludeRule[]; issues: Map<string, string>; onC
           {problem && <span className="lv-ex-why">쓸 수 없음: {problem}</span>}
         </span>
       ) : (
-        <button className="lv-btn lv-ex-plus" onClick={() => setAdding(true)} title="걸린 줄에서 뺄 글자 추가">
+        <button className="lv-btn lv-ex-plus" onClick={() => setAdding(true)} title={p.all ? "숨길 줄의 글자 추가" : "걸린 줄에서 뺄 글자 추가"}>
           + 추가
         </button>
       )}

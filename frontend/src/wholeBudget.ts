@@ -44,3 +44,29 @@ export function wholeWaitText(bytes: number): string {
   const s = Math.max(1, Math.round((bytes / (1 << 20)) * WHOLE_SEC_PER_MB));
   return `전체로 열면 다 읽을 때까지 창이 멈춘 것처럼 보입니다(약 ${s}초 — 100MB 에 15초쯤). 그동안 누른 것은 다 읽은 뒤에 처리됩니다.`;
 }
+
+// 「✏️ 편집으로 열기」 of a big file read in 「📖 읽기 보기」 (readview): the text
+// comes to the window in 4MB pieces (EditOpenChunk), the window answering
+// between them; building the editor at the end stops it for a moment.
+// .18 / headless measurements in readview-impl.md.
+export const EDIT_SEC_PER_MB = 0.1;
+export const EDIT_HEAP_PER_BYTE = 3.3; // window JS memory per byte held (300MB → ~1GB, realtest 10-28)
+
+// Why a file of `size` cannot be opened for editing with `held` already held
+// ("" = it can): the same total as 「전체 열기」 (WHOLE_BUDGET).
+export function editBudgetWhy(held: number, size: number, fmt: (n: number) => string): string {
+  if (held + size <= WHOLE_BUDGET) return "";
+  return `편집으로 연 파일이 합쳐 ${fmt(held + size)} 가 되어 ${fmt(WHOLE_BUDGET)} 를 넘습니다(지금 ${fmt(held)}) — 편집 중인 다른 큰 탭을 📖 읽기로 돌리거나 닫으세요`;
+}
+
+export function editAskText(size: number, held: number, fmt: (n: number) => string): string {
+  const s = Math.max(1, Math.round((size / (1 << 20)) * EDIT_SEC_PER_MB));
+  const gb = (size * EDIT_HEAP_PER_BYTE) / (1 << 30);
+  return [
+    `· 여는 데 약 ${s}초 걸립니다(크기로 추정). 그동안 이 탭은 보기를 바꿀 수 없고, 다른 탭의 「✏️ 편집으로 열기」도 기다립니다 — [취소]로 그만둘 수 있습니다. 끝에 편집기를 만드는 몇 초는 앱이 응답하지 않습니다.`,
+    `· 화면 메모리를 약 ${gb < 0.1 ? "0.1" : gb.toFixed(1)}GB 씁니다(창 하나 한계 약 4GB).`,
+    `· 편집으로 연 파일은 모두 합쳐 ${fmt(WHOLE_BUDGET)} 까지입니다 — 지금 ${fmt(held)}, 이 파일까지 ${fmt(held + size)}.`,
+    "· 저장도 오래 걸립니다(300MB 에 수십 초, 그동안 다른 탭의 편집 열기는 막힘).",
+    "· 보기·찾기·제외만 할 거면 📖 읽기 보기가 빠르고 가볍습니다.",
+  ].join("\n");
+}

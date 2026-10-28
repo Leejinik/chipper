@@ -13,13 +13,19 @@ import { COMMON, rulesFor, type TagStore } from "./logTags";
 // --- per-tab state (kept in the session) -------------------------------------
 
 export interface LinesState {
-  on: boolean; // the tab shows 「태그 줄만」 instead of the whole file
+  on: boolean; // the tab shows the Go engine's view (「📖 읽기」 or 「🏷 줄만」) instead of the editor
+  // 「📖 읽기 보기」: every line of the file (the chips hide lines) instead of
+  // the tag lines — what 「전체」 is for a big file (BIG_FILE+, .gz), which is
+  // not read into the editor unless asked (「✏️ 편집으로 열기」).
+  read: boolean;
+  // A big file's tab: its 「전체」 is 「📖 읽기」 and the editor is 「✏️ 편집」.
+  big: boolean;
   above: number; // lines shown before each matched line (grep -B)
   below: number; // … after it (grep -A)
   off: string[]; // applied tags left out of the filter (e.g. "common")
-  ex: ExcludeRule[]; // 「🚫 제외」 chips (this tab only, not the tags)
+  ex: ExcludeRule[]; // 「🚫 제외」 chips (this tab only, not the tags) — in 「📖 읽기」 they hide lines
 }
-export const DEFAULT_LINES: LinesState = { on: false, above: 0, below: 3, off: [], ex: [] };
+export const DEFAULT_LINES: LinesState = { on: false, read: false, big: false, above: 0, below: 3, off: [], ex: [] };
 
 // 「🚫 제외」: a matched line that also holds one of these is left out — with
 // the lines above/below it brought (they stay when another hit shows them).
@@ -104,6 +110,8 @@ export function normalizeLines(raw: any): LinesState | null {
   if (!raw || typeof raw !== "object") return null;
   return {
     on: raw.on === true,
+    read: raw.read === true, // a session from before 「📖 읽기」: 「🏷 줄만」
+    big: raw.big === true,
     above: clampContext(raw.above ?? DEFAULT_LINES.above),
     below: clampContext(raw.below ?? DEFAULT_LINES.below),
     off: Array.isArray(raw.off) ? raw.off.filter((x: unknown): x is string => typeof x === "string").slice(0, 100) : [],

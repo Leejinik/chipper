@@ -367,3 +367,80 @@
   border-color: var(--accent);
   color: #fff;
 }
+
+/* 「📖 읽기 보기」 (readview) */
+.lv-all .lv-text {
+  color: var(--text);
+}
+.lv-btn.lv-edit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.rv-wait .rv-progress {
+  width: min(420px, 80%);
+  margin: 10px 0;
+}
+.st-mem-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.st-mem {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 0 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.st-mem:hover {
+  border-color: var(--border);
+}
+.st-mem.warn {
+  color: #f0c64a;
+  border-color: #6b5a1f;
+}
+.st-mem.high {
+  color: #fff;
+  background: #a33a3a;
+}
+.mem-pop {
+  position: absolute;
+  bottom: 22px;
+  right: 0;
+  z-index: 60;
+  min-width: 340px;
+  max-width: 560px;
+  max-height: 50vh;
+  overflow: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.mem-head {
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+.mem-tabs {
+  border-collapse: collapse;
+  width: 100%;
+}
+.mem-tabs td {
+  padding: 2px 6px;
+  border-top: 1px solid var(--border);
+  white-space: nowrap;
+}
+.mem-tabs .mem-t {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mem-tabs .mem-n {
+  text-align: right;
+}

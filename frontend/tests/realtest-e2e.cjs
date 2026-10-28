@@ -527,7 +527,9 @@ async function main() {
 
     // =============== R6. six 300MB at once: no 「전체 열기」 ==============================================
     if (want("R6")) {
-      console.log("R6. 300MB 여섯 개 한 번에 → 「전체 열기」 없이 줄만");
+      // readview (user 10-28): 100MB 이상은 확인 창 없이 「📖 읽기 보기」 — 예전 R6 의
+      // 「🏷 태그 줄만 열기 / 취소」 확인 창과 「두 개는 전체 열기」는 이 기능으로 바뀜
+      console.log("R6. 300MB 여섯 개 한 번에 → 확인 창 없이 6칸 📖 읽기 · ✏️ 확인 창 안내");
       const six = [1, 2, 3, 4, 5, 6].map((k) => P(`collector${k}.log`));
       for (const f of six) fs.writeFileSync(f, "abc 1\nabc 2\n");
       const emptySix = session([], "", { multi: { on: true, count: 6, slots: Array.from({ length: 6 }, () => ({ tabId: "", mode: "read", server: "" })), bundle: null } });
@@ -538,29 +540,17 @@ async function main() {
       be.st.session = emptySix;
       const { ctx, page } = await openPage(browser, url, be, { width: 1400, height: 900 });
       await page.click('.mpane[data-slot="0"] .empty-actions button:has-text("파일 열기")');
-      await page.waitForSelector(".big-ask");
-      const ask = await page.$eval(".big-ask", (e) => ({ text: e.querySelector("p").textContent, buttons: [...e.querySelectorAll("button")].map((b) => b.textContent.trim()) }));
-      ok("확인 창 버튼 = 「🏷 태그 줄만 열기 / 취소」 (전체 열기 없음)", eq(ask.buttons, ["🏷 태그 줄만 열기", "취소"]), ask.buttons);
-      ok("문구: 합계 1.8GB · 768.0MB 까지 · 줄이세요", ask.text.includes("1.8GB") && ask.text.includes("768.0MB") && ask.text.includes("줄이세요"), ask.text);
-      await page.click('.big-ask button:has-text("태그 줄만")');
       await until(async () => (await page.$$eval(".lines-view", (e) => e.length)) === 6, 15000);
-      ok("6칸 모두 줄만 보기", (await page.$$eval(".lines-view", (e) => e.length)) === 6);
+      ok("확인 창 없음", !(await page.$(".big-ask")));
+      ok("6칸 모두 📖 읽기", (await page.$$eval('.lines-view[data-mode="all"]', (e) => e.length)) === 6);
       ok("파일을 읽지 않음(ReadFile 0)", calls(be, "ReadFile").length === 0, calls(be, "ReadFile").length);
+      // ✏️ of one: the question says how long and that the window stops at the end
+      await page.click('.mpane[data-slot="0"] .lv-edit');
+      await page.waitForSelector(".choice-ask");
+      const t2 = await page.$eval(".choice-ask p", (e) => e.textContent);
+      ok("✏️ 확인 창: 걸리는 시간(약 30초)·응답하지 않음·768MB", t2.includes("약 30초") && t2.includes("응답하지 않") && t2.includes("768.0MB"), t2);
+      await page.click('.choice-ask button:has-text("취소")');
       await ctx.close();
-      // two of them: still offered whole (600MB)
-      const be2 = makeBackend();
-      be2.st.tags = tags;
-      for (const f of six) be2.st.sizes[f] = 300 * 1024 * 1024;
-      be2.st.openFiles = six.slice(0, 2);
-      be2.st.session = emptySix;
-      const p2 = await openPage(browser, url, be2, { width: 1400, height: 900 });
-      await p2.page.click('.mpane[data-slot="0"] .empty-actions button:has-text("파일 열기")');
-      await p2.page.waitForSelector(".big-ask");
-      const b2 = await p2.page.$$eval(".big-ask button", (e) => e.map((b) => b.textContent.trim()));
-      ok("두 개(600MB)는 「전체 열기」 그대로", b2.includes("전체 열기"), b2);
-      const t2 = await p2.page.$eval(".big-ask p", (e) => e.textContent);
-      ok("… 다 읽을 때까지 창이 멈춘 듯 보인다는 안내(약 90초)", t2.includes("멈춘 것처럼") && t2.includes("약 90초"), t2);
-      await p2.ctx.close();
     }
   } finally {
     await browser.close();

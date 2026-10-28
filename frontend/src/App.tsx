@@ -49,6 +49,7 @@ import {
   type AssignTarget,
 } from "./tagAssign";
 import LinesView from "./LinesView";
+import MemBar, { type MemTab } from "./MemBar";
 import { upgradeCommonDefaults } from "./commonDefaults";
 import RuleFromText, { selectionForRule } from "./RuleFromText";
 import { editorExcludeTarget, ExcludeEditorItem } from "./ExcludeCtxMenu";
@@ -58,7 +59,7 @@ import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import { comboKey, normalizeCombo } from "./keyCombo";
 import "./App.css";
-import { budgetAsks, budgetText, wholeBudget, wholeWaitText } from "./wholeBudget";
+import { budgetAsks, budgetText, editAskText, editBudgetWhy, wholeBudget, wholeWaitText, WHOLE_BUDGET } from "./wholeBudget";
 import {
   OpenFileDialog,
   OpenFilesDialog,
@@ -67,6 +68,9 @@ import {
   CancelScanBundle,
   ReadFile,
   ReadFileAs,
+  EditOpenBegin,
+  EditOpenChunk,
+  EditOpenEnd,
   SaveFileDialog,
   SaveFileAs,
   SaveFile,
@@ -268,6 +272,14 @@ const BIG_FILE = 100 << 20; // warn before opening a log this large
 // What to do with a file that big: read it whole, show only its tag lines
 // (「태그 줄만」 — the Go filter reads the file on disk, nothing is loaded), or not.
 type BigChoice = "lines" | "full" | "cancel";
+// A question with its own buttons (「✏️ 편집으로 열기」 확인 창, 「저장 / 버리기 / 취소」).
+interface ChoiceAsk {
+  kind: string; // "edit" | "dirty" — for tests and styles
+  title: string;
+  text: string;
+  buttons: { id: string; label: string; primary?: boolean }[];
+  resolve: (id: string) => void;
+}
 const BIG_TEXT =
   "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n" +
   "「태그 줄만」은 파일을 열지 않고, 태그 규칙에 걸린 줄과 그 위·아래 줄만 바로 보여 줍니다.";
@@ -917,6 +929,20 @@ function App() {
   // 「전체 열기」 (only files that never open whole: over the limit, .gz).
   type BigAsk = { title: string; text: string; noLines: boolean; noFull: boolean; resolve: (c: BigChoice) => void };
   const [bigAsk, setBigAsk] = useState<BigAsk | null>(null);
+  // 「📖 읽기 보기」 of big files (readview-qa-plan.md §2): the one tab being
+  // read for the editor (W, ⏳ 편집용으로 여는 중 — one at a time), a question
+  // with buttons (C: 「✏️ 편집으로 열기」 / D: 「저장 / 버리기 / 취소」), the
+  // tabs being saved (S), tabs to close once their save is over.
+  const [editLoad, setEditLoad] = useState<{ tabId: string; title: string; pct: number } | null>(null);
+  const editLoadRef = useRef<{ tabId: string; title: string; pct: number; cancel: boolean; id: string } | null>(null);
+  const [choice, setChoice] = useState<ChoiceAsk | null>(null);
+  const choiceRef = useRef<ChoiceAsk | null>(null);
+  const savingRef = useRef(new Map<string, Promise<void>>());
+  const [saving, setSaving] = useState<string[]>([]);
+  const closeAfterSave = useRef(new Set<string>());
+  // file sizes known (normPath → bytes): the open gate, a stat of a 📖 tab
+  const knownSize = useRef(new Map<string, number>());
+  const [, setSizeTick] = useState(0);
   const bigAskRef = useRef<BigAsk | null>(null);
   const [treeOpen, setTreeOpen] = useState<boolean>(true); // directory tree beside the panes
   // 「📂 디렉토리 열기」 scan in progress (shown after a moment, with 취소).
@@ -1475,6 +1501,34 @@ function App() {
   // asked about first — they must not vanish without a word.
   useEffect(() => {
     const off = EventsOn("chipper:flush-before-close", async () => {
+      // C (the 「✏️ 편집으로 열기」 question): ends as 취소, the window closes as from 📖
+      if (choiceRef.current?.kind === "edit") answerChoiceRef.current("cancel");
+      const w = editLoadRef.current;
+      if (w) {
+        await HoldClose().catch(() => {});
+        if (!window.confirm(`「${w.title}」 을(를) 편집용으로 여는 중입니다 (${w.pct}%).\n닫으면 여는 것을 그만둡니다. 닫을까요?`)) {
+          CancelClose().catch(() => {});
+          return;
+        }
+        cancelEditLoadRef.current(true);
+      }
+      if (savingRef.current.size) {
+        // S: the window waits for the save to end
+        await HoldClose().catch(() => {});
+        flashRef.current("저장이 끝나면 닫습니다…");
+        await Promise.all([...savingRef.current.values()]).catch(() => {});
+      }
+      // a big edited file (D): 「저장 / 버리기 / 취소」 one by one
+      for (const t of tabsRef.current.filter((x) => x.dirty && x.lines?.big && !x.needsLoad)) {
+        await HoldClose().catch(() => {});
+        const c = await askDirtyRef.current(t, "앱을 닫기 전에");
+        if (c === "cancel" || (c === "save" && !(await saveTabRef.current(t.id)))) {
+          CancelClose().catch(() => {});
+          return;
+        }
+        if (c === "discard") setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, dirty: false } : x)));
+        tabsRef.current = tabsRef.current.map((x) => (x.id === t.id ? { ...x, dirty: false } : x));
+      }
       await saveTagsNow().catch(() => "");
       const snap = loadedRef.current ? snapshot() : "";
       const lost = tabsRef.current.filter(
@@ -1565,7 +1619,7 @@ function App() {
 
   // A tab showing only the tag lines of a file, without reading it (a file too
   // big to open, or .gz). A tab already open on the file switches to that view.
-  const openLinesOnly = useCallback((path: string, label: string): string => {
+  const openLinesOnly = useCallback((path: string, label: string, read = false): string => {
     const existing = tabsRef.current.find((t) => samePath(t.path, path));
     if (existing) {
       setTabs((prev) =>
@@ -1574,7 +1628,12 @@ function App() {
             ? {
                 ...t,
                 label: t.label || label,
-                lines: { ...(t.lines ?? DEFAULT_LINES), on: true },
+                lines: {
+                  ...(t.lines ?? DEFAULT_LINES),
+                  on: true,
+                  ...(read && t.needsLoad ? { read: true, big: true } : {}),
+                  ...(isGz(path) ? { big: true } : {}),
+                },
                 encAuto: isGz(path) || t.needsLoad ? true : t.encAuto,
               }
             : t
@@ -1590,12 +1649,16 @@ function App() {
       needsLoad: true,
       encAuto: true,
       label,
-      lines: { ...DEFAULT_LINES, on: true },
+      lines: { ...DEFAULT_LINES, on: true, read, big: read || isGz(path) },
     });
     setTabs((prev) => (prev.some((t) => samePath(t.path, path)) ? prev : [...prev, tab]));
     return tab.id;
   }, []);
 
+  const toReadRef = useRef<(id: string, line?: number) => Promise<boolean>>(async () => false);
+  const answerChoiceRef = useRef<(id: string) => void>(() => {});
+  const editWhyRef = useRef<(t: Tab, size: number) => string>(() => "");
+  const startEditLoadRef = useRef<(t: Tab, size: number) => Promise<void>>(async () => {});
   const setLines = useCallback((id: string, f: (l: LinesState) => LinesState) => {
     setTabs((prev) => prev.map((t) => (t.id === id ? { ...t, lines: f(t.lines ?? DEFAULT_LINES) } : t)));
   }, []);
@@ -1606,10 +1669,8 @@ function App() {
     async (id: string, line = 0): Promise<boolean> => {
       const t = tabsRef.current.find((x) => x.id === id);
       if (!t) return false;
-      if (t.path && isGz(t.path)) {
-        alert("압축(.gz) 파일은 전체 보기로 열 수 없습니다 — 「태그 줄만」으로만 볼 수 있습니다.\n전체를 보려면 압축을 풀어서 여세요.");
-        return false;
-      }
+      // a big file (.gz too): 「전체」 = 「📖 읽기 보기」 — nothing to read
+      if (t.lines?.big || (t.path && isGz(t.path))) return toReadRef.current(id, line);
       if (t.needsLoad && t.path) {
         let size = 0;
         try {
@@ -1618,25 +1679,16 @@ function App() {
         } catch {
           /* the read will say */
         }
-        if (size <= TOO_BIG_FILE && wholeBudget(heldWhole(), [{ size, whole: true }]).over) {
+        if (size >= BIG_FILE) {
+          // a big file never read: its 「전체」 is 「📖 읽기 보기」 (user 10-28) —
+          // the editor only through 「✏️ 편집으로 열기」
+          if (size > 0) knownSize.current.set(normPath(t.path), size);
+          setLines(id, (l) => ({ ...l, big: true }));
+          return toReadRef.current(id, line);
+        }
+        if (wholeBudget(heldWhole(), [{ size, whole: true }]).over) {
           alert(budgetMsg(heldWhole(), size, true));
           return false;
-        }
-        if (size >= BIG_FILE) {
-          if (size > TOO_BIG_FILE) {
-            alert(tooBigText([{ name: t.title, size }]));
-            return false;
-          }
-          const c = await askBig(
-            `큰 파일입니다 (${t.label || t.title} ${fmtSize(size)})`,
-            "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n큰 파일의 그 줄 주변만 여는 기능은 아직 없습니다.\n" +
-              wholeWaitText(size),
-            { noLines: true }
-          );
-          if (c !== "full") return false;
-          // The deferred loader enforces the same threshold. Remember this
-          // explicit approval so it does not ask again and pause in the pane.
-          bigApproved.current.add(id);
         }
       }
       if (line > 0) pendingJump.current.set(id, line);
@@ -1665,7 +1717,7 @@ function App() {
     async (
       items: { path: string; size?: number; name?: string; restat?: boolean }[],
       wholeOnly = false
-    ): Promise<{ allowed: Set<string>; tooBig: Set<string>; lines: Set<string>; declined: boolean; sizes: Map<string, number> }> => {
+    ): Promise<{ allowed: Set<string>; tooBig: Set<string>; lines: Set<string>; read: Set<string>; declined: boolean; sizes: Map<string, number> }> => {
       const sized = await Promise.all(
         items.map(async (x) => {
           let size = typeof x.size === "number" ? x.size : 0;
@@ -1688,6 +1740,7 @@ function App() {
         })
       );
       const sizes = new Map(sized.map((x) => [x.path, x.size]));
+      for (const x of sized) if (x.size > 0) knownSize.current.set(normPath(x.path), x.size);
       const askTitle = (xs: typeof sized) => `큰 파일입니다 (${xs.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")})`;
       // the whole-file total (WHOLE_BUDGET): what is held + what this would read whole
       // (a tab read again — another encoding — replaces what it holds)
@@ -1702,7 +1755,7 @@ function App() {
         const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: x.size <= TOO_BIG_FILE && !isGz(x.path) })));
         if (wb.over) {
           alert(budgetMsg(held, wb.adding, wb.counted === 1));
-          return { allowed: new Set(), tooBig: new Set(tooBig.map((x) => x.path)), lines: new Set(), declined: true, sizes };
+          return { allowed: new Set(), tooBig: new Set(tooBig.map((x) => x.path)), lines: new Set(), read: new Set(), declined: true, sizes };
         }
         const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
         const choice: BigChoice = big.length
@@ -1713,15 +1766,19 @@ function App() {
           allowed: new Set(sized.filter((x) => x.size <= TOO_BIG_FILE && !isGz(x.path) && !(declined && x.size >= BIG_FILE)).map((x) => x.path)),
           tooBig: new Set(tooBig.map((x) => x.path)),
           lines: new Set(),
+          read: new Set(),
           declined,
           sizes,
         };
       }
+      // BIG_FILE and over (.gz too, and files over the open limit): 「📖 읽기
+      // 보기」 at once — no question, nothing read into the window (user 10-28).
+      const isRead = (x: { size: number }) => x.size >= BIG_FILE;
       // Over the whole-file total, every file of some size is asked about too
       // (small ones add up), with no 「전체 열기」.
-      const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: !noWhole(x) })));
+      const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: !noWhole(x) && !isRead(x) })));
       const overBudget = wb.over;
-      const asked = (x: { path: string; size: number }) => x.size >= BIG_FILE || budgetAsks(overBudget, { size: x.size, whole: !noWhole(x) });
+      const asked = (x: { path: string; size: number }) => !isRead(x) && budgetAsks(overBudget, { size: x.size, whole: !noWhole(x) });
       const big = sized.filter(asked);
       const canFull = !overBudget && big.some((x) => !noWhole(x));
       let choice: BigChoice = "full";
@@ -1736,15 +1793,20 @@ function App() {
       }
       const declined = choice === "cancel";
       const lines = new Set<string>();
+      const read = new Set<string>();
       for (const x of sized) {
-        if (asked(x)) {
+        if (isRead(x)) {
+          lines.add(x.path);
+          read.add(x.path);
+        } else if (asked(x)) {
           if (choice === "lines" || (choice === "full" && noWhole(x))) lines.add(x.path);
         } else if (isGz(x.path)) lines.add(x.path); // small .gz: no question
       }
       return {
         allowed: new Set(sized.filter((x) => !noWhole(x) && !lines.has(x.path) && !(declined && asked(x))).map((x) => x.path)),
-        tooBig: new Set(), // nothing is refused for its size: it opens as 「태그 줄만」 (or the question was declined)
+        tooBig: new Set(), // nothing is refused for its size: it opens as 「태그 줄만」 / 「📖 읽기」 (or the question was declined)
         lines,
+        read,
         declined,
         sizes,
       };
@@ -1784,7 +1846,7 @@ function App() {
       // when the size question was declined, nothing — every file-open route agrees.
       if (isGz(path) && !gate?.lines.has(path)) continue;
       if (gate?.lines.has(path)) {
-        const id = openLinesOnly(path, "");
+        const id = openLinesOnly(path, "", gate.read.has(path));
         seen.add(path);
         lastId = id;
         ids.push(id);
@@ -2007,7 +2069,12 @@ function App() {
   // and BOM. An unedited tab whose file was deleted asks to re-create it.
   const doSave = useCallback(async () => {
     const t = getActive();
+    if (t && t.needsLoad && t.lines?.on && t.path) {
+      flash(`${t.lines.read ? "📖 읽기" : "🏷 줄만"} 보기는 파일을 읽어 들이지 않아 저장할 것이 없습니다 — 고치려면 ✏️ 편집으로 여세요`);
+      return;
+    }
     if (!t || t.needsLoad) return; // content not read yet — never write ""
+    if (savingRef.current.has(t.id)) return; // S
     const locked = saveLockedMode();
     if (locked) {
       flash(
@@ -2044,18 +2111,33 @@ function App() {
     }
     if (!mixedOk(t)) return;
     if (!(await confirmOverwriteIfChanged(t))) return;
-    try {
-      await writeTab(t, t.encoding, false);
-    } catch (e) {
-      alert("저장하지 못했습니다:\n" + String(e));
-    }
+    await saveTabRef.current(t.id);
   }, [getActive, doSaveAs, confirmOverwriteIfChanged, saveLockedMode, flash, writeTab]);
 
-  const doCloseTab = useCallback((id: string) => {
-    const prev = tabsRef.current;
-    const t = prev.find((x) => x.id === id);
+  const doCloseTab = useCallback(async (id: string) => {
+    let prev = tabsRef.current;
+    let t = prev.find((x) => x.id === id);
     if (!t) return;
-    if (t.dirty) {
+    if (choiceRef.current) return; // a question is up (C): it owns the keys
+    if (savingRef.current.has(id)) {
+      // S: closed once the save is over
+      closeAfterSave.current.add(id);
+      flashRef.current(`「${t.label || t.title}」 저장 중 — 끝나면 닫습니다`);
+      return;
+    }
+    const w = editLoadRef.current;
+    if (w && w.tabId === id) {
+      if (!window.confirm(`「${t.label || t.title}」 을(를) 편집용으로 여는 중입니다 (${w.pct}%).\n닫으면 여는 것을 그만둡니다. 닫을까요?`)) return;
+      cancelEditLoadRef.current(false);
+    } else if (t.dirty && t.lines?.big) {
+      // a big edited file: 「저장 / 버리기 / 취소」 (readview-qa-plan §2 D)
+      const c = await askDirtyRef.current(t, "탭을 닫기 전에");
+      if (c === "cancel") return;
+      if (c === "save" && !(await saveTabRef.current(id))) return;
+      prev = tabsRef.current;
+      t = prev.find((x) => x.id === id);
+      if (!t) return;
+    } else if (t.dirty) {
       const ok = window.confirm(
         `"${t.title}"에 저장하지 않은 변경사항이 있습니다.\n탭을 닫으면 자동 복원에서도 제거됩니다. 닫을까요?`
       );
@@ -2069,6 +2151,317 @@ function App() {
       setActiveId(na ? na.id : "");
     }
   }, []);
+
+  // --- 「📖 읽기 보기」 ↔ 「🏷 줄만」 ↔ 「✏️ 편집」 of a big file ------------------
+  // (readview-qa-plan.md §2 is the contract: R 📖 · L 🏷 · C question · W ⏳ ·
+  // E/D ✏️ · S saving.) Budget: the text held by tabs read whole + what is
+  // being read for the editor ≤ WHOLE_BUDGET (heldWhole).
+  const askChoice = useCallback(
+    (kind: string, title: string, text: string, buttons: ChoiceAsk["buttons"]) =>
+      new Promise<string>((resolve) => {
+        const prev = choiceRef.current;
+        const next: ChoiceAsk = { kind, title, text, buttons, resolve };
+        choiceRef.current = next;
+        setChoice(next);
+        prev?.resolve("cancel");
+      }),
+    []
+  );
+  const answerChoice = (id: string) => {
+    const c = choiceRef.current;
+    choiceRef.current = null;
+    setChoice(null);
+    c?.resolve(id);
+  };
+  answerChoiceRef.current = answerChoice;
+  // D: 「저장 / 버리기 / 취소」 → "save" | "discard" | "cancel"
+  const askDirty = useCallback(
+    (t: Tab, when: string) =>
+      askChoice(
+        "dirty",
+        `저장하지 않은 고친 내용 (${t.label || t.title})`,
+        `${when} — 고친 내용을 저장할까요?\n버리면 고친 내용은 사라지고, 파일은 그대로입니다.`,
+        [
+          { id: "save", label: "💾 저장", primary: true },
+          { id: "discard", label: "버리기" },
+          { id: "cancel", label: "취소" },
+        ]
+      ) as Promise<"save" | "discard" | "cancel">,
+    [askChoice]
+  );
+  const askDirtyRef = useRef(askDirty);
+  askDirtyRef.current = askDirty;
+  const isSaving = () => savingRef.current.size > 0;
+  // Save tab `id` (S): blocks its switches and every 「편집으로 열기」 meanwhile.
+  const saveTab = useCallback(
+    async (id: string): Promise<boolean> => {
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (!t || t.needsLoad || !t.path) return false;
+      if (savingRef.current.has(id)) {
+        await savingRef.current.get(id);
+        return true;
+      }
+      let ok = false;
+      const run = (async () => {
+        try {
+          await writeTab(t, t.encoding, false);
+          ok = true;
+        } catch (e) {
+          alert("저장하지 못했습니다:\n" + String(e));
+        }
+      })();
+      savingRef.current.set(id, run);
+      setSaving([...savingRef.current.keys()]);
+      try {
+        await run;
+      } finally {
+        savingRef.current.delete(id);
+        setSaving([...savingRef.current.keys()]);
+        if (closeAfterSave.current.delete(id)) window.setTimeout(() => void doCloseTabRef.current(id), 0);
+      }
+      // (the tab's state catches up on the next render: writeTab said it is written)
+      return ok;
+    },
+    [writeTab]
+  );
+  const saveTabRef = useRef(saveTab);
+  saveTabRef.current = saveTab;
+  const doCloseTabRef = useRef(doCloseTab);
+  doCloseTabRef.current = doCloseTab;
+  const flashRef = useRef(flash);
+  flashRef.current = flash;
+
+  // Why tab t cannot be opened for editing now ("" = it can). size: the file's.
+  const editWhy = useCallback(
+    (t: Tab, size: number): string => {
+      if (!t.path) return "파일이 없습니다";
+      if (isGz(t.path)) return "압축(.gz) 파일은 편집으로 열 수 없습니다 — 풀어서 여세요";
+      if (size > TOO_BIG_FILE) return `${LIMIT_TEXT} 를 넘어 편집으로 열 수 없습니다`;
+      const w = editLoadRef.current;
+      if (w && w.tabId !== t.id) return `앞 파일(${w.title})을 편집용으로 여는 중 (${w.pct}%) — 끝나거나 취소한 뒤에 여세요`;
+      if (isSaving()) return "다른 파일을 저장하는 중 — 끝난 뒤에 여세요";
+      if (t.needsLoad) return editBudgetWhy(heldWhole(), size, fmtSize);
+      return "";
+    },
+    [heldWhole]
+  );
+  const sizeOf = (t: Tab) => knownSize.current.get(normPath(t.path)) ?? 0;
+
+  // W ends: back to 📖 (「취소」, a failed read) — readview-qa-plan §2 W·취소 → R.
+  const cancelEditLoad = useCallback((toRead = true) => {
+    const w = editLoadRef.current;
+    if (!w) return;
+    w.cancel = true;
+    if (w.id) EditOpenEnd(w.id).catch(() => {});
+    editLoadRef.current = null;
+    setEditLoad(null);
+    readingWhole.current.delete("edit:" + w.tabId);
+    if (toRead) setLines(w.tabId, (l) => ({ ...l, on: true, read: true, big: true }));
+  }, [setLines]);
+  const cancelEditLoadRef = useRef(cancelEditLoad);
+  cancelEditLoadRef.current = cancelEditLoad;
+  editWhyRef.current = editWhy;
+
+  // W: read the file for the editor in pieces (EditOpenBegin/Chunk/End), the
+  // window answering between them; then the tab becomes ✏️ (E).
+  const startEditLoad = useCallback(
+    async (t: Tab, size: number) => {
+      const title = t.label || t.title;
+      const w = { tabId: t.id, title, pct: 0, cancel: false, id: "" };
+      editLoadRef.current = w;
+      setEditLoad({ tabId: t.id, title, pct: 0 });
+      // counted from the start (WHOLE_BUDGET): another 「편집으로 열기」 sees it
+      readingWhole.current.set("edit:" + t.id, size);
+      const t0 = performance.now();
+      try {
+        const o = await EditOpenBegin(t.path, t.encAuto ? "" : t.encoding);
+        w.id = o.id;
+        if (w.cancel) {
+          EditOpenEnd(o.id).catch(() => {});
+          return;
+        }
+        if (o.doc.binary) {
+          EditOpenEnd(o.id).catch(() => {});
+          throw new Error("텍스트 문서가 아닙니다");
+        }
+        const parts: string[] = [];
+        for (let i = 0; i < o.chunks; i++) {
+          parts.push(await EditOpenChunk(o.id, i));
+          if (w.cancel) return;
+          const pct = Math.min(99, Math.floor(((i + 1) / o.chunks) * 100));
+          if (pct !== w.pct) {
+            w.pct = pct;
+            setEditLoad({ tabId: t.id, title, pct });
+          }
+        }
+        EditOpenEnd(o.id).catch(() => {});
+        if (w.cancel) return;
+        const content = parts.join("");
+        parts.length = 0;
+        knownSize.current.set(normPath(t.path), o.doc.size || size);
+        // the editor opens where the 📖 view was
+        const at = linesAnchor.current.get(t.id);
+        if (at && at > 1) pendingJump.current.set(t.id, at);
+        setTabs((prev) =>
+          prev.map((x) =>
+            x.id !== t.id || !x.needsLoad
+              ? x
+              : {
+                  ...x,
+                  content,
+                  encoding: o.doc.encoding || x.encoding,
+                  encAuto: false,
+                  ...formatOf(o.doc),
+                  mtime: o.doc.modTime,
+                  needsLoad: false,
+                  loadError: "",
+                  bigSize: 0,
+                  dirty: false,
+                  reloadSeq: x.reloadSeq + 1,
+                  lines: { ...(x.lines ?? DEFAULT_LINES), on: false, big: true },
+                }
+          )
+        );
+        document.documentElement.dataset.editLoadMs = String(Math.round(performance.now() - t0));
+      } catch (e) {
+        if (!w.cancel) {
+          alert(`「${title}」 을(를) 편집용으로 열지 못했습니다:\n` + String(e));
+          setLines(t.id, (l) => ({ ...l, on: true, read: true, big: true }));
+        }
+      } finally {
+        if (editLoadRef.current === w) {
+          editLoadRef.current = null;
+          setEditLoad(null);
+        }
+        // counted in the tab from its next render on
+        window.setTimeout(() => readingWhole.current.delete("edit:" + t.id), 200);
+      }
+    },
+    [setLines]
+  );
+
+  startEditLoadRef.current = startEditLoad;
+
+  // 「✏️ 편집으로 열기」 (R / L → C → W): a tab still holding its text (✏️ →
+  // 🏷 → ✏️) goes back at once.
+  const requestEdit = useCallback(
+    async (id: string) => {
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (!t || !t.path || choiceRef.current) return;
+      if (editLoadRef.current?.tabId === id || savingRef.current.has(id)) return;
+      if (!t.needsLoad) {
+        setLines(id, (l) => ({ ...l, on: false }));
+        return;
+      }
+      let size = sizeOf(t);
+      try {
+        const st = await StatFile(t.path);
+        if (st?.exists) {
+          size = st.size;
+          knownSize.current.set(normPath(t.path), size);
+        }
+      } catch {
+        /* the read will say */
+      }
+      const why = editWhy(t, size);
+      if (why) {
+        flash(why);
+        setSizeTick((n) => n + 1);
+        return;
+      }
+      const c = await askChoice("edit", `✏️ 편집으로 열기 (${t.label || t.title} ${fmtSize(size)})`, editAskText(size, heldWhole(), fmtSize), [
+        { id: "edit", label: "✏️ 편집으로 열기", primary: true },
+        { id: "cancel", label: "취소" },
+      ]);
+      if (c !== "edit") return;
+      const now = tabsRef.current.find((x) => x.id === id);
+      if (!now || !now.needsLoad) return;
+      const again = editWhy(now, size); // a W elsewhere started meanwhile?
+      if (again) {
+        flash(again);
+        return;
+      }
+      void startEditLoad(now, size);
+    },
+    [askChoice, editWhy, flash, heldWhole, setLines, startEditLoad]
+  );
+
+  // To 「📖 읽기」 (E / D / L → R): the editor's text is let go (the budget
+  // with it); edits are asked about first (D: 저장 / 버리기 / 취소).
+  const toRead = useCallback(
+    async (id: string, line = 0): Promise<boolean> => {
+      const t = tabsRef.current.find((x) => x.id === id);
+      if (!t || choiceRef.current) return false;
+      if (editLoadRef.current?.tabId === id) return false; // W: switching is blocked
+      if (savingRef.current.has(id)) {
+        flash("저장 중 — 끝난 뒤에 바꿀 수 있습니다");
+        return false;
+      }
+      if (!t.needsLoad) {
+        if (t.dirty) {
+          const c = await askDirty(t, "📖 읽기 보기로 돌아가기 전에");
+          if (c === "cancel") return false;
+          if (c === "save" && !(await saveTab(id))) return false;
+        }
+        const v = viewsRef.current.get(id);
+        if (v && !line && !t.lines?.on) line = v.state.doc.lineAt(v.state.selection.main.head).number;
+      }
+      if (line > 0) linesAnchor.current.set(id, line);
+      setTabs((prev) =>
+        prev.map((x) =>
+          x.id !== id
+            ? x
+            : {
+                ...x,
+                content: "",
+                needsLoad: !!x.path,
+                dirty: false,
+                loadError: "",
+                bigSize: 0,
+                reloadSeq: x.needsLoad ? x.reloadSeq : x.reloadSeq + 1, // the editor's last flush is not taken back
+                lines: { ...(x.lines ?? DEFAULT_LINES), on: true, read: true, big: true },
+              }
+        )
+      );
+      return true;
+    },
+    [askDirty, flash, saveTab]
+  );
+  toReadRef.current = toRead;
+
+  useEffect(() => {
+    if (!choice) return;
+    const onKey = (e: KeyboardEvent) => {
+      const inDlg = (e.target as HTMLElement | null)?.closest?.(".choice-ask");
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        answerChoice("cancel");
+        return;
+      }
+      if (inDlg && (e.key === "Enter" || e.key === " " || e.key === "Tab")) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [choice]);
+  // the size of a 📖 tab (its 「✏️」 says at once whether the budget allows)
+  useEffect(() => {
+    for (const t of tabs) {
+      if (!t.lines?.big || !t.path || knownSize.current.has(normPath(t.path))) continue;
+      knownSize.current.set(normPath(t.path), 0);
+      StatFile(t.path)
+        .then((st) => {
+          if (st?.exists) {
+            knownSize.current.set(normPath(t.path), st.size);
+            setSizeTick((n) => n + 1);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [tabs]);
 
   // --- deferred read of tabs restored without content ------------------------
   // Only the tab being looked at is read, so a session full of big logs starts
@@ -2097,6 +2490,21 @@ function App() {
       size = st?.exists ? st.size : 0;
     } catch {
       size = 0;
+    }
+    if (size > 0) knownSize.current.set(normPath(t.path), size);
+    if (t.lines?.big || size >= BIG_FILE) {
+      // a big file left in ✏️ (the session keeps only its path): back to ✏️
+      // when the budget allows (read in pieces, W), otherwise 📖 with a word
+      // (readview-qa-plan §2 세션 복원)
+      loadingIds.current.delete(t.id);
+      const tb = { ...t, lines: { ...(t.lines ?? DEFAULT_LINES), big: true } };
+      const why = editWhyRef.current(tb, size);
+      setTabs((prev) =>
+        prev.map((x) => (x.id === t.id ? { ...x, bigSize: 0, lines: { ...(x.lines ?? DEFAULT_LINES), on: true, read: true, big: true } } : x))
+      );
+      if (why) flashRef.current(`「${t.label || t.title}」 는 편집으로 열려 있었지만 📖 읽기 보기로 열었습니다 — ${why}`);
+      else void startEditLoadRef.current(tb, size);
+      return;
     }
     if (!bigApproved.current.has(t.id)) {
       // over the whole-file total (WHOLE_BUDGET) the pane asks too, with no 「전체 열기」
@@ -2153,8 +2561,9 @@ function App() {
   // question). The question is answered: going back to 「전체」 asks again
   // (showWhole) instead of stopping at the question in the pane.
   const toLines = useCallback((id: string) => {
+    if (editLoadRef.current?.tabId === id || savingRef.current.has(id) || choiceRef.current) return; // W / S / C: blocked
     setTabs((prev) =>
-      prev.map((x) => (x.id === id ? { ...x, bigSize: 0, lines: { ...(x.lines ?? DEFAULT_LINES), on: true } } : x))
+      prev.map((x) => (x.id === id ? { ...x, bigSize: 0, lines: { ...(x.lines ?? DEFAULT_LINES), on: true, read: false } } : x))
     );
   }, []);
 
@@ -2381,7 +2790,7 @@ function App() {
           const label = `${x.server} · ${x.file.rel.split("/").pop()}`;
           let why = "텍스트 문서가 아닙니다";
           try {
-            id = gate.lines.has(fp) || isGz(fp) ? openLinesOnly(fp, label) : await openOne(fp, label);
+            id = gate.lines.has(fp) || isGz(fp) ? openLinesOnly(fp, label, gate.read.has(fp)) : await openOne(fp, label);
           } catch (e) {
             why = String(e);
           }
@@ -2462,7 +2871,7 @@ function App() {
         else {
           const gate = await gateSizes([{ path: fp, size: f?.size, restat: typeof f?.size === "number", name: `${server} ${base}` }]);
           if (gate.declined || multiRef.current.bundle?.root !== root) return;
-          id = gate.lines.has(fp) || isGz(fp) ? openLinesOnly(fp, label) : await openOne(fp, label);
+          id = gate.lines.has(fp) || isGz(fp) ? openLinesOnly(fp, label, gate.read.has(fp)) : await openOne(fp, label);
         }
       } catch (e) {
         alert(`${base} 을 열 수 없습니다 — ${String(e)}`);
@@ -3601,10 +4010,33 @@ function App() {
     const ap = tagsFor(filterStore, t.path, bundles);
     const l = t.lines ?? DEFAULT_LINES;
     const off = l.off.filter((n) => ap.names.includes(n));
+    if (editLoad && editLoad.tabId === t.id)
+      // W: being read for the editor — switching is blocked, [취소] goes back to 📖
+      return (
+        <div className="empty rv-wait" data-tab={t.id} data-edit-load={editLoad.pct}>
+          <div className="empty-title">⏳ 편집용으로 여는 중 {editLoad.pct}%</div>
+          <div className="empty-sub">{t.path}</div>
+          <progress className="rv-progress" max={100} value={editLoad.pct} />
+          <div className="empty-sub">
+            다 읽으면 편집기로 바뀝니다. 그동안 이 탭은 보기를 바꿀 수 없고, 다른 탭의 「✏️ 편집으로 열기」도 기다립니다. 다른 탭은 그대로 쓸 수 있습니다.
+          </div>
+          <div className="empty-actions">
+            <button className="tb-btn rv-cancel" onClick={() => cancelEditLoad()}>
+              취소 (📖 읽기로)
+            </button>
+          </div>
+        </div>
+      );
+    const read = !!l.read;
+    const why = l.big ? editWhy(t, sizeOf(t)) : "";
     return (
       <div className="lines-host" data-tab={t.id}>
       <LinesView
-        key={t.id + "#lines"}
+        key={t.id + (read ? "#all" : "#lines")}
+        mode={read ? "all" : "lines"}
+        onEdit={l.big && !isGz(t.path) ? () => void requestEdit(t.id) : undefined}
+        editWhy={why}
+        fullLabel={l.big ? "📖 전체" : undefined}
         path={t.path}
         encoding={isGz(t.path) || t.encAuto ? "" : t.encoding}
         rules={filterRules(filterStore, ap.names, off)}
@@ -3634,6 +4066,41 @@ function App() {
   // [전체 | 🏷 줄만] switch of a tab with a file.
   const linesSeg = (t: Tab) => {
     const on = !!t.lines?.on;
+    if (t.lines?.big) {
+      const R = on && !!t.lines.read;
+      const L = on && !t.lines.read;
+      const E = !on && !t.needsLoad;
+      const busy = editLoad?.tabId === t.id || saving.includes(t.id); // W / S: blocked
+      const why = E ? "" : editWhy(t, sizeOf(t));
+      return (
+        <span className="lines-seg big" role="group" aria-label="보기" data-state={busy ? (saving.includes(t.id) ? "S" : "W") : R ? "R" : L ? "L" : t.dirty ? "D" : "E"}>
+          <button
+            className={R ? "on" : ""}
+            disabled={busy}
+            title="📖 읽기 보기 — 파일의 모든 줄을 디스크에서 바로(편집기에 올리지 않음). 찾기·제외(줄 숨김)·로그 색. 편집 중이면 그 내용을 내려놓습니다"
+            onClick={() => !R && void toRead(t.id)}
+          >
+            📖 읽기
+          </button>
+          <button
+            className={L ? "on" : ""}
+            disabled={busy}
+            title="🏷 태그 줄만 — 이 파일에 붙은 태그(common 포함)의 「줄만」 규칙에 걸린 줄과 그 위·아래 줄만"
+            onClick={() => !L && toLines(t.id)}
+          >
+            🏷 줄만
+          </button>
+          <button
+            className={E ? "on" : ""}
+            disabled={busy || (!E && !!why)}
+            title={E ? "편집 중" : why ? "편집으로 열 수 없음: " + why : "✏️ 편집으로 열기 — 편집기로 읽어 들여 고침 (확인 창에 시간·메모리)"}
+            onClick={() => !E && void requestEdit(t.id)}
+          >
+            ✏️ 편집
+          </button>
+        </span>
+      );
+    }
     return (
       <span className="lines-seg" role="group" aria-label="보기">
         <button className={on ? "" : "on"} title="파일 전체 보기" onClick={() => on && void showWhole(t.id)}>
@@ -3698,6 +4165,27 @@ function App() {
       </>
     );
   };
+
+  // 🧠 status bar (MemBar.tsx)
+  const memTabs = (): MemTab[] =>
+    tabsRef.current.map((t) => ({
+      id: t.id,
+      title: t.label || t.title,
+      mode:
+        editLoadRef.current?.tabId === t.id
+          ? "wait"
+          : savingRef.current.has(t.id)
+            ? "save"
+            : t.lines?.on && t.path
+              ? t.lines.read
+                ? "read"
+                : "lines"
+              : t.needsLoad
+                ? "other"
+                : "edit",
+      held: t.needsLoad ? (editLoadRef.current?.tabId === t.id ? readingWhole.current.get("edit:" + t.id) ?? 0 : 0) : textLength(t),
+    }));
+  const memBar = <MemBar tabs={memTabs} held={heldWhole} budget={WHOLE_BUDGET} tick={[tabs, editLoad, saving]} />;
 
   // --- multi-view panes ------------------------------------------------------
   const visibleSlots = multi.slots.slice(0, multi.count);
@@ -4418,7 +4906,7 @@ function App() {
                 onContextMenu={active.lines?.on ? undefined : openCtxMenu}
               >
                 <div className="pane-head">
-                  {active.lines?.on && active.path ? "태그 줄만 · 읽기 전용" : "소스 · 편집"}
+                  {active.lines?.on && active.path ? (active.lines.read ? "📖 읽기 보기 · 읽기 전용" : "태그 줄만 · 읽기 전용") : "소스 · 편집"}
                   {!active.lines?.on && (
                     <span className="pane-hint">Alt+드래그 멀티커서 · Ctrl+D 다음 선택 · 우클릭 메뉴</span>
                   )}
@@ -4498,6 +4986,7 @@ function App() {
               </span>
             )}
             <span className="st-right">
+              {memBar}
               <button
                 className="st-font"
                 title="에디터 글꼴 크기 · Ctrl+휠로 확대/축소, 클릭 또는 Ctrl+0으로 기본값(14px) 재설정"
@@ -4649,6 +5138,7 @@ function App() {
         ) : (
           <>
             <span className="st-path">준비됨</span>
+            <span className="st-right">{memBar}</span>
             {flashMsg && (
               <span className="st-flash" role="status">
                 {flashMsg}
@@ -4971,6 +5461,21 @@ function App() {
         />
       )}
 
+      {choice && (
+        <div className="big-ask-back choice-back">
+          <div className="big-ask choice-ask" role="dialog" aria-modal="true" aria-label={choice.title} data-kind={choice.kind}>
+            <h3>{choice.title}</h3>
+            <p style={{ whiteSpace: "pre-line" }}>{choice.text}</p>
+            <div className="ba-actions">
+              {choice.buttons.map((b) => (
+                <button key={b.id} className={"tb-btn" + (b.primary ? " primary" : "")} autoFocus={!!b.primary} data-choice={b.id} onClick={() => answerChoice(b.id)}>
+                  {b.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
       {bigAsk && (
         <div
           className="big-ask-back"

@@ -1,7 +1,7 @@
 // Unit tests of the whole-file total (wholeBudget.ts): six real 300MB logs
 // opened whole killed the window on the test PC (10-28, realtest-progress.md).
 //   node tests/run-unit.cjs
-import { budgetAsks, budgetText, BUDGET_SMALL, WHOLE_BUDGET, wholeBudget, wholeWaitText } from "../src/wholeBudget";
+import { budgetAsks, budgetText, BUDGET_SMALL, editAskText, editBudgetWhy, WHOLE_BUDGET, wholeBudget, wholeWaitText } from "../src/wholeBudget";
 
 let pass = 0;
 let fail = 0;
@@ -48,6 +48,19 @@ t = wholeWaitText(300 * MB);
 ok("wait 300MB ≈ 45초", t.includes("약 45초") && t.includes("멈춘 것처럼"), t);
 ok("wait 600MB ≈ 90초", wholeWaitText(600 * MB).includes("약 90초"));
 ok("wait tiny ≥ 1초", wholeWaitText(1000).includes("약 1초"));
+
+// 「✏️ 편집으로 열기」 (readview): the same total, W counted from its start
+{
+  const MB = 1 << 20;
+  const f = (n: number) => (n / MB).toFixed(1) + "MB";
+  ok("편집: 300 + 300 = 600MB 허용", editBudgetWhy(300 * MB, 300 * MB, f) === "");
+  ok("편집: 정확히 768MB 허용", editBudgetWhy(468 * MB, 300 * MB, f) === "");
+  const why = editBudgetWhy(600 * MB, 300 * MB, f);
+  ok("편집: 600 + 300 → 막힘 + 이유(합계·한도·지금)", why.includes("900.0MB") && why.includes("768.0MB") && why.includes("지금 600.0MB"), why);
+  ok("편집: 1바이트 넘음 → 막힘", editBudgetWhy(WHOLE_BUDGET - 300 * MB + 1, 300 * MB, f) !== "");
+  const t = editAskText(300 * MB, 300 * MB, f);
+  ok("확인 창: 시간·멈춤·메모리·한도(지금·합계)·저장·읽기 권함", /약 30초/.test(t) && t.includes("응답하지 않") && /약 1\.0GB/.test(t) && t.includes("768.0MB") && t.includes("지금 300.0MB") && t.includes("600.0MB") && t.includes("저장도 오래") && t.includes("📖 읽기 보기"), t);
+}
 
 console.log(`wholebudget-unit: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
