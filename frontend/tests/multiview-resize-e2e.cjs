@@ -115,7 +115,7 @@ function makeBackend() {
     SupportedFileTypes: () => [],
     AssociationStatus: () => ({}),
   };
-  const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules"]);
+  const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules", "FilterFind"]);
   return {
     st,
     call: async (name, args) => {
@@ -493,6 +493,101 @@ async function main() {
     const rb = await rects(page);
     const gb = await gridRect(page);
     ok("깨진 저장값 → 균등, 오류 없음", rb.length === 4 && rb.every((p) => near(p.w, (gb.width - GAP) / 2)) && errors.length === 0, { rb, errors });
+    await ctx.close();
+
+    // ===================== 5. resize + 「태그 줄만」 안 찾기 (최종 병합 되묻기 ①) =====
+    console.log("5. 줄만 칸 둘 + 크기 조절 + 줄만 보기 찾기(Ctrl+F)");
+    const two = makeBackend();
+    // common: ERROR lines only (줄만), so each pane shows its ERROR lines
+    two.st.tags = JSON.stringify({
+      version: 1,
+      tags: [{ name: "common", rules: [{ id: "e", on: true, label: "오류", pattern: "ERROR", kind: "text", caseSensitive: true, color: "#ff6b6b", line: false, filter: true }], updated: "" }],
+      assign: { dir: {}, file: {}, name: {} },
+      defaults: 2,
+    });
+    two.st.session = sessionWith([{ ...files[0], lines: true }, { ...files[1], lines: true }], 2);
+    ({ ctx, page, errors } = await openPage(browser, url, two));
+    await until(() => page.$(`.mpane[data-slot="0"] .lv-row[data-row]`), 15000);
+    await until(() => page.$(`.mpane[data-slot="1"] .lv-row[data-row]`), 15000);
+    await sleep(300);
+    const findIn = (sl) => page.$(`.mpane[data-slot="${sl}"] .lv-find`);
+    const focusSlot = () => page.evaluate(() => document.activeElement?.closest(".mpane")?.getAttribute("data-slot") ?? null);
+    const countOf = (sl) => page.$eval(`.mpane[data-slot="${sl}"] .lv-find-count`, (e) => e.textContent).catch(() => null);
+    // pane 2 (right): Ctrl+F opens its own find bar
+    await page.focus('.mpane[data-slot="1"] .lv-scroll');
+    await page.keyboard.press("Control+f");
+    await until(() => findIn(1), 3000);
+    ok("오른쪽 줄만 칸에서 Ctrl+F → 그 칸에 찾기 칸 · 왼쪽 칸엔 없음", !!(await findIn(1)) && !(await findIn(0)) && !(await page.$(".find-panel")));
+    ok("찾기 칸에 포커스 (그 칸 안)", (await focusSlot()) === "1" && (await page.evaluate(() => document.activeElement.classList.contains("lv-find-input"))));
+    await page.keyboard.type("pane2 line 1");
+    const want2 = "pane2 line 1";
+    const c1 = await until(async () => {
+      const t = await countOf(1);
+      return /줄/.test(t || "") && t;
+    }, 5000);
+    // ERROR lines are k % 3 == 0 → "pane2 line 1…" among them: 12,15,18 / 102… — counted in Node
+    const nWant = Array.from({ length: 400 }, (_, i) => i + 1).filter((k) => k % 3 === 0 && `pane2 line ${k}`.includes(want2)).length;
+    ok(`오른쪽 칸 찾기 개수 = ${nWant}줄 (그 칸 파일 기준)`, c1 === `${nWant}줄`, c1);
+    // pane 1 (left): its own find, focus moves there
+    await page.focus('.mpane[data-slot="0"] .lv-scroll');
+    await page.keyboard.press("Control+f");
+    await until(() => findIn(0), 3000);
+    ok("왼쪽 칸에서 Ctrl+F → 왼쪽 칸 찾기 칸에 포커스", !!(await findIn(0)) && (await focusSlot()) === "0", await focusSlot());
+    ok("오른쪽 칸 찾기는 그대로 (값·개수)", (await page.$eval('.mpane[data-slot="1"] .lv-find-input', (e) => e.value)) === want2 && (await countOf(1)) === c1);
+    await page.keyboard.press("Escape");
+    // drag the pane 2 border to its minimum width (260px), checking the find bar while dragging
+    let mid = null;
+    await drag(page, '[data-mv-col="0-0"]', 3000, 0, {
+      during: async () => {
+        await sleep(120);
+        mid = await page.$eval('.mpane[data-slot="1"] .lv-find-input', (e) => ({ value: e.value, pe: getComputedStyle(e).pointerEvents }));
+      },
+    });
+    await sleep(250);
+    const rr = await rects(page);
+    ok("오른쪽 칸 최소 너비 (260px)", near(rr[1].w, MIN_W, 1), rr[1].w);
+    ok("끄는 동안에도 찾기 값 그대로", mid && mid.value === want2, mid);
+    const fb = await page.$eval('.mpane[data-slot="1"]', (p) => {
+      const pr = p.getBoundingClientRect();
+      const f = p.querySelector(".lv-find").getBoundingClientRect();
+      const inp = p.querySelector(".lv-find-input").getBoundingClientRect();
+      const cnt = p.querySelector(".lv-find-count");
+      const cr = cnt.getBoundingClientRect();
+      const sc = p.querySelector(".lv-scroll").getBoundingClientRect();
+      return {
+        inside: f.left >= pr.left - 0.5 && f.right <= pr.right + 0.5,
+        inputW: inp.width,
+        countVisible: cr.width > 0 && cr.right <= pr.right + 0.5,
+        rowsH: sc.height,
+        pr: { l: pr.left, r: pr.right },
+        f: { l: f.left, r: f.right },
+      };
+    });
+    if (SHOTS) await page.screenshot({ path: path.join(SHOTS, "mv-find-narrow.png") });
+    ok("최소 너비 칸: 찾기 칸이 칸 안에 들어감", fb.inside, fb);
+    ok("최소 너비 칸: 입력 칸 쓸 만한 너비(80px 이상)·개수 보임", fb.inputW >= 80 && fb.countVisible, fb);
+    ok("최소 너비 칸: 찾기 칸이 있어도 행 보이는 자리", fb.rowsH >= 60, fb);
+    // after the drag the find input takes clicks and typing again (pointer-events back)
+    const hit = await page.$eval('.mpane[data-slot="1"] .lv-find-input', (e) => {
+      const r = e.getBoundingClientRect();
+      return document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) === e;
+    });
+    ok("놓은 뒤 찾기 입력 칸이 눌림 (막대·덮개에 안 가림)", hit);
+    await page.click('.mpane[data-slot="1"] .lv-find-input');
+    await page.keyboard.press("End");
+    await page.keyboard.type("2");
+    const c2 = await until(async () => {
+      const t = await countOf(1);
+      return t && t !== c1 && /줄|없음/.test(t) && t;
+    }, 5000);
+    const nWant2 = Array.from({ length: 400 }, (_, i) => i + 1).filter((k) => k % 3 === 0 && `pane2 line ${k}`.includes(want2 + "2")).length;
+    ok(`놓은 뒤 입력 → 다시 찾음 (${nWant2}줄)`, c2 === (nWant2 ? `${nWant2}줄` : c2), c2);
+    await page.keyboard.press("Enter");
+    const sel = await until(async () => page.$eval('.mpane[data-slot="1"] .lv-row.sel .lv-text', (e) => e.textContent).catch(() => null), 3000);
+    ok("좁은 칸에서도 Enter → 일치 행 선택", !!sel && sel.includes(want2 + "2"), sel);
+    // the left pane, now wide, is unaffected
+    ok("왼쪽 칸 행·찾기 칸 정상", !!(await page.$('.mpane[data-slot="0"] .lv-row[data-row]')));
+    ok("페이지 오류 없음 (5)", errors.length === 0, errors);
     await ctx.close();
   } finally {
     await browser.close();
