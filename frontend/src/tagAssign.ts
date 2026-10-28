@@ -136,7 +136,7 @@ export function targetSentence(t: AssignTarget): string {
       ? "모든 서버의 서버 폴더 전체(그 아래 모든 파일)에 적용됩니다"
       : `모든 서버의 ${t.key} 폴더와 그 아래 모든 파일에 적용됩니다`;
   if (t.kind === "file") return `모든 서버의 ${seriesBase(t.key)} 와 회전 파일 모두에 적용됩니다`;
-  return `로그 묶음 밖에서 연, 이름이 「${seriesBase(t.key)}」 인 파일과 그 회전 파일 모두에 적용됩니다 (폴더는 상관없음)`;
+  return `맨 위 폴더(서버) 밖의, 이름이 「${seriesBase(t.key)}」 인 파일과 그 회전 파일 모두에 적용됩니다 (열어 둔 디렉토리 바로 아래 파일·디렉토리 밖에서 연 파일, 폴더는 상관없음)`;
 }
 
 // Where tags in effect come from, as a short noun phrase ("" = nowhere).

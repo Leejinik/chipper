@@ -15,6 +15,7 @@ import CodeEditor, { type PaneMode } from "./CodeEditor";
 import FindReplace, { type FindTarget } from "./FindReplace";
 import { runSyncedNav, syncedNavCommand } from "./syncNav";
 import BundleTree, { TREE_DRAG_TYPE } from "./BundleTree";
+import { dirIndex, dirName, serversWith } from "./openDir";
 import { looksLikeLog, ruleProblem, type LogRule, type RuleLayers } from "./logHighlight";
 import ErrorBoundary from "./ErrorBoundary";
 import { setRescue, setRescueItems, type RescueItem } from "./rescue";
@@ -61,6 +62,7 @@ import {
   OpenFilesDialog,
   OpenFolderDialog,
   ScanBundle,
+  CancelScanBundle,
   ReadFile,
   ReadFileAs,
   SaveFileDialog,
@@ -215,9 +217,10 @@ function normalizeMulti(raw: any, tabIds: Set<string>): MultiState {
 }
 
 // Path of `rel` inside a bundle server folder, with the root's separator.
+// server "" = a file lying directly in the opened folder.
 function bundlePath(root: string, server: string, rel: string): string {
   const sep = root.includes("\\") ? "\\" : "/";
-  return [root.replace(/[\\/]+$/, ""), server, ...rel.split("/")].join(sep);
+  return [root.replace(/[\\/]+$/, ""), ...(server ? [server] : []), ...rel.split("/")].join(sep);
 }
 
 // Windows paths are case-insensitive and take either slash.
@@ -912,7 +915,10 @@ function App() {
   type BigAsk = { title: string; text: string; noLines: boolean; noFull: boolean; resolve: (c: BigChoice) => void };
   const [bigAsk, setBigAsk] = useState<BigAsk | null>(null);
   const bigAskRef = useRef<BigAsk | null>(null);
-  const [treeOpen, setTreeOpen] = useState<boolean>(true); // log bundle tree beside the panes
+  const [treeOpen, setTreeOpen] = useState<boolean>(true); // directory tree beside the panes
+  // 「📂 디렉토리 열기」 scan in progress (shown after a moment, with 취소).
+  const [dirScanning, setDirScanning] = useState<{ root: string; files: number; dirs: number; shown: boolean } | null>(null);
+  const dirScanCanceled = useRef(false);
   const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
   const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
   const [keyError, setKeyError] = useState<string>("");
@@ -2189,22 +2195,45 @@ function App() {
     return tab.id;
   }, [openLinesOnly]);
 
-  const scanBundle = useCallback(async (root: string): Promise<main.Bundle | null> => {
+  // Read a directory's file list. Any folder works; only a read failure is an
+  // error (alerted unless `quiet`, then thrown). A big folder shows its
+  // progress with 취소 after a moment; a canceled scan returns null silently.
+  const scanBundle = useCallback(async (root: string, quiet = false): Promise<main.Bundle | null> => {
+    dirScanCanceled.current = false;
+    setDirScanning({ root, files: 0, dirs: 0, shown: false });
+    const showAt = window.setTimeout(() => setDirScanning((d) => (d && d.root === root ? { ...d, shown: true } : d)), 300);
+    const off = EventsOn("chipper:dirscan-progress", (x: any) => {
+      if (x && x.root === root) setDirScanning((d) => (d && d.root === root ? { ...d, files: +x.files || 0, dirs: +x.dirs || 0 } : d));
+    });
     try {
       const b = await ScanBundle(root);
       setBundleScan(b);
       return b;
     } catch (e) {
-      alert("로그 묶음 폴더를 읽지 못했습니다:\n" + String(e));
+      if (dirScanCanceled.current) return null;
+      if (quiet) throw e;
+      alert("디렉토리를 읽지 못했습니다:\n" + String(e));
       return null;
+    } finally {
+      window.clearTimeout(showAt);
+      off?.();
+      setDirScanning((d) => (d && d.root === root ? null : d));
     }
+  }, []);
+  const cancelDirScan = useCallback(() => {
+    dirScanCanceled.current = true;
+    setDirScanning(null);
+    CancelScanBundle().catch(() => {});
   }, []);
 
   // Bumped by every bundle switch / new bundle: a switch still awaiting file
   // reads when a newer one starts drops its result instead of overwriting.
   const bundleGen = useRef(0);
 
-  // Choose a bundle folder: one pane per server (up to MAX_PANES), then pick a log.
+  // 「📂 디렉토리 열기」: any folder. Only the tree appears; the panes, their
+  // count and the multi view stay as they are — logs are picked from the tree
+  // (click = focused pane, drag = that pane, ⇉ = every top folder). Opening
+  // another directory replaces the tree like 「닫기」 would: tabs stay.
   const openBundle = useCallback(async () => {
     let root = "";
     try {
@@ -2217,30 +2246,28 @@ function App() {
     const b = await scanBundle(root);
     if (!b) return;
     bundleGen.current++;
-    // A server folder with no files gets no pane (the tree still lists it).
-    const servers = (b.servers ?? []).filter((x) => (x.files ?? []).length > 0).map((x) => x.name);
-    const old = multiRef.current.bundle;
-    setFindOpen(false);
+    const servers = (b.servers ?? []).map((x) => x.name);
     setMulti((m) => ({
-      on: true,
-      count: Math.max(1, Math.min(servers.length, MAX_PANES)),
+      ...m,
       bundle: { root, servers },
-      slots: m.slots.map((x, i) => ({ ...x, tabId: "", server: servers[i] ?? "", note: "" })),
+      // panes followed the previous directory's top folders
+      slots: m.slots.map((x) => (x.server || x.note ? { ...x, server: "", note: "" } : x)),
     }));
-    // Unedited tabs the previous bundle opened go with it.
-    if (old) {
-      setTabs((prev) => prev.filter((t) => !(t.label && !t.dirty && underRoot(t.path, old.root))));
-    }
-    setFocusSlot(0);
-    activeIdRef.current = "";
-    setActiveId("");
-    setTreeOpen(true); // pick logs from the tree
-    if (servers.length > MAX_PANES) {
-      alert(
-        `서버 폴더가 ${servers.length}개라 앞의 ${MAX_PANES}개만 칸에 넣었습니다.\n칸 아래 서버 이름을 눌러 다른 서버로 바꿀 수 있습니다.`
-      );
-    }
+    setTreeOpen(true);
   }, [scanBundle]);
+
+  // 「× 디렉토리 닫기」: the tree and the directory state go (also from the
+  // session); open tabs stay (edits are safe), panes stop following a top folder.
+  const closeDir = useCallback(() => {
+    bundleGen.current++; // a switch still reading files drops its result
+    setMulti((m) => ({
+      ...m,
+      bundle: null,
+      slots: m.slots.map((x) => (x.server || x.note ? { ...x, server: "", note: "" } : x)),
+    }));
+    setBundleScan(null);
+    setDropSlot(null);
+  }, []);
 
   // Show `rel` in the given panes, each from its own server folder (`serverFor`
   // overrides a pane's server, used when the pane's server is being changed).
@@ -2355,15 +2382,66 @@ function App() {
     [switchBundleLog]
   );
 
-  // Tree: a file goes to the pane following its server — the focused pane if it
-  // does, else the first such pane, else the focused pane switches server.
-  const openFromTree = useCallback(
-    (server: string, rel: string) => {
+  // One-pane view: a tree file opens as a tab (size check, .gz → 「태그 줄만」),
+  // labelled with its top folder ("server1 · messages").
+  const openTreeTab = useCallback(
+    async (server: string, rel: string) => {
       const m = multiRef.current;
-      const vis = m.slots.slice(0, m.count);
-      const f = focusSlotRef.current;
-      const idx = vis[f]?.server === server ? f : vis.findIndex((x) => x.server === server);
-      const target = idx >= 0 ? idx : Math.min(f, m.count - 1);
+      if (!m.bundle) return;
+      const root = m.bundle.root;
+      const fp = bundlePath(root, server, rel);
+      const base = rel.split("/").pop() || rel;
+      const f = (bundleScanRef.current?.servers ?? []).find((x) => x.name === server)?.files?.find((x) => x.rel === rel);
+      if (f?.compressed && !isGz(f.rel)) {
+        alert(`${base} 은 압축 파일이라 열 수 없습니다 (풀어서 여세요)`);
+        return;
+      }
+      const label = `${server} · ${base}`;
+      const open = tabsRef.current.find((t) => samePath(t.path, fp));
+      let id: string | null = null;
+      try {
+        if (open && !isGz(fp)) id = await openOne(fp, label);
+        else {
+          const gate = await gateSizes([{ path: fp, size: f?.size, restat: typeof f?.size === "number", name: `${server} ${base}` }]);
+          if (gate.declined || multiRef.current.bundle?.root !== root) return;
+          id = gate.lines.has(fp) || isGz(fp) ? openLinesOnly(fp, label) : await openOne(fp, label);
+        }
+      } catch (e) {
+        alert(`${base} 을 열 수 없습니다 — ${String(e)}`);
+        return;
+      }
+      if (!id) {
+        alert(`${base} 을 열 수 없습니다 — 텍스트 문서가 아닙니다`);
+        return;
+      }
+      activeIdRef.current = id;
+      setActiveId(id);
+    },
+    [openOne, gateSizes, openLinesOnly]
+  );
+
+  // Tree click / Enter / drag: a file goes to the focused pane (or the pane it
+  // was dropped on), which then follows that file's top folder; in the
+  // one-pane view it opens as a tab.
+  const openFromTree = useCallback(
+    (server: string, rel: string, pane?: number) => {
+      const m = multiRef.current;
+      if (!m.on) {
+        openTreeTab(server, rel);
+        return;
+      }
+      if (pane == null && m.bundle) {
+        // Already shown in a pane: go there instead of a duplicate note.
+        const fp = bundlePath(m.bundle.root, server, rel);
+        const at = m.slots
+          .slice(0, m.count)
+          .findIndex((x) => x.tabId && samePath(tabsRef.current.find((t) => t.id === x.tabId)?.path ?? "", fp));
+        if (at >= 0) {
+          focusPane(at);
+          return;
+        }
+      }
+      const target = pane ?? Math.min(focusSlotRef.current, m.count - 1);
       // Focus the pane together with its current tab (not just the slot): the
       // "activated tab → its pane" effect would otherwise pull the focus back
       // to the pane of the old active tab before the switch below finishes,
@@ -2371,7 +2449,34 @@ function App() {
       focusPane(target);
       switchBundleLog(rel, target, { slot: target, server });
     },
-    [switchBundleLog, focusPane]
+    [switchBundleLog, focusPane, openTreeTab]
+  );
+
+  // ⇉: the same log from every top folder holding it, one pane each (up to
+  // MAX_PANES) — the one tree action that sets the pane count, since asking
+  // for "every folder side by side" is asking for that many panes.
+  const openAllFromTree = useCallback(
+    (rel: string) => {
+      const m = multiRef.current;
+      const scan = bundleScanRef.current;
+      if (!m.bundle || !scan) return;
+      const srv = serversWith(dirIndex(scan), rel).slice(0, MAX_PANES);
+      if (srv.length < 2) return;
+      const next: MultiState = {
+        ...m,
+        on: true,
+        count: srv.length,
+        slots: m.slots.map((x, i) => (i < srv.length ? { ...x, server: srv[i], note: "" } : x)),
+      };
+      multiRef.current = next; // switchBundleLog reads it right away
+      setMulti(next);
+      setFocusSlot(0);
+      focusSlotRef.current = 0;
+      activeIdRef.current = "";
+      setActiveId("");
+      switchBundleLog(rel, null);
+    },
+    [switchBundleLog]
   );
 
   // M: a file lying directly in the bundle root (「(묶음 루트)」 in the tree)
@@ -2381,21 +2486,35 @@ function App() {
     (rel: string, pane?: number) => {
       const m = multiRef.current;
       if (!m.bundle) return;
-      const sep = m.bundle.root.includes("\\") ? "\\" : "/";
-      const path = m.bundle.root.replace(/[\\/]+$/, "") + sep + rel;
+      const path = bundlePath(m.bundle.root, "", rel);
+      if (!m.on) {
+        openPaths([path]);
+        return;
+      }
       const at = pane ?? Math.min(focusSlotRef.current, m.count - 1);
       focusPane(at);
       openIntoPanes([path], at);
     },
-    [focusPane, openIntoPanes]
+    [focusPane, openIntoPanes, openPaths]
   );
 
-  // After a restart the bundle's file list is read again for the tree.
+  // After a restart the directory's file list is read again for the tree (in
+  // either view). A folder that can no longer be read is closed, with a word.
+  const restoreScan = useRef("");
   useEffect(() => {
-    if (loaded && multi.on && multi.bundle && bundleScanRef.current?.root !== multi.bundle.root) {
-      scanBundle(multi.bundle.root);
-    }
-  }, [loaded, multi.on, multi.bundle, scanBundle]);
+    const b = multi.bundle;
+    if (!loaded || !b || bundleScanRef.current?.root === b.root || restoreScan.current === b.root) return;
+    restoreScan.current = b.root;
+    scanBundle(b.root, true)
+      .catch((e) => {
+        if (multiRef.current.bundle?.root !== b.root) return;
+        closeDir();
+        alert(`지난번에 열어 둔 디렉토리를 읽지 못해 닫았습니다:\n${b.root}\n${String(e)}`);
+      })
+      .finally(() => {
+        restoreScan.current = "";
+      });
+  }, [loaded, multi.bundle, scanBundle, closeDir]);
   // Remember every bundle opened (newest first) so a tab from an earlier one
   // keeps its folder/file tags after a switch.
   useEffect(() => {
@@ -3553,13 +3672,8 @@ function App() {
           try {
             const { server, rel } = JSON.parse(raw);
             if (typeof server === "string" && typeof rel === "string") {
-              focusPane(i);
-              switchBundleLog(rel, i, { slot: i, server });
-              if (!server) openRootFile(rel, i); // a bundle-root file
-              else {
-                focusPane(i); // with its tab (see openFromTree)
-                switchBundleLog(rel, i, { slot: i, server });
-              }
+              if (!server) openRootFile(rel, i); // a file lying directly in the opened folder
+              else openFromTree(server, rel, i);
             }
           } catch {
             /* not ours */
@@ -3575,10 +3689,12 @@ function App() {
               <div className="empty-sub">
                 {multi.bundle && slot.server
                   ? "왼쪽 트리에서 이 서버의 파일을 누르세요."
-                  : "아래 「탭 고르기」에서 고르거나, 파일을 열거나, 이 칸에 파일을 끌어다 놓으세요."}
+                  : multi.bundle
+                    ? "왼쪽 트리에서 파일을 누르거나 이 칸으로 끌어다 놓으세요. 「탭 고르기」·파일 열기도 됩니다."
+                    : "아래 「탭 고르기」에서 고르거나, 파일을 열거나, 이 칸에 파일을 끌어다 놓으세요."}
               </div>
               <div className="empty-actions">
-                {multi.bundle && slot.server && !treeOpen && (
+                {multi.bundle && !treeOpen && (
                   <button className="tb-btn" onClick={() => setTreeOpen(true)}>
                     ▶ 트리 펼치기
                   </button>
@@ -3641,11 +3757,11 @@ function App() {
               ⚠ 저장해야 남음
             </span>
           )}
-          {multi.bundle && (
+          {multi.bundle && multi.bundle.servers.length > 0 && (
             <select
               className="mp-server"
               value={slot.server}
-              title="이 칸이 따라가는 서버 (로그 묶음)"
+              title="이 칸이 따라가는 맨 위 폴더(서버) — 열어 둔 디렉토리"
               onChange={(e) => setPaneServer(i, e.target.value)}
             >
               {!slot.server && <option value="">서버 —</option>}
@@ -3884,9 +4000,9 @@ function App() {
           <button
             className="tb-btn"
             onClick={openBundle}
-            title="로그 묶음 열기 — server1, server2… 폴더가 들어 있는 상위 폴더를 고르면 서버마다 한 칸씩 띄우고 왼쪽에 트리를 보여 줍니다. 트리에서 파일을 누르면 그 서버 칸에, ⇉ 는 모든 서버 칸에 열립니다"
+            title="디렉토리 열기 — 고른 폴더를 왼쪽 트리로 보여 줍니다(어떤 폴더든). 파일을 누르면 지금 칸에, 원하는 칸으로 끌어다 놓을 수도 있습니다. server1, server2… 처럼 맨 위 폴더마다 같은 로그가 있으면 ⇉ 로 폴더마다 한 칸씩 엽니다"
           >
-            📦 로그 묶음
+            📂 디렉토리 열기
           </button>
           {multi.on && (
             <div className="seg" role="group" aria-label="칸 수">
@@ -4114,37 +4230,79 @@ function App() {
         </button>
       </div>
 
-      <div className="workspace" ref={wsRef}>
+      <div
+        className={"workspace" + (!multi.on && dropSlot === -1 ? " drop-target" : "")}
+        ref={wsRef}
+        // One-pane view: a file dragged from the directory tree opens as a tab
+        // (the multi view's panes take the drop themselves).
+        onDragOverCapture={(e) => {
+          if (multi.on || !e.dataTransfer.types.includes(TREE_DRAG_TYPE)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          e.dataTransfer.dropEffect = "copy";
+          if (dropSlot !== -1) setDropSlot(-1);
+        }}
+        onDragLeave={(e) => {
+          if (!multi.on && !e.currentTarget.contains(e.relatedTarget as Node | null)) setDropSlot((d) => (d === -1 ? null : d));
+        }}
+        onDropCapture={(e) => {
+          if (multi.on) return;
+          const raw = e.dataTransfer.getData(TREE_DRAG_TYPE);
+          if (!raw) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setDropSlot(null);
+          try {
+            const { server, rel } = JSON.parse(raw);
+            if (typeof server === "string" && typeof rel === "string") {
+              if (!server) openRootFile(rel);
+              else openFromTree(server, rel);
+            }
+          } catch {
+            /* not ours */
+          }
+        }}
+      >
+        {multi.bundle && bundleScan && bundleScan.root === multi.bundle.root && (treeOpen ? (
+          <ErrorBoundary what="디렉토리 트리" resetKey={bundleScan}>
+            <BundleTree
+              key={bundleScan.root}
+              scan={bundleScan}
+              shown={treeShown}
+              paneOfServer={paneOfServer}
+              onOpen={openFromTree}
+              onOpenRoot={(rel) => openRootFile(rel)}
+              onOpenAll={openAllFromTree}
+              onHide={() => setTreeOpen(false)}
+              onClose={closeDir}
+              rotationKey={rotationKey}
+              fmtSize={fmtSize}
+              bigFile={BIG_FILE}
+              pathOf={(server, rel) => bundlePath(bundleScan.root, server, rel)}
+              tagsOf={treeTagsOf}
+              onAssign={openAssign}
+              canAssign={tagsReady}
+              saveProblem={tagsSaveProblem}
+            />
+          </ErrorBoundary>
+        ) : (
+          <button className="bt-show" title={`디렉토리 트리 펼치기 (${dirName(bundleScan.root)})`} onClick={() => setTreeOpen(true)}>
+            ▶
+          </button>
+        ))}
+        {dirScanning?.shown && (
+          <div className="dir-scan" role="status">
+            <div className="dir-scan-title">📂 {dirName(dirScanning.root)} 읽는 중…</div>
+            <div className="dir-scan-sub">
+              파일 {dirScanning.files.toLocaleString()}개 · 폴더 {dirScanning.dirs.toLocaleString()}개
+            </div>
+            <button className="tb-btn" onClick={cancelDirScan}>
+              취소
+            </button>
+          </div>
+        )}
         {multi.on ? (
-          <>
-            {multi.bundle && bundleScan && bundleScan.root === multi.bundle.root && (treeOpen ? (
-              <ErrorBoundary what="로그 묶음 트리" resetKey={bundleScan}>
-                <BundleTree
-                  key={bundleScan.root}
-                  scan={bundleScan}
-                  shown={treeShown}
-                  paneOfServer={paneOfServer}
-                  onOpen={openFromTree}
-                  onOpenRoot={(rel) => openRootFile(rel)}
-                  onOpenAll={(rel) => switchBundleLog(rel, null)}
-                  onHide={() => setTreeOpen(false)}
-                  rotationKey={rotationKey}
-                  fmtSize={fmtSize}
-                  bigFile={BIG_FILE}
-                  pathOf={(server, rel) => bundlePath(bundleScan.root, server, rel)}
-                  tagsOf={treeTagsOf}
-                  onAssign={openAssign}
-                  canAssign={tagsReady}
-                  saveProblem={tagsSaveProblem}
-                />
-              </ErrorBoundary>
-            ) : (
-              <button className="bt-show" title="로그 묶음 트리 펼치기" onClick={() => setTreeOpen(true)}>
-                ▶
-              </button>
-            ))}
-            {multiGrid}
-          </>
+          multiGrid
         ) : !active ? (
           <div className="empty">
             <div className="empty-title">열린 문서가 없습니다</div>

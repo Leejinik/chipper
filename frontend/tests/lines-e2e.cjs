@@ -224,6 +224,10 @@ const tab = (id, p, extra = {}) => ({
   ...extra,
 });
 const session = (tabs, activeId, extra = {}) => JSON.stringify({ version: 3, tabs, activeId, splitRatio: 0.5, fontSize: 14, ...extra });
+// 「📂 디렉토리 열기」(10-28) no longer turns the multi view on with a pane per
+// server; these steps look at a bundle file in a pane, so they start in a
+// one-pane multi view (what opening the bundle used to make).
+const MULTI1 = { multi: { on: true, count: 1, slots: Array.from({ length: 6 }, () => ({ tabId: "", mode: "read", server: "" })), bundle: null } };
 const rgb = (hex) => `rgb(${[1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)).join(", ")})`;
 
 // grep -B A -A B over lines (1-based), the way the engine lays out rows
@@ -623,9 +627,9 @@ async function main() {
           },
         ],
       };
-      be.st.session = session([], "");
+      be.st.session = session([], "", MULTI1);
       const { ctx, page } = await openPage(browser, url, be);
-      await page.click('button:has-text("📦 로그 묶음")');
+      await page.click('button:has-text("📂 디렉토리 열기")');
       await page.waitForSelector(".bundle-tree");
       await page.fill(".bt-filter", "collector.log"); // opens the folders
       await page.click('.bt-row.file:has-text("collector.log") >> nth=0');
@@ -905,11 +909,13 @@ async function main() {
             truncated: false,
             unreadable: 0,
           },
+          // ⇉ is offered only when 2+ top folders hold the log (10-28)
+          { name: "server2", files: [{ rel: "m/app.log.1.gz", size: 1000, compressed: true }], truncated: false, unreadable: 0 },
         ],
       };
-      be.st.session = session([], "");
+      be.st.session = session([], "", MULTI1);
       const { ctx, page } = await openPage(browser, url, be);
-      await page.click('button:has-text("📦 로그 묶음")');
+      await page.click('button:has-text("📂 디렉토리 열기")');
       await page.waitForSelector(".bundle-tree");
       await page.fill(".bt-filter", "app.log");
       const row = await page.waitForSelector('.bt-row.file:has-text("app.log.1.gz")');
