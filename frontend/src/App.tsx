@@ -51,6 +51,7 @@ import {
 import LinesView from "./LinesView";
 import { upgradeCommonDefaults } from "./commonDefaults";
 import RuleFromText, { selectionForRule } from "./RuleFromText";
+import { editorExcludeTarget, ExcludeEditorItem } from "./ExcludeCtxMenu";
 import { linesFindHost, openLinesFind } from "./LinesFind";
 import MultiGrid, { paneStyle, usePaneSizes } from "./MultiGrid";
 import type { PaneSizes } from "./paneSizes";
@@ -1010,7 +1011,7 @@ function App() {
     (t: Tab): string => viewsRef.current.get(t.id)?.state.doc.toString() ?? t.content,
     []
   );
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSel: boolean; inOk: boolean; rule: { pattern: string; problem: string; line: string } } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSel: boolean; inOk: boolean; rule: { pattern: string; problem: string; line: string }; ex: { pattern: string; problem: string } } | null>(null);
   // 「이 글자로 로그 색 규칙 만들기…」 window (RuleFromText.tsx)
   const [ruleDraft, setRuleDraft] = useState<{ tabId: string; pattern: string; line: string } | null>(null);
   const [encMenu, setEncMenu] = useState<boolean>(false);
@@ -2786,6 +2787,7 @@ function App() {
     const hasSel = v ? v.state.selection.ranges.some((r) => !r.empty) : false;
     let inOk = false;
     let rule = { pattern: "", problem: "글자를 먼저 고르세요", line: "" };
+    let ex = editorExcludeTarget(() => "", 0, 0); // 「🚫 줄만 보기 제외에 추가」 (ExcludeCtxMenu.tsx)
     if (v) {
       const r = v.state.selection.main;
       inOk = parseInClause(v.state.sliceDoc(r.from, r.to)).ok;
@@ -2795,13 +2797,14 @@ function App() {
           r.to - r.from > 4000
             ? { pattern: "", problem: "고른 글자가 너무 깁니다", line: "" }
             : { ...selectionForRule(v.state.sliceDoc(r.from, r.to)), line: v.state.doc.lineAt(r.from).text.slice(0, 4000) };
+      ex = editorExcludeTarget((a, b) => v.state.sliceDoc(a, b), r.from, r.to);
     }
     const MW = 260;
-    const MH = 370;
+    const MH = 420;
     const x = Math.min(e.clientX, window.innerWidth - MW);
     const y = Math.min(e.clientY, window.innerHeight - MH);
     setEncMenu(false);
-    setCtxMenu({ x, y, hasSel, inOk, rule });
+    setCtxMenu({ x, y, hasSel, inOk, rule, ex });
   }, [getFocusedView]);
 
   const runCtx = useCallback(async (action: string) => {
@@ -4856,6 +4859,14 @@ function App() {
           >
             🎨 이 글자로 로그 색 규칙 만들기…
           </button>
+          <ExcludeEditorItem
+            target={ctxMenu.ex}
+            list={active?.lines?.ex}
+            noFile={!active?.path}
+            onDone={() => setCtxMenu(null)}
+            setEx={(f) => active && setLines(active.id, (l) => ({ ...l, ex: f(l.ex ?? []) }))}
+            flash={flash}
+          />
         </div>
       )}
 
