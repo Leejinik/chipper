@@ -897,13 +897,22 @@ export default function LinesView(p: LinesViewProps) {
         prog.slowRules.map((k) => `「${ruleName(p, k)}」`).join(", ") +
         " — 정규식이 복잡해 느린 방식으로 거릅니다(결과는 같음). 규칙을 단순하게 하면 빨라집니다.",
     });
-  if (prog?.truncated || trunc === "rows")
+  if (prog?.truncated)
     notes.push({
       cls: "warn",
       text:
-        `걸린 줄이 ${fmtN(prog?.truncated ? hits - 1 : MAX_ROWS)}줄을 넘어 앞부분만 보여 줍니다` +
-        (prog && prog.totalBytes > 0 && prog.done ? ` (파일의 앞 ${pct}%까지만 훑음)` : "") +
+        `걸린 줄이 ${fmtN(hits - 1)}줄을 넘어 앞부분만 보여 줍니다` +
+        (prog.totalBytes > 0 && prog.done ? ` (파일의 앞 ${pct}%까지만 훑음)` : "") +
         ". 규칙이나 태그 체크를 줄이면 끝까지 볼 수 있습니다.",
+    });
+  else if (trunc === "rows")
+    // The cap is on rows shown (걸린 줄 + 위·아래 줄), not on hits: the scan
+    // itself went to the end, but rows after the cap are not shown.
+    notes.push({
+      cls: "warn",
+      text:
+        `보이는 줄(걸린 줄과 위·아래 줄)이 ${fmtN(MAX_ROWS)}행을 넘어 앞 ${fmtN(MAX_ROWS)}행까지만 보여 줍니다 — ` +
+        "그 뒤에도 걸린 줄이 더 있습니다. 위·아래 줄 수나 규칙·태그 체크를 줄이면 더 볼 수 있습니다.",
     });
   if (trunc === "bytes")
     notes.push({
