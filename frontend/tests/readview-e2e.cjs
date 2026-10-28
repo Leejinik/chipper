@@ -438,8 +438,9 @@ async function main() {
     if (want("2")) {
       console.log("2. ✏️ 편집으로 열기: 확인 창(C) · 여는 중(W) 막힘·취소 · E · 📖 로 돌아가기 · D 저장/버리기/취소");
       const be = makeBackend();
-      be.st.sizes[P("a.log")] = 300 * MB;
-      be.st.sizes[P("b.log")] = 300 * MB;
+      // 100MB 이상은 읽기 전용(user 10-28 밤) — ✏️ 는 100MB 미만 📖 탭(예산을 넘어 📖 로 연 파일)에서
+      be.st.sizes[P("a.log")] = 60 * MB;
+      be.st.sizes[P("b.log")] = 60 * MB;
       const R = (id, p) => tab(id, p, { lines: { on: true, read: true, big: true, above: 0, below: 3, off: [], ex: [] } });
       be.st.session = session([R("t1", P("a.log")), R("t2", P("b.log"))], "t1");
       const { ctx, page } = await openPage(browser, url, be);
@@ -450,7 +451,7 @@ async function main() {
       await page.click(".lv-edit");
       await page.waitForSelector('.choice-ask[data-kind="edit"]');
       const txt = await page.$eval(".choice-ask", (e) => e.textContent);
-      ok("확인 창: 시간·응답 없음·메모리·768MB(지금 0)·저장·읽기 권함", /약 30초/.test(txt) && txt.includes("응답하지 않") && txt.includes("GB") && txt.includes("768.0MB") && txt.includes("지금 0B") && txt.includes("저장도 오래") && txt.includes("📖 읽기 보기"), txt);
+      ok("확인 창: 시간·응답 없음·메모리·768MB(지금 0)·저장·읽기 권함", /약 6초/.test(txt) && txt.includes("응답하지 않") && txt.includes("GB") && txt.includes("768.0MB") && txt.includes("지금 0B") && txt.includes("저장도 오래") && txt.includes("📖 읽기 보기"), txt);
       // C owns the keys: Ctrl+S / Ctrl+W do nothing, the tab does not change
       await page.keyboard.press("Control+s");
       await page.keyboard.press("Control+w");
@@ -468,7 +469,7 @@ async function main() {
       ok("확인 → W: 「⏳ 편집용으로 여는 중 N%」 + 취소", (await page.$eval(".rv-wait .empty-title", (e) => e.textContent)).startsWith("⏳ 편집용으로 여는 중") && (await page.$(".rv-cancel")) !== null);
       const segDis = await page.$$eval(".lines-seg.big button", (els) => els.map((e) => e.disabled));
       ok("W: 이 탭 보기 전환 막힘(📖·🏷·✏️ 꺼짐)", JSON.stringify(segDis) === "[true,true,true]" && JSON.stringify(await tabStates(page)) === '["W"]', segDis);
-      ok("🧠 편집: W 는 시작부터 셈(300/768MB)", (await until(async () => (await memText(page)).includes("편집 300/768MB"), 3000)) === true, await memText(page));
+      ok("🧠 편집: W 는 시작부터 셈(60/768MB)", (await until(async () => (await memText(page)).includes("편집 60/768MB"), 3000)) === true, await memText(page));
       // the other tab's ✏️ is blocked (and says why)
       await page.click(".tabs-scroll .tab:nth-child(2)");
       await page.waitForSelector('.lines-view[data-mode="all"]');
@@ -559,6 +560,7 @@ async function main() {
       const be = makeBackend();
       const names = ["a.log", "b.log", "c.log", "d.log", "e.log", "f.log"];
       for (const n of names) be.st.sizes[P(n)] = 300 * MB;
+      be.st.sizes[P("a.log")] = 60 * MB; // the ✏️ tab: under 100MB (100MB+ comes back 📖 — fixr1-e2e A)
       const E = tab("tE", P("a.log"), { lines: { on: false, read: false, big: true, above: 0, below: 3, off: [], ex: [] } });
       const tabsS = [E, ...names.slice(1).map((n, k) => tab("t" + k, P(n), { lines: { on: true, read: k % 2 === 0, big: true, above: 0, below: 3, off: [], ex: k === 0 ? [{ pattern: "noise", kind: "text", caseSensitive: false, on: true }] : [] } }))];
       be.st.session = session(tabsS, "tE", {
@@ -610,8 +612,8 @@ async function main() {
     if (want("4")) {
       console.log("4. 저장 중(S): 다른 탭 ✏️ 막힘 · 탭 닫기는 끝난 뒤");
       const be = makeBackend();
-      be.st.sizes[P("a.log")] = 300 * MB;
-      be.st.sizes[P("b.log")] = 300 * MB;
+      be.st.sizes[P("a.log")] = 60 * MB; // under 100MB: 100MB+ is read-only
+      be.st.sizes[P("b.log")] = 60 * MB;
       const R = (id, p) => tab(id, p, { lines: { on: true, read: true, big: true, above: 0, below: 3, off: [], ex: [] } });
       be.st.session = session([R("t1", P("a.log")), R("t2", P("b.log"))], "t1");
       const { ctx, page } = await openPage(browser, url, be);

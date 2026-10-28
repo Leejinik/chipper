@@ -129,6 +129,8 @@ export interface LinesViewProps {
   // 「✏️ 편집으로 열기」 in the head (big files): editWhy "" = can, else why not
   onEdit?: () => void;
   editWhy?: string;
+  // the file is read-only (100MB+, .gz): the button says so instead of 「✏️ 편집으로 열기」
+  readOnly?: boolean;
   fullLabel?: string; // the 「📄 전체」 button of 「🏷 줄만」 (「📖 전체」 for a big file)
 }
 
@@ -1108,7 +1110,7 @@ export default function LinesView(p: LinesViewProps) {
             title={p.editWhy ? "편집으로 열 수 없음: " + p.editWhy : "이 파일을 편집기로 읽어 들여 고칩니다 (확인 창에 걸리는 시간·메모리)"}
             onClick={() => pr.current.onEdit?.()}
           >
-            ✏️ 편집으로 열기
+            {p.readOnly ? "🔒 읽기 전용" : "✏️ 편집으로 열기"}
           </button>
         )}
         {!all && (<>
@@ -1189,6 +1191,7 @@ export default function LinesView(p: LinesViewProps) {
           focusNonce={findNonce}
           scroller={scRef}
           onGo={(row) => moveTo(row, false)}
+          all={all}
           onClose={() => {
             closeFind();
             scRef.current?.focus();
@@ -1215,7 +1218,10 @@ export default function LinesView(p: LinesViewProps) {
         {noRules ? (
           <div className="lv-empty">거를 규칙이 없습니다.</div>
         ) : all ? (
-          prog?.done && !err && count === 0 && <div className="lv-empty">{exOn ? "보일 줄이 없습니다 (제외 칩이 모두 숨김)." : "빈 파일입니다."}</div>
+          // a 0-byte file still has its one empty line (as in the editor): said too (agy F-12)
+          prog?.done &&
+          !err &&
+          (count === 0 || prog.totalBytes === 0) && <div className="lv-empty">{prog.totalBytes === 0 ? "빈 파일입니다." : exOn ? "보일 줄이 없습니다 (제외 칩이 모두 숨김)." : "빈 파일입니다."}</div>
         ) : (
           // no hit: the one 「⋯ N줄 생략」 row (or none) and this
           prog?.done &&

@@ -31,6 +31,15 @@
 .lv-find-input.invalid {
   border-color: var(--danger);
 }
+.lv-find-far {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent, #6aa9ff);
+  font-size: 11px;
+}
 .lv-find-count {
   min-width: 70px;
   font-variant-numeric: tabular-nums;

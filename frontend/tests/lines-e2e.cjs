@@ -659,7 +659,8 @@ async function main() {
       ok("726MB → 확인 창 없이 📖 읽기 보기", !(await page.$(".big-ask")) && !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
       ok("큰 파일을 읽지 않음", calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
       const why726 = await page.$eval(".lv-edit", (e) => [e.disabled, e.title]);
-      ok("726MB: ✏️ 편집으로 열기 꺼짐 + 이유(384MB)", why726[0] === true && why726[1].includes("384MB"), why726);
+      // 100MB 이상은 읽기 전용(user 10-28 밤): 이유는 384MB 한도가 아니라 읽기 전용
+      ok("726MB: ✏️ 편집으로 열기 꺼짐 + 이유(100MB 이상 읽기 전용)", why726[0] === true && why726[1].includes("100MB 이상 파일은 읽기 전용"), why726);
       await shot(page, "lines-big-ask.png");
       await page.click('.mpane-foot .lines-seg button:has-text("줄만")');
       await page.waitForSelector('.lines-view[data-mode="lines"]');
@@ -682,22 +683,15 @@ async function main() {
       await page.click('.lv-btn:has-text("전체")');
       await page.waitForSelector('.lines-view[data-mode="all"]');
       ok("726MB → 「📖 전체」 = 읽기 보기 · 읽지 않음", !(await page.$(".big-ask")) && calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
-      // a 200MB log of the same folder: 📖 at once; ✏️ asks (C) and reads it in pieces
+      // a 200MB log of the same folder: 📖 at once; read-only (user 10-28 밤 — was: ✏️ asks C and reads in pieces)
       await page.fill(".bt-filter", "mid.log");
       await page.click('.bt-row.file:has-text("mid.log") >> nth=0');
       await until(async () => (calls(be, "FilterStart").pop() || { args: [{}] }).args[0].path === mid, 4000);
       await page.waitForSelector('.lines-view[data-mode="all"]');
       ok("200MB → 확인 창 없이 📖", !(await page.$(".big-ask")));
-      await page.click(".lv-edit");
-      await page.waitForSelector('.choice-ask[data-kind="edit"]');
-      ok("✏️ → 확인 창(크기 200MB)", (await page.$eval(".choice-ask h3", (e) => e.textContent)).includes("200.0MB"));
-      await page.keyboard.press("Escape");
-      await sleep(200);
-      ok("Esc = 취소 → 📖 그대로", !!(await page.$('.lines-view[data-mode="all"]')) && !(await page.$(".choice-ask")));
-      await page.click(".lv-edit");
-      await page.click('.choice-ask [data-choice="edit"]');
-      await page.waitForSelector(".mpane .cm-editor", { timeout: 15000 });
-      ok("「✏️ 편집으로 열기」 → 조각으로 읽어서 편집기", calls(be, "EditOpenBegin").length === 1 && calls(be, "ReadFile").length + calls(be, "ReadFileAs").length === 0);
+      await until(async () => (await page.$eval(".lv-edit", (e) => e.title)).includes("100MB"), 3000);
+      const why200 = await page.$eval(".lv-edit", (e) => [e.disabled, e.title]);
+      ok("200MB: ✏️ 꺼짐 + 「100MB 이상 파일은 읽기 전용」 · 확인 창 없음", why200[0] && why200[1].includes("100MB 이상 파일은 읽기 전용") && !(await page.$(".choice-ask")) && calls(be, "EditOpenBegin").length === 0, why200);
       // .gz through 「📂 파일 열기」 of an empty pane (multi view)
       await page.click(".mp-x"); // empty the pane
       const readsBeforeGz = calls(be, "ReadFile").length + calls(be, "ReadFileAs").length;
@@ -877,7 +871,9 @@ async function main() {
         // readview: a big .gz opens as 📖 (decompressed by the engine) without a question
         ok(`.gz ${sz >> 20}MB 📂 열기 → 확인 창 없이 📖 읽기`, !(await page.$(".big-ask")) && (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all", { dialogs: page.__dialogs });
         ok(`.gz ${sz >> 20}MB → 「너무 커서」 알림 없음`, !page.__dialogs.some((d) => d.includes("너무 커서")), page.__dialogs);
-        ok(`.gz ${sz >> 20}MB 📖 → 풀린 모든 줄 · 편집 꺼짐`, (await hasRow(page, "1:info 1")) && (await page.$(".lv-edit")) === null, await shownRows(page));
+        // .gz 는 읽기 전용(user 10-28 밤): ✏️ 는 꺼진 채 보이고 이유(예전: 단추 없음)
+        const gzEdit = await page.$eval(".lv-edit", (e) => [e.disabled, e.title]).catch(() => null);
+        ok(`.gz ${sz >> 20}MB 📖 → 풀린 모든 줄 · 편집 꺼짐(.gz 읽기 전용 이유)`, (await hasRow(page, "1:info 1")) && !!gzEdit && gzEdit[0] && gzEdit[1].includes(".gz"), [await shownRows(page), gzEdit]);
         await ctx.close();
       }
       // a small .gz: no question, straight to 줄만 보기
@@ -950,7 +946,9 @@ async function main() {
         // readview: an editor tab of a big file (the session keeps its path)
         // comes back ✏️ when the budget allows — read in pieces, no question
         await page.waitForSelector(".cm-editor", { timeout: 8000 }).catch(() => {});
-        ok("200MB 복원 탭(편집이던 탭) → 예산 안 → 묻지 않고 ✏️ (조각 읽기)", !!(await page.$(".cm-editor")) && calls(be, "EditOpenBegin").length === 1 && reads(be).length === 0 && !(await page.$(".big-ask")), calls(be, "EditOpenBegin").length);
+        // 100MB 이상은 읽기 전용(user 10-28 밤): 편집이던 200MB 탭도 📖 (예산 안 → ✏️ 는 100MB 미만 — readview-e2e 3)
+        await page.waitForSelector('.lines-view[data-mode="all"]', { timeout: 8000 }).catch(() => {});
+        ok("200MB 복원 탭(편집이던 탭) → 📖 (읽기 전용, 읽지 않음)", (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all" && calls(be, "EditOpenBegin").length === 0 && reads(be).length === 0 && !(await page.$(".big-ask")), calls(be, "EditOpenBegin").length);
         await page.click('.lines-seg button:has-text("줄만")');
         await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
         ok("🏷 줄만 → 줄만 보기", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")));
@@ -965,7 +963,7 @@ async function main() {
         await page.waitForSelector(".lines-view", { timeout: 8000 }).catch(() => {});
         ok("726MB 복원 탭 → 📖 읽기 (편집으로 못 엶)", (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all" && calls(be, "EditOpenBegin").length === 0 && reads(be).length === 0);
         const fl = await page.$eval(".st-flash", (e) => e.textContent).catch(() => "");
-        ok("726MB 복원 탭 안내: 편집이던 탭을 📖 로 연 이유(384MB)", fl.includes("📖 읽기 보기로 열었습니다") && fl.includes("384MB"), fl);
+        ok("726MB 복원 탭 안내: 편집이던 탭을 📖 로 연 이유(100MB 이상 읽기 전용)", fl.includes("📖 읽기 보기로 열었습니다") && fl.includes("100MB 이상 파일은 읽기 전용"), fl);
         await page.click('.lines-seg button:has-text("줄만")');
         await page.waitForSelector('.lines-view[data-mode="lines"]', { timeout: 3000 }).catch(() => {});
         ok("726MB 복원 탭 → 줄만 보기", !!(await page.$(".lines-view")) && (await hasRow(page, "70:ERROR e70")) && reads(be).length === 0);
@@ -990,9 +988,10 @@ async function main() {
         await sleep(1500);
         const b = calls(be, "StatFile").length;
         ok(`멀티 칸 ${sz >> 20}MB 복원 탭: StatFile 이 멈춰 있음`, b - a <= 1, { a, b });
-        // readview: 200MB comes back ✏️ (budget), 726MB 📖 — in the pane, no question
-        const ed = sz > 384 << 20 ? !!(await page.$('.mpane .lines-view[data-mode="all"]')) : !!(await until(async () => await page.$(".mpane .cm-editor"), 6000));
-        ok(`멀티 칸 ${sz >> 20}MB 복원 탭: 칸 안에 ${sz > 384 << 20 ? "📖 읽기" : "✏️ 편집기"} (묻지 않음)`, ed && !(await page.$(".big-ask")), await emptyBtns(page, ".mpane"));
+        // readview: 100MB 이상은 읽기 전용(user 10-28 밤) — 200MB·726MB 모두 📖, 칸 안에서 묻지 않음
+        // (예전: 200MB 는 예산 안이라 ✏️ 편집기)
+        const ed = !!(await until(async () => await page.$('.mpane .lines-view[data-mode="all"]'), 6000));
+        ok(`멀티 칸 ${sz >> 20}MB 복원 탭: 칸 안에 📖 읽기 (묻지 않음)`, ed && !(await page.$(".big-ask")) && calls(be, "EditOpenBegin").length === 0, await emptyBtns(page, ".mpane"));
         // a change that the session keeps: the other tab into the focused pane → autosave
         const s0 = calls(be, "SaveSession").length;
         await page.click(".tabs-scroll .tab >> nth=1");
@@ -1183,14 +1182,14 @@ async function main() {
       fs.writeFileSync(b, small.join("\n"));
       const be2 = makeBackend();
       be2.st.tags = TAGS1;
-      be2.st.sizes[a] = 200 << 20;
+      // 100MB 이상은 읽기 전용(user 10-28 밤)이라 확인 창(C)은 100MB 미만 📖 탭(예산을 넘어 📖 로
+      // 연 60MB)에서 띄움 — 예전: 200MB 를 📂 열기로 열어 ✏️
+      be2.st.sizes[a] = 60 << 20;
       be2.st.sizes[b] = 300 << 20;
-      be2.st.session = session([], "");
-      be2.st.openFiles = [a];
+      be2.st.session = session([tab("tA", a, { lines: { on: true, read: true, big: true, above: 0, below: 3, off: [], ex: [] } })], "tA");
       const r2 = await openPage(browser, url, be2);
       // readview (user 10-28): 100MB 이상은 묻지 않고 📖 — 「창이 떠 있는 동안 단축키
       // 무시」는 이제 「✏️ 편집으로 열기」 확인 창(C)으로 본다
-      await r2.page.click('.empty-actions button:has-text("파일 열기")');
       await r2.page.waitForSelector('.lines-view[data-mode="all"]');
       await r2.page.click(".lv-edit");
       await r2.page.waitForSelector(".choice-ask");

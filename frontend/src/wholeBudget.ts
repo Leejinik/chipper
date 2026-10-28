@@ -56,7 +56,10 @@ export const EDIT_HEAP_PER_BYTE = 3.3; // window JS memory per byte held (300MB 
 // ("" = it can): the same total as 「전체 열기」 (WHOLE_BUDGET).
 export function editBudgetWhy(held: number, size: number, fmt: (n: number) => string): string {
   if (held + size <= WHOLE_BUDGET) return "";
-  return `편집으로 연 파일이 합쳐 ${fmt(held + size)} 가 되어 ${fmt(WHOLE_BUDGET)} 를 넘습니다(지금 ${fmt(held)}) — 편집 중인 다른 큰 탭을 📖 읽기로 돌리거나 닫으세요`;
+  // a few bytes over reads 「768.0MB 가 되어 768.0MB 를 넘습니다」 in MB: say the bytes (agy F-12)
+  const total = fmt(held + size) === fmt(WHOLE_BUDGET) ? `${(held + size).toLocaleString("en-US")} 바이트` : fmt(held + size);
+  const limit = fmt(held + size) === fmt(WHOLE_BUDGET) ? `${fmt(WHOLE_BUDGET)}(${WHOLE_BUDGET.toLocaleString("en-US")} 바이트)` : fmt(WHOLE_BUDGET);
+  return `편집으로 연 파일이 합쳐 ${total} 가 되어 ${limit} 를 넘습니다(지금 ${fmt(held)}) — 편집 중인 다른 큰 탭을 📖 읽기로 돌리거나 닫으세요`;
 }
 
 export function editAskText(size: number, held: number, fmt: (n: number) => string): string {

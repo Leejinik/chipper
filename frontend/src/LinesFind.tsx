@@ -115,6 +115,7 @@ export interface LinesFindProps {
   scroller: RefObject<HTMLDivElement>;
   onGo: (row: number) => void; // select and show a row
   onClose: () => void;
+  all?: boolean; // in 「📖 읽기」 (every line), not 「🏷 줄만」
 }
 
 interface Found {
@@ -148,6 +149,9 @@ export default function LinesFind(p: LinesFindProps) {
   const [regex, setRegex] = useState(false);
   const [found, setFound] = useState<Found | null>(null);
   const [busy, setBusy] = useState(false);
+  // the selected match is in the part of a long line not shown (past 4KB):
+  // nothing to highlight, so it is said (agy F-10)
+  const [farCur, setFarCur] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const idRef = useRef(++hlSeq);
   const pr = useRef(p);
@@ -239,6 +243,7 @@ export default function LinesFind(p: LinesFindProps) {
     const sc = p.scroller.current;
     const all: Range[] = [];
     const cur: Range[] = [];
+    let far = false;
     if (sc && matcher && rows.length) {
       for (const el of sc.querySelectorAll<HTMLElement>(".lv-row[data-line]")) {
         const row = +(el.dataset.row ?? -1);
@@ -248,11 +253,15 @@ export default function LinesFind(p: LinesFindProps) {
         if (!t) continue;
         const rs = rowRanges(t, matcher);
         all.push(...rs);
-        if (row === p.sel) cur.push(...rs);
+        if (row === p.sel) {
+          cur.push(...rs);
+          far = !rs.length && !!t.querySelector(".lv-cut");
+        }
       }
     }
     hlAll.set(idRef.current, { all, cur });
     publish();
+    if (far !== farCur) setFarCur(far);
   });
   useEffect(
     () => () => {
@@ -276,6 +285,7 @@ export default function LinesFind(p: LinesFindProps) {
         (found.capped ? ` (앞 ${found.rows.length.toLocaleString("en-US")}줄로 이동)` : "") +
         (found.partial ? " · 거르는 중 — 지금까지" : "");
   }
+  const where = p.all ? "읽기 보기 안에서 찾기" : "줄만 보기 안에서 찾기";
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
@@ -292,20 +302,25 @@ export default function LinesFind(p: LinesFindProps) {
   };
 
   return (
-    <div className="lv-find" onKeyDown={onKey} role="search" aria-label="줄만 보기 안에서 찾기">
+    <div className="lv-find" onKeyDown={onKey} role="search" aria-label={where}>
       <span className="lv-find-title" title="걸러진 결과 전체(화면에 안 보이는 행 포함)에서 찾습니다. 「⋯ 생략」 줄 안은 찾지 않습니다">
         🔍
       </span>
       <input
         ref={inputRef}
         className={"lv-find-input" + (found?.issue && q ? " invalid" : "")}
-        placeholder="줄만 보기 안에서 찾기"
+        placeholder={where}
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />
       <span className="lv-find-count" aria-live="polite">
         {status}
       </span>
+      {farCur && atText && (
+        <span className="lv-find-far" title="한 줄이 4KB 넘으면 앞 4KB 만 보여 줍니다 — 찾은 글자는 그 뒤에 있습니다">
+          ◂ 이 줄에서 찾은 글자는 안 보이는 뒤쪽(4KB 넘어)에 있습니다
+        </span>
+      )}
       <button className="lv-btn" title="이전 (Shift+Enter)" disabled={!rows.length} onClick={() => go(-1)}>
         ▲
       </button>

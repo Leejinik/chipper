@@ -7,6 +7,8 @@
 //   R4 chip spaces kept + the full text in the tip
 //   R5 a short pane keeps rows visible (chips and notes give way)
 //   R6 six 300MB files at once: no 「전체 열기」 (the whole-file total)
+//   R7 the editing budget as a flow: eight 99MB files over the budget → 📖,
+//      ✏️ one by one — W counted at once, the eighth refused, one back to 📖 frees it
 //
 //   cd frontend && npm run build && node tests/realtest-e2e.cjs   (ONLY=R1,R2…)
 //   PLAYWRIGHT=<path to playwright package>  (default D:/QA/workspace/playwright/node_modules/playwright)
@@ -144,7 +146,7 @@ function makeBackend() {
     SupportedFileTypes: () => [],
     AssociationStatus: () => ({}),
   };
-  const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules", "FilterFind"]);
+  const FILTER = new Set(["FilterStart", "FilterRows", "FilterStatus", "FilterCancel", "FilterClose", "FilterRowOfLine", "ValidateFilterRules", "FilterFind", "EditOpenBegin", "EditOpenChunk", "EditOpenEnd", "MemInfo"]);
   // delay[name] = ms: hold that call before it goes out (late answers, races)
   const delay = {};
   return {
@@ -544,12 +546,60 @@ async function main() {
       ok("확인 창 없음", !(await page.$(".big-ask")));
       ok("6칸 모두 📖 읽기", (await page.$$eval('.lines-view[data-mode="all"]', (e) => e.length)) === 6);
       ok("파일을 읽지 않음(ReadFile 0)", calls(be, "ReadFile").length === 0, calls(be, "ReadFile").length);
-      // ✏️ of one: the question says how long and that the window stops at the end
-      await page.click('.mpane[data-slot="0"] .lv-edit');
-      await page.waitForSelector(".choice-ask");
-      const t2 = await page.$eval(".choice-ask p", (e) => e.textContent);
-      ok("✏️ 확인 창: 걸리는 시간(약 30초)·응답하지 않음·768MB", t2.includes("약 30초") && t2.includes("응답하지 않") && t2.includes("768.0MB"), t2);
-      await page.click('.choice-ask button:has-text("취소")');
+      // 100MB 이상은 읽기 전용(user 10-28 밤): ✏️ 는 꺼진 채 이유 — 예전 「✏️ 확인 창(약 30초)」은 이 결정으로 바뀜
+      await until(async () => (await page.$eval('.mpane[data-slot="0"] .lv-edit', (b) => b.title)).includes("100MB"), 3000);
+      const e0 = await page.$eval('.mpane[data-slot="0"] .lv-edit', (b) => [b.disabled, b.title, b.textContent]);
+      ok("✏️ 꺼짐 「100MB 이상 파일은 읽기 전용」 (단추 글자 「🔒 읽기 전용」)", e0[0] && e0[1].includes("100MB 이상 파일은 읽기 전용") && e0[2].includes("읽기 전용"), e0);
+      await ctx.close();
+    }
+
+    // =============== R7. the editing budget as a flow (eight 99MB) ========================================
+    if (want("R7")) {
+      console.log("R7. 99MB 여덟 개 → 예산을 넘어 「📖 읽기」 · ✏️ 일곱 개(W 는 시작부터 셈) · 여덟째 막힘 · 하나 📖 로 → 다시 됨");
+      const eight = [1, 2, 3, 4, 5, 6, 7, 8].map((k) => P(`n${k}.log`));
+      for (const f of eight) fs.writeFileSync(f, "abc 1\nabc 2\n");
+      const MB = 1024 * 1024;
+      const be = makeBackend();
+      be.st.tags = tags;
+      for (const f of eight) be.st.sizes[f] = 99 * MB;
+      be.st.openFiles = eight;
+      be.st.session = session([], "", { multi: { on: true, count: 1, slots: Array.from({ length: 6 }, () => ({ tabId: "", mode: "edit", server: "" })), bundle: null } });
+      const { ctx, page } = await openPage(browser, url, be, { width: 1400, height: 900 });
+      await page.click('.mpane[data-slot="0"] .empty-actions button:has-text("파일 열기")');
+      await page.waitForSelector(".big-ask");
+      await page.click('.big-ask button:has-text("📖 읽기")');
+      await until(async () => (await page.$$(".tabs-scroll .tab")).length === 8, 8000);
+      ok("여덟 개 모두 📖 (예산 792MB > 768MB)", calls(be, "ReadFile").length === 0);
+      const held = () => page.$eval(".st-mem", (e) => +e.dataset.held);
+      const pick = async (k, wait = '.lines-view[data-mode="all"]') => {
+        await page.selectOption('.mpane[data-slot="0"] .mp-pick', { index: k + 1 });
+        await page.waitForSelector('.mpane[data-slot="0"] ' + wait);
+      };
+      for (let k = 0; k < 7; k++) {
+        await pick(k);
+        if (k === 6) be.delay.EditOpenChunk = 1500;
+        await page.click('.mpane[data-slot="0"] .lv-edit');
+        await page.click('.choice-ask [data-choice="edit"]');
+        if (k === 6) {
+          await page.waitForSelector(".rv-wait");
+          ok("W 는 시작부터 예산에 셈 (일곱째 W 중 693MB)", (await until(async () => (await held()) === 7 * 99 * MB, 1000)) === true, await held());
+        }
+        await page.waitForSelector('.mpane[data-slot="0"] .cm-editor', { timeout: 15000 });
+        be.delay.EditOpenChunk = 0;
+      }
+      ok("✏️ 일곱 개 = 693MB", (await held()) === 7 * 99 * MB, await held());
+      await pick(7);
+      await sleep(200);
+      const w8 = await page.$eval('.mpane[data-slot="0"] .lv-edit', (b) => [b.disabled, b.title]);
+      ok("여덟째 ✏️ 꺼짐 + 「768.0MB 를 넘습니다(지금 693.0MB)」", w8[0] && w8[1].includes("768.0MB") && w8[1].includes("지금 693.0MB"), w8);
+      // one back to 📖: the eighth can be opened again
+      await pick(0, ".cm-editor");
+      await page.click('.mpane[data-slot="0"] .lines-seg.big button:nth-child(1)');
+      await page.waitForSelector('.mpane[data-slot="0"] .lines-view[data-mode="all"]');
+      ok("하나 📖 로 → 예산 594MB", (await until(async () => (await held()) === 6 * 99 * MB, 2000)) === true, await held());
+      await pick(7);
+      await sleep(200);
+      ok("여덟째 ✏️ 다시 켜짐", await page.$eval('.mpane[data-slot="0"] .lv-edit', (b) => !b.disabled));
       await ctx.close();
     }
   } finally {

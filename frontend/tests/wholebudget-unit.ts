@@ -58,6 +58,9 @@ ok("wait tiny ≥ 1초", wholeWaitText(1000).includes("약 1초"));
   const why = editBudgetWhy(600 * MB, 300 * MB, f);
   ok("편집: 600 + 300 → 막힘 + 이유(합계·한도·지금)", why.includes("900.0MB") && why.includes("768.0MB") && why.includes("지금 600.0MB"), why);
   ok("편집: 1바이트 넘음 → 막힘", editBudgetWhy(WHOLE_BUDGET - 300 * MB + 1, 300 * MB, f) !== "");
+  // agy F-12: a few bytes over must not read 「768.0MB 가 되어 768.0MB 를 넘습니다」
+  const one = editBudgetWhy(WHOLE_BUDGET - 300 * MB + 1, 300 * MB, f);
+  ok("편집: 1바이트 넘음 → 문구가 바이트로(모순 없음)", !one.includes("768.0MB 가 되어 768.0MB") && one.includes("805,306,369 바이트") && one.includes("805,306,368 바이트"), one);
   const t = editAskText(300 * MB, 300 * MB, f);
   ok("확인 창: 시간·멈춤·메모리·한도(지금·합계)·저장·읽기 권함", /약 30초/.test(t) && t.includes("응답하지 않") && /약 1\.0GB/.test(t) && t.includes("768.0MB") && t.includes("지금 300.0MB") && t.includes("600.0MB") && t.includes("저장도 오래") && t.includes("📖 읽기 보기"), t);
 }
