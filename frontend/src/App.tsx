@@ -57,7 +57,7 @@ import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import { comboKey, normalizeCombo } from "./keyCombo";
 import "./App.css";
-import { budgetAsks, budgetText, wholeBudget } from "./wholeBudget";
+import { budgetAsks, budgetText, wholeBudget, wholeWaitText } from "./wholeBudget";
 import {
   OpenFileDialog,
   OpenFilesDialog,
@@ -1628,7 +1628,8 @@ function App() {
           }
           const c = await askBig(
             `큰 파일입니다 (${t.label || t.title} ${fmtSize(size)})`,
-            "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n큰 파일의 그 줄 주변만 여는 기능은 아직 없습니다.",
+            "전체를 열면 오래 걸리고 메모리를 많이 씁니다(수백 MB 는 열리지 않을 수 있습니다).\n큰 파일의 그 줄 주변만 여는 기능은 아직 없습니다.\n" +
+              wholeWaitText(size),
             { noLines: true }
           );
           if (c !== "full") return false;
@@ -1704,7 +1705,7 @@ function App() {
         }
         const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
         const choice: BigChoice = big.length
-          ? await askBig(askTitle(big), (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") + BIG_TEXT, { noLines: true })
+          ? await askBig(askTitle(big), (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") + BIG_TEXT + "\n" + wholeWaitText(big.reduce((a, x) => a + x.size, 0)), { noLines: true })
           : "full";
         const declined = choice === "cancel";
         return {
@@ -1728,7 +1729,7 @@ function App() {
         const text = overBudget
           ? budgetMsg(held, wb.adding, wb.counted === 1) + (only.length ? "\n" + linesOnlyText(only, false) : "")
           : (big.some((x) => !noWhole(x) && x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") +
-            (canFull ? BIG_TEXT : "") +
+            (canFull ? BIG_TEXT + "\n" + wholeWaitText(big.filter((x) => !noWhole(x)).reduce((a, x) => a + x.size, 0)) : "") +
             (only.length ? (canFull ? "\n" : "") + linesOnlyText(only, canFull) : "");
         choice = await askBig(askTitle(big), text, { noFull: !canFull });
       }
@@ -3672,6 +3673,7 @@ function App() {
         ) : (
           <>
             {t.bigSize > EDIT_MEM_FILE && <div className="empty-sub">{EDIT_MEM_NOTE}</div>}
+            <div className="empty-sub">{wholeWaitText(t.bigSize)}</div>
             <div className="empty-sub">
               「전체 열기」는 {BIG_CONFIRM_TAIL} 「🏷 태그 줄만」은 파일을 읽어 들이지 않고 걸린 줄만 바로 보여 줍니다.
             </div>

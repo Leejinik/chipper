@@ -556,6 +556,8 @@ async function main() {
       await p2.page.waitForSelector(".big-ask");
       const b2 = await p2.page.$$eval(".big-ask button", (e) => e.map((b) => b.textContent.trim()));
       ok("두 개(600MB)는 「전체 열기」 그대로", b2.includes("전체 열기"), b2);
+      const t2 = await p2.page.$eval(".big-ask p", (e) => e.textContent);
+      ok("… 다 읽을 때까지 창이 멈춘 듯 보인다는 안내(약 90초)", t2.includes("멈춘 것처럼") && t2.includes("약 90초"), t2);
       await p2.ctx.close();
     }
   } finally {

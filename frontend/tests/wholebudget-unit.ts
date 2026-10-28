@@ -1,7 +1,7 @@
 // Unit tests of the whole-file total (wholeBudget.ts): six real 300MB logs
 // opened whole killed the window on the test PC (10-28, realtest-progress.md).
 //   node tests/run-unit.cjs
-import { budgetAsks, budgetText, BUDGET_SMALL, WHOLE_BUDGET, wholeBudget } from "../src/wholeBudget";
+import { budgetAsks, budgetText, BUDGET_SMALL, WHOLE_BUDGET, wholeBudget, wholeWaitText } from "../src/wholeBudget";
 
 let pass = 0;
 let fail = 0;
@@ -42,6 +42,12 @@ let t = budgetText(600 * MB, 300 * MB, true, fmt);
 ok("text held one", t.includes("이미 600.0MB") && t.includes("이 파일(300.0MB)") && t.includes("900.0MB") && t.includes("768.0MB") && t.includes("다른 큰 탭을 닫으세요"), t);
 t = budgetText(0, 1800 * MB, false, fmt);
 ok("text none held several", t.startsWith("이 파일들을 모두 전체로 열면 합계 1800.0MB") && t.includes("한 번에 여는 파일을 줄이세요") && !t.includes("닫으세요"), t);
+
+// the wait, said in the question (300MB took 45s on the test PC)
+t = wholeWaitText(300 * MB);
+ok("wait 300MB ≈ 45초", t.includes("약 45초") && t.includes("멈춘 것처럼"), t);
+ok("wait 600MB ≈ 90초", wholeWaitText(600 * MB).includes("약 90초"));
+ok("wait tiny ≥ 1초", wholeWaitText(1000).includes("약 1초"));
 
 console.log(`wholebudget-unit: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
