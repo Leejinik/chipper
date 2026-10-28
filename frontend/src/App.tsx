@@ -57,6 +57,7 @@ import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import { comboKey, normalizeCombo } from "./keyCombo";
 import "./App.css";
+import { budgetAsks, budgetText, wholeBudget } from "./wholeBudget";
 import {
   OpenFileDialog,
   OpenFilesDialog,
@@ -306,6 +307,7 @@ function linesOnlyText(files: { path: string; name: string; size: number }[], ca
   return out.join("\n");
 }
 const BIG_CONFIRM_TAIL = "여는 데 오래 걸리고 메모리를 많이 씁니다.";
+const budgetMsg = (held: number, adding: number, one: boolean) => budgetText(held, adding, one, fmtSize);
 // Over this, the open confirm also says what editing costs: on the test PC
 // (.18) saving an edited 384MB log took WebView 3.2GB + Go 4.5GB.
 const EDIT_MEM_FILE = 128 << 20;
@@ -1049,6 +1051,19 @@ function App() {
   const loadedRef = useRef(loaded);
   const assocOpenRef = useRef(assocOpen);
   tabsRef.current = tabs;
+  // Text held whole (tabs read into the editor — the 「🏷 줄만」 of a tab read
+  // before still holds it — and files being read whole right now): WHOLE_BUDGET.
+  const readingWhole = useRef(new Map<string, number>());
+  const heldWhole = useCallback((): number => {
+    let n = 0;
+    for (const t of tabsRef.current) {
+      if (t.needsLoad) continue;
+      const v = viewsRef.current.get(t.id);
+      n += v ? Math.max(v.state.doc.length, t.content.length) : t.content.length;
+    }
+    for (const x of readingWhole.current.values()) n += x;
+    return n;
+  }, []);
   activeIdRef.current = activeId;
   ratioRef.current = splitRatio;
   fontSizeRef.current = fontSize;
@@ -1602,6 +1617,10 @@ function App() {
         } catch {
           /* the read will say */
         }
+        if (size <= TOO_BIG_FILE && wholeBudget(heldWhole(), [{ size, whole: true }]).over) {
+          alert(budgetMsg(heldWhole(), size, true));
+          return false;
+        }
         if (size >= BIG_FILE) {
           if (size > TOO_BIG_FILE) {
             alert(tooBigText([{ name: t.title, size }]));
@@ -1622,7 +1641,7 @@ function App() {
       setLines(id, (l) => ({ ...l, on: false }));
       return true;
     },
-    [askBig, setLines]
+    [askBig, setLines, heldWhole]
   );
   // --- size gate -------------------------------------------------------------
   // The one size check every way of opening a file goes through, right before
@@ -1668,10 +1687,22 @@ function App() {
       );
       const sizes = new Map(sized.map((x) => [x.path, x.size]));
       const askTitle = (xs: typeof sized) => `큰 파일입니다 (${xs.map((x) => `${x.name} ${fmtSize(x.size)}`).join(", ")})`;
+      // the whole-file total (WHOLE_BUDGET): what is held + what this would read whole
+      // (a tab read again — another encoding — replaces what it holds)
+      const held =
+        heldWhole() -
+        tabsRef.current
+          .filter((t) => !t.needsLoad && items.some((x) => samePath(x.path, t.path)))
+          .reduce((a, t) => a + t.content.length, 0);
       if (wholeOnly) {
         const tooBig = sized.filter((x) => x.size > TOO_BIG_FILE);
-        const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
         if (tooBig.length) alert(tooBigText(tooBig));
+        const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: x.size <= TOO_BIG_FILE && !isGz(x.path) })));
+        if (wb.over) {
+          alert(budgetMsg(held, wb.adding, wb.counted === 1));
+          return { allowed: new Set(), tooBig: new Set(tooBig.map((x) => x.path)), lines: new Set(), declined: true, sizes };
+        }
+        const big = sized.filter((x) => x.size >= BIG_FILE && x.size <= TOO_BIG_FILE);
         const choice: BigChoice = big.length
           ? await askBig(askTitle(big), (big.some((x) => x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") + BIG_TEXT, { noLines: true })
           : "full";
@@ -1684,26 +1715,32 @@ function App() {
           sizes,
         };
       }
-      const big = sized.filter((x) => x.size >= BIG_FILE);
-      const canFull = big.some((x) => !noWhole(x));
+      // Over the whole-file total, every file of some size is asked about too
+      // (small ones add up), with no 「전체 열기」.
+      const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: !noWhole(x) })));
+      const overBudget = wb.over;
+      const asked = (x: { path: string; size: number }) => x.size >= BIG_FILE || budgetAsks(overBudget, { size: x.size, whole: !noWhole(x) });
+      const big = sized.filter(asked);
+      const canFull = !overBudget && big.some((x) => !noWhole(x));
       let choice: BigChoice = "full";
       if (big.length) {
         const only = big.filter(noWhole);
-        const text =
-          (big.some((x) => !noWhole(x) && x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") +
-          (canFull ? BIG_TEXT : "") +
-          (only.length ? (canFull ? "\n" : "") + linesOnlyText(only, canFull) : "");
+        const text = overBudget
+          ? budgetMsg(held, wb.adding, wb.counted === 1) + (only.length ? "\n" + linesOnlyText(only, false) : "")
+          : (big.some((x) => !noWhole(x) && x.size > EDIT_MEM_FILE) ? EDIT_MEM_NOTE + "\n" : "") +
+            (canFull ? BIG_TEXT : "") +
+            (only.length ? (canFull ? "\n" : "") + linesOnlyText(only, canFull) : "");
         choice = await askBig(askTitle(big), text, { noFull: !canFull });
       }
       const declined = choice === "cancel";
       const lines = new Set<string>();
       for (const x of sized) {
-        if (x.size >= BIG_FILE) {
+        if (asked(x)) {
           if (choice === "lines" || (choice === "full" && noWhole(x))) lines.add(x.path);
         } else if (isGz(x.path)) lines.add(x.path); // small .gz: no question
       }
       return {
-        allowed: new Set(sized.filter((x) => !noWhole(x) && !lines.has(x.path) && !(declined && x.size >= BIG_FILE)).map((x) => x.path)),
+        allowed: new Set(sized.filter((x) => !noWhole(x) && !lines.has(x.path) && !(declined && asked(x))).map((x) => x.path)),
         tooBig: new Set(), // nothing is refused for its size: it opens as 「태그 줄만」 (or the question was declined)
         lines,
         declined,
@@ -1724,6 +1761,9 @@ function App() {
       (p, i) => p && paths.indexOf(p) === i && !tabsRef.current.some((t) => t.path === p)
     );
     const gate = fresh.length ? await gateSizes(fresh.map((path) => ({ path }))) : null;
+    // read whole from here on: counted (WHOLE_BUDGET) until the tab holds it
+    const reading = [...(gate?.allowed ?? [])];
+    for (const p of reading) readingWhole.current.set("open:" + p, gate?.sizes.get(p) ?? 0);
     const seen = new Set(tabsRef.current.filter((t) => t.path).map((t) => t.path));
     const skipped: string[] = [];
     const ids: string[] = [];
@@ -1777,6 +1817,7 @@ function App() {
         console.error("파일 열기 실패", path, e);
       }
     }
+    window.setTimeout(() => reading.forEach((p) => readingWhole.current.delete("open:" + p)), 200);
     if (activate && lastId) setActiveId(lastId);
     if (skipped.length) {
       alert("다음 파일은 열 수 없습니다:\n- " + skipped.join("\n- "));
@@ -2048,21 +2089,23 @@ function App() {
     // Same size rule as gateSizes, but asked inside the pane: a restored session
     // may hold several big tabs, and a stack of dialogs at start-up would block
     // the whole window.
+    let size = 0;
+    try {
+      const st = await StatFile(t.path);
+      size = st?.exists ? st.size : 0;
+    } catch {
+      size = 0;
+    }
     if (!bigApproved.current.has(t.id)) {
-      let size = 0;
-      try {
-        const st = await StatFile(t.path);
-        size = st?.exists ? st.size : 0;
-      } catch {
-        size = 0;
-      }
-      if (size >= BIG_FILE) {
+      // over the whole-file total (WHOLE_BUDGET) the pane asks too, with no 「전체 열기」
+      if (size >= BIG_FILE || wholeBudget(heldWhole(), [{ size, whole: true }]).over) {
         // the pane asks (bigPrompt): 「🏷 태그 줄만」, and 「전체 열기」 up to the limit
         loadingIds.current.delete(t.id);
         setTabs((prev) => prev.map((x) => (x.id !== t.id || !x.needsLoad ? x : { ...x, bigSize: size })));
         return;
       }
     }
+    readingWhole.current.set("tab:" + t.id, size);
     try {
       // Keep the encoding the tab was using; fall back to auto-detection (and
       // detect when the tab was never read: opened into 「태그 줄만」).
@@ -2095,6 +2138,8 @@ function App() {
             : { ...x, loadError: err || "파일을 읽지 못했습니다." }
       )
     );
+    // counted in the tab from its next render on
+    window.setTimeout(() => readingWhole.current.delete("tab:" + t.id), 200);
   }, []);
 
   // 「전체 열기」 on a big restored tab: read it now.
@@ -2368,7 +2413,8 @@ function App() {
         before.slots.map((x) => x.tabId).filter((id) => id && !slots.some((x) => x.tabId === id))
       );
       setMulti({ ...before, slots });
-      setTabs((prev) => prev.filter((t) => !(pushedOut.has(t.id) && !t.dirty && t.label)));
+      // (a tab with 「🚫 제외」 chips stays open: closing it would lose them — agy review)
+      setTabs((prev) => prev.filter((t) => !(pushedOut.has(t.id) && !t.dirty && t.label && !t.lines?.ex?.length)));
       const focusId = slots[focusSlotRef.current]?.tabId ?? "";
       activeIdRef.current = focusId;
       setActiveId(focusId);
@@ -3606,13 +3652,19 @@ function App() {
   // the pane instead of a dialog): 「🏷 태그 줄만」, or 「전체 열기」 up to the limit.
   const bigPrompt = (t: Tab) => {
     const over = t.bigSize > TOO_BIG_FILE;
+    // over the whole-file total with the tabs already read whole: no 「전체 열기」
+    const budget = !over && wholeBudget(heldWhole(), [{ size: t.bigSize, whole: true }]).over;
     return (
       <>
         <div className="empty-title">
-          {over ? "너무 커서 전체로는 열 수 없습니다" : "큰 파일입니다"} ({fmtSize(t.bigSize)})
+          {over ? "너무 커서 전체로는 열 수 없습니다" : budget ? "전체로 연 파일이 많아 전체로는 열 수 없습니다" : "큰 파일입니다"} ({fmtSize(t.bigSize)})
         </div>
         <div className="empty-sub">{t.path}</div>
-        {over ? (
+        {budget ? (
+          <div className="empty-sub" style={{ whiteSpace: "pre-line" }}>
+            {budgetMsg(heldWhole(), t.bigSize, true)}
+          </div>
+        ) : over ? (
           <div className="empty-sub">
             전체로는 {LIMIT_TEXT} 까지만 열 수 있습니다. 「🏷 태그 줄만」은 파일을 읽어 들이지 않고 태그 규칙에 걸린 줄과 그
             위·아래 줄만 보여 줍니다.
@@ -3629,7 +3681,7 @@ function App() {
           <button className="tb-btn primary" onClick={() => toLines(t.id)}>
             🏷 태그 줄만
           </button>
-          {!over && (
+          {!over && !budget && (
             <button className="tb-btn" onClick={() => approveBig(t.id)}>
               전체 열기
             </button>
