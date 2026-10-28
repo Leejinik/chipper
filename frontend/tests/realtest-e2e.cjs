@@ -330,12 +330,14 @@ async function shotSmall(page, name) {
 const TALL = { width: 1400, height: 2000 }; // the whole 60-line result on screen (rows are virtual)
 
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+// (a click / chip is handled on the page's next turn: give it that before
+// looking, or the old, already settled view is taken for the new one)
 const settled = (page, scope = "") =>
-  until(async () => {
+  sleep(150).then(() => until(async () => {
     const d = await viewData(page, scope);
     const wait = await page.$$eval(scope + " .lv-row.lv-wait", (e) => e.length);
     return d.state === "done" && !d.holding && !wait;
-  }, 15000);
+  }, 15000));
 // the row on top: its line, or the gap's range
 const topRow = (page) =>
   page.evaluate(() => {
