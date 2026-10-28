@@ -1,0 +1,70 @@
+/* 「이 글자로 로그 색 규칙 만들기…」 window (RuleFromText.tsx) and the tag window's
+   stage-6 additions (줄 배경 자리, 느린 규칙) */
+.rule-from-text {
+  width: min(560px, calc(100vw - 32px));
+}
+.rft-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin: 6px 0;
+}
+.rft-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.rft-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.rft-pattern {
+  width: min(440px, calc(100vw - 120px));
+  font-family: var(--mono, monospace);
+  font-weight: 600;
+}
+.rft-pattern,
+.rft-label,
+.rft-tag,
+.rft-kind {
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 13px;
+}
+.rft-more {
+  color: var(--text-dim);
+}
+.rft-note {
+  font-size: 12px;
+  margin: 3px 0;
+}
+.rft-note.err {
+  color: var(--danger);
+}
+.rft-note.warn {
+  color: #e5c07b;
+}
+.rft-note.info {
+  color: var(--text-dim);
+}
+.rule-row .rule-head {
+  width: 4.5em;
+  background: var(--bg-3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 3px;
+  font-size: 12px;
+}
+.rule-problem.rule-slow,
+.rule-problem.rule-slow-sum {
+  color: #e5c07b;
+}

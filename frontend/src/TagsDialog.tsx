@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { DEFAULT_LOG_RULES, ruleProblem, ruleProblemReason, type LogRule, type RuleKind } from "./logHighlight";
+import { DEFAULT_LOG_RULES, MAX_LINE_HEAD, lineHeadOf, ruleKey, ruleProblem, ruleProblemReason, type LogRule, type RuleKind } from "./logHighlight";
+import { onRuleTrouble, ruleTrouble, troubleText } from "./ruleHealth";
 import {
   COMMON,
   addTag,
@@ -69,6 +70,10 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
   const isCommon = tag.name === COMMON;
   // export / import / backups (TagsIO.tsx): buttons, result band, small windows
   const io = useTagsIO({ store, onChange, onSaveNow, current: tag.name, select: setSel });
+  // rules found slow while this run of the app used them (ruleHealth.ts)
+  const [, setTrouble] = useState(0);
+  useEffect(() => onRuleTrouble(() => setTrouble((n) => n + 1)), []);
+  const slowCount = store.tags.reduce((n, t) => n + t.rules.filter((r) => ruleTrouble(ruleKey(r)).length).length, 0);
 
   // Esc closes the window wherever the focus is (not while renaming a tag);
   // with one of TagsIO's small windows up, TagsIO closes only that one first.
@@ -248,8 +253,14 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
             </div>
             <div className="rules-list">
               {rules.length === 0 && <div className="tags-place dim">규칙이 없습니다. ＋ 규칙 추가로 만드세요.</div>}
+              {slowCount > 0 && (
+                <div className="rule-problem rule-slow-sum">
+                  🐢 이번 실행에서 느렸던 규칙 {slowCount}개 (태그마다 규칙 줄 아래에 표시) — 정규식을 단순하게 하면 빨라집니다.
+                </div>
+              )}
               {rules.map((r, i) => {
                 const problem = ruleProblem(r);
+                const slow = ruleTrouble(ruleKey(r));
                 return (
                   <Fragment key={r.id}>
                   <div className={r.on ? "rule-row" : "rule-row off"}>
@@ -280,6 +291,21 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
                       <input type="checkbox" className="rule-line" checked={r.line} onChange={(e) => upd(r.id, { line: e.target.checked })} />
                       줄
                     </label>
+                    {r.line && (
+                      <input
+                        type="number"
+                        className="rule-head"
+                        min={0}
+                        max={MAX_LINE_HEAD}
+                        value={lineHeadOf(r) || ""}
+                        placeholder="어디든"
+                        title="줄 배경 자리: 줄 앞 이 글자 수 안에서 걸릴 때만 줄 배경 (예: 60 = 로그 레벨 자리). 비우면 어디서 걸려도 줄 배경. 글자색과 「줄만」은 이 값과 상관없음"
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          upd(r.id, { lineHead: Number.isFinite(v) && v >= 1 ? Math.min(MAX_LINE_HEAD, v) : undefined });
+                        }}
+                      />
+                    )}
                     <label title="줄만 보기에 씀 — 태그에 걸린 줄만 보는 화면에서 이 규칙에 걸린 줄을 보여 줍니다">
                       <input type="checkbox" className="rule-filter" checked={r.filter} onChange={(e) => upd(r.id, { filter: e.target.checked })} />
                       줄만
@@ -303,6 +329,7 @@ export default function TagsDialog({ store, onChange, onClose, initial, applied,
                     </button>
                   </div>
                   {problem && <div className="rule-problem">쓸 수 없음: {ruleProblemReason(r)}</div>}
+                  {!problem && slow.length > 0 && <div className="rule-problem rule-slow">🐢 느림: {troubleText(slow)}</div>}
                   </Fragment>
                 );
               })}

@@ -48,6 +48,9 @@ import {
   type AssignTarget,
 } from "./tagAssign";
 import LinesView from "./LinesView";
+import { upgradeCommonDefaults } from "./commonDefaults";
+import RuleFromText, { selectionForRule } from "./RuleFromText";
+import { linesFindHost, openLinesFind } from "./LinesFind";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
 import "./App.css";
 import {
@@ -977,7 +980,9 @@ function App() {
     (t: Tab): string => viewsRef.current.get(t.id)?.state.doc.toString() ?? t.content,
     []
   );
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSel: boolean; inOk: boolean } | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; hasSel: boolean; inOk: boolean; rule: { pattern: string; problem: string; line: string } } | null>(null);
+  // 「이 글자로 로그 색 규칙 만들기…」 window (RuleFromText.tsx)
+  const [ruleDraft, setRuleDraft] = useState<{ tabId: string; pattern: string; line: string } | null>(null);
   const [encMenu, setEncMenu] = useState<boolean>(false);
   // Tag assignment window (tree right-click, tab menu, status bar 🏷), and the
   // small 🏷 menu of a tab (tab right-click / status bar).
@@ -1130,6 +1135,12 @@ function App() {
             `옛 로그 색 규칙 ${bad.length}개(${bad.map((x) => x.label || x.pattern).join(", ")})는 새 정규식 방식에서 쓸 수 없어 칠해지지 않습니다. 태그 창(🏷)에서 이유를 볼 수 있습니다.`
           );
         }
+      }
+      // an older common: new built-in rules in, the user's changes kept (commonDefaults.ts)
+      const up = tagsReadOnlyRef.current ? null : upgradeCommonDefaults(store);
+      if (up) {
+        store = up.store;
+        if (up.note) notes.push(up.note);
       }
       setTagStore(store);
       tagStoreRef.current = store;
@@ -2423,6 +2434,10 @@ function App() {
 
   const openFind = useCallback(
     (replace: boolean) => {
+      // a 「🏷 줄만」 view (focused, or the tab in it) has its own find bar (LinesFind.tsx)
+      const inLines = (document.activeElement as HTMLElement | null)?.closest?.<HTMLElement>(".lines-view") ?? null;
+      const cur = tabsRef.current.find((t) => t.id === activeIdRef.current);
+      if (openLinesFind(inLines ?? (cur?.lines?.on ? linesFindHost(cur.id) : null))) return;
       if (multiRef.current.on) {
         setFindReplace(replace);
         setFindOpen(true);
@@ -2535,16 +2550,23 @@ function App() {
     const v = getFocusedView();
     const hasSel = v ? v.state.selection.ranges.some((r) => !r.empty) : false;
     let inOk = false;
+    let rule = { pattern: "", problem: "글자를 먼저 고르세요", line: "" };
     if (v) {
       const r = v.state.selection.main;
       inOk = parseInClause(v.state.sliceDoc(r.from, r.to)).ok;
+      // the main selection, when it is a short text inside one line
+      if (!r.empty)
+        rule =
+          r.to - r.from > 4000
+            ? { pattern: "", problem: "고른 글자가 너무 깁니다", line: "" }
+            : { ...selectionForRule(v.state.sliceDoc(r.from, r.to)), line: v.state.doc.lineAt(r.from).text.slice(0, 4000) };
     }
-    const MW = 200;
-    const MH = 340;
+    const MW = 260;
+    const MH = 370;
     const x = Math.min(e.clientX, window.innerWidth - MW);
     const y = Math.min(e.clientY, window.innerHeight - MH);
     setEncMenu(false);
-    setCtxMenu({ x, y, hasSel, inOk });
+    setCtxMenu({ x, y, hasSel, inOk, rule });
   }, [getFocusedView]);
 
   const runCtx = useCallback(async (action: string) => {
@@ -3339,6 +3361,7 @@ function App() {
     const l = t.lines ?? DEFAULT_LINES;
     const off = l.off.filter((n) => ap.names.includes(n));
     return (
+      <div className="lines-host" data-tab={t.id}>
       <LinesView
         key={t.id + "#lines"}
         path={t.path}
@@ -3362,6 +3385,7 @@ function App() {
         onFull={() => void showWhole(t.id)}
         onLeave={(line) => linesAnchor.current.set(t.id, line)}
       />
+      </div>
     );
   };
   // [전체 | 🏷 줄만] switch of a tab with a file.
@@ -4505,8 +4529,47 @@ function App() {
           >
             찾기<span className="menu-key">{keyHint("find")}</span>
           </button>
+          <div className="menu-sep" />
+          <button
+            className="menu-item rule-from-text-item"
+            disabled={!!ctxMenu.rule.problem || !tagsReady}
+            title={ctxMenu.rule.problem || (tagsReady ? `「${ctxMenu.rule.pattern}」 로 태그의 로그 색 규칙을 만듭니다` : "태그 파일을 읽는 중입니다")}
+            onClick={() => {
+              const r = ctxMenu.rule;
+              setCtxMenu(null);
+              if (activeIdRef.current) setRuleDraft({ tabId: activeIdRef.current, pattern: r.pattern, line: r.line });
+            }}
+          >
+            🎨 이 글자로 로그 색 규칙 만들기…
+          </button>
         </div>
       )}
+
+      {ruleDraft &&
+        (() => {
+          const t = tabs.find((x) => x.id === ruleDraft.tabId);
+          if (!t) return null;
+          const back = () => viewsRef.current.get(t.id)?.focus();
+          return (
+            <RuleFromText
+              text={ruleDraft.pattern}
+              sample={ruleDraft.line}
+              store={tagStore}
+              applied={appliedTags(t).names}
+              logOn={logOn(t)}
+              onCreate={(next, tag) => {
+                setTagStore(next);
+                // the new colour is meant to be seen here: turn this tab's log colours on
+                if (!logOn(t) && appliedTags(t).names.includes(tag))
+                  setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, logColors: "on" } : x)));
+              }}
+              onClose={() => {
+                setRuleDraft(null);
+                window.setTimeout(back, 0);
+              }}
+            />
+          );
+        })()}
 
 
       {tagMenu &&

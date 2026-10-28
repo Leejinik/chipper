@@ -271,6 +271,8 @@ eq(
   DEFAULT_LOG_RULES.map((r) => [r.id, r.filter]),
   [
     ["error", true],
+    ["error-ck", false],
+    ["fail", true],
     ["warn", true],
     ["info", false],
     ["debug", false],

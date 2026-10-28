@@ -6,7 +6,8 @@
 // rows it shows (pages around the viewport), so its memory does not grow with
 // the result and changing the context sizes costs one page.
 
-import { compileRule, resolvePaint, type LogRule, type RuleLayers, type RuleMatcher } from "./logHighlight";
+import { noteRuleTrouble } from "./ruleHealth";
+import { compileRule, lineHeadOf, paintLine, ruleKey, type LogRule, type RuleLayers, type RuleMatcher } from "./logHighlight";
 import { COMMON, rulesFor, type TagStore } from "./logTags";
 
 // --- per-tab state (kept in the session) -------------------------------------
@@ -199,8 +200,12 @@ export function rowsText(rows: FRow[]): string {
 export interface PaintSpan {
   from: number;
   to: number;
-  color: string;
+  color: string; // "" = not coloured (an ANSI code outside any match)
+  dim?: boolean; // an ANSI colour code (shown faint, like the editor)
 }
+// The style of a painted span in the view.
+export const spanStyle = (s: PaintSpan) =>
+  s.dim ? { color: s.color || undefined, fontWeight: s.color ? 600 : undefined, opacity: 0.45 } : { color: s.color, fontWeight: 600 };
 export interface RowPaint {
   spans: PaintSpan[];
   tint: string; // line background colour ("" = none)
@@ -212,6 +217,7 @@ export class RowPainter {
   private color: string[] = [];
   private layer: number[] = [];
   private lineRule: boolean[] = [];
+  private lineHead: number[] = [];
   private cache = new Map<string, RowPaint>();
   constructor(layers: RuleLayers | null) {
     (layers ?? []).forEach((rs, layer) => {
@@ -223,23 +229,49 @@ export class RowPainter {
         this.color.push(r.color);
         this.layer.push(layer);
         this.lineRule.push(!!r.line);
+        this.lineHead.push(lineHeadOf(r));
       }
     });
   }
   get empty() {
     return this.m.length === 0;
   }
+  private find = (t: string) => this.m.map((m) => m.ranges(t));
   paint(text: string): RowPaint {
     if (!this.m.length || !text) return NO_PAINT;
     const hit = this.cache.get(text);
     if (hit) return hit;
-    const found = this.m.map((m) => m.ranges(text));
-    const p = resolvePaint(text.length, found, this.layer, this.lineRule);
-    const spans: PaintSpan[] = [];
-    for (let k = 0; k < p.spans.length; k += 3) spans.push({ from: p.spans[k], to: p.spans[k + 1], color: this.color[p.spans[k + 2]] });
+    // the editor's own line painting (ANSI codes skipped, level-column tint)
+    const p = paintLine(text, this.find, this.layer, this.lineRule, this.lineHead);
+    const spans = p.dim ? dimSpans(text.length, p.spans, p.dim, this.color) : [];
+    if (!p.dim) for (let k = 0; k < p.spans.length; k += 3) spans.push({ from: p.spans[k], to: p.spans[k + 1], color: this.color[p.spans[k + 2]] });
     const out = { spans, tint: p.tint >= 0 ? this.color[p.tint] : "" };
     if (this.cache.size > 3000) this.cache.clear();
     this.cache.set(text, out);
     return out;
   }
+}
+
+// Spans of a line with ANSI codes: the colour spans (rule = spans[k+2]) cut
+// around the codes, each code a faint span of its own (coloured too when it
+// sits inside a match). Non-overlapping, in order.
+function dimSpans(len: number, spans: number[], dim: number[], color: string[]): PaintSpan[] {
+  const col = new Int32Array(len).fill(-1);
+  for (let k = 0; k < spans.length; k += 3) col.fill(spans[k + 2], spans[k], spans[k + 1]);
+  const isDim = new Uint8Array(len);
+  for (let k = 0; k < dim.length; k += 2) isDim.fill(1, dim[k], dim[k + 1]);
+  const out: PaintSpan[] = [];
+  for (let c = 0; c < len; ) {
+    let e = c + 1;
+    while (e < len && col[e] === col[c] && isDim[e] === isDim[c]) e++;
+    if (col[c] >= 0 || isDim[c]) out.push({ from: c, to: e, color: col[c] >= 0 ? color[col[c]] : "", ...(isDim[c] ? { dim: true } : {}) });
+    c = e;
+  }
+  return out;
+}
+
+// 「줄만」 found rules its engine had to run the slow way (Progress.slowRules,
+// indexes into `rules`): remember them for the tag window (ruleHealth.ts).
+export function noteSlowFilterRules(rules: LogRule[], slow: number[] | null | undefined): void {
+  for (const k of slow ?? []) if (rules[k]) noteRuleTrouble(ruleKey(rules[k]), "filter");
 }

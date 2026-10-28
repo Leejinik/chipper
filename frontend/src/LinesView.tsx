@@ -10,6 +10,7 @@ import { linefilter } from "../wailsjs/go/models";
 import { EventsOn, ClipboardSetText } from "../wailsjs/runtime";
 import type { LogRule, RuleLayers } from "./logHighlight";
 import "./LinesView.css";
+import LinesFind, { useLinesFindOpen } from "./LinesFind";
 import {
   clampContext,
   countFromPage,
@@ -25,6 +26,8 @@ import {
   rowsText,
   RowStore,
   scrollForRow,
+  spanStyle,
+  noteSlowFilterRules,
   type FRow,
 } from "./lineView";
 
@@ -700,7 +703,9 @@ export default function LinesView(p: LinesViewProps) {
   };
 
   // --- drawing ------------------------------------------------------------------------------------------
+  const [findOpen, closeFind, findNonce] = useLinesFindOpen(rootRef); // Ctrl+F (LinesFind.tsx)
   const painter = useMemo(() => new RowPainter(p.layers), [p.layers]);
+  useEffect(() => noteSlowFilterRules(p.rules, prog?.slowRules), [p.rules, prog?.slowRules?.length]); // for the tag window
   const paintText = (text: string) => {
     const pt = painter.paint(text);
     if (!pt.spans.length) return { node: text as React.ReactNode, tint: pt.tint };
@@ -709,7 +714,7 @@ export default function LinesView(p: LinesViewProps) {
     pt.spans.forEach((s, k) => {
       if (s.from > at) parts.push(text.slice(at, s.from));
       parts.push(
-        <span key={k} style={{ color: s.color, fontWeight: 600 }}>
+        <span key={k} style={spanStyle(s)}>
           {text.slice(s.from, s.to)}
         </span>
       );
@@ -947,6 +952,24 @@ export default function LinesView(p: LinesViewProps) {
           {n.text}
         </div>
       ))}
+      {findOpen && (
+        <LinesFind
+          job={jobRef.current}
+          above={abRef.current.A}
+          below={abRef.current.B}
+          count={count}
+          done={!!prog?.done}
+          version={prog?.version ?? 0}
+          sel={sel ? sel.h : null}
+          focusNonce={findNonce}
+          scroller={scRef}
+          onGo={(row) => moveTo(row, false)}
+          onClose={() => {
+            closeFind();
+            scRef.current?.focus();
+          }}
+        />
+      )}
       <div
         className="lv-scroll"
         ref={scRef}

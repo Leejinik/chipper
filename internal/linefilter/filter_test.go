@@ -689,8 +689,11 @@ func TestTranslateJS(t *testing.T) {
 func TestDefaultRulesCompile(t *testing.T) {
 	defaults := defaultLogRules()
 	rules, issues := compileRules(defaults)
-	if len(issues) != 0 || len(rules) != 6 {
+	if len(issues) != 0 || len(rules) != 8 {
 		t.Fatalf("issues %+v", issues)
+	}
+	if _, is := compileRules(defaultLogRulesV1()); len(is) != 0 {
+		t.Fatalf("v1 defaults: issues %+v", is)
 	}
 	var pre []string
 	for _, r := range rules {
@@ -704,10 +707,11 @@ func TestDefaultRulesCompile(t *testing.T) {
 		}
 	}
 	t.Logf("prefilters: %q", pre)
-	if !rules[4].unfiltered {
+	if !rules[6].unfiltered {
 		t.Fatalf("time rule should run on every line")
 	}
-	lines := []string{"x FAILED y", "NullPointerException", "Failure", "crit!", "EMERGENCY", "warning:", "[Note] ok", "notice", "trace", "Oct 20 17:03:00 x", "2026-10-20  0:49:54", "Entering FAULT STATE", "code=killed", "info", "information"}
+	lines := []string{"x FAILED y", "NullPointerException", "Failure", "crit!", "EMERGENCY", "warning:", "[Note] ok", "notice", "trace", "Oct 20 17:03:00 x", "2026-10-20  0:49:54", "Entering FAULT STATE", "code=killed", "info", "information",
+		"10-22 00:00:03 ERROR x", "2026.10.20 19:07:03.039812 [ 1 ] {} <Error> y", "[2026-10-22 00:07:36,193] DEBUG z", "2026-10-21 23:41:12,974 [myid:] - INFO", "<Fatal>", "<error>"}
 	for i := range rules {
 		m := newMatcher(rules[i : i+1])
 		ws := newWState(m, 1<<20)
@@ -720,8 +724,25 @@ func TestDefaultRulesCompile(t *testing.T) {
 	}
 }
 
-// defaultLogRules mirrors DEFAULT_LOG_RULES in frontend/src/logHighlight.ts.
+// defaultLogRules mirrors DEFAULT_LOG_RULES in frontend/src/logHighlight.ts
+// (revision 2, stage 6: 오류 split into the level words and 실패·예외, the
+// ClickHouse <Error> line tint, two more time formats).
 func defaultLogRules() []Rule {
+	return []Rule{
+		{ID: "error", Regex: true, CaseSensitive: true, Pattern: `\b(FATAL|EMERG(ENCY)?|ALERT|CRIT(ICAL)?|ERROR|ERR|SEVERE|PANIC)\b`},
+		{ID: "error-ck", Regex: true, CaseSensitive: true, Pattern: `<(Fatal|Critical|Error)>|\[(emerg|alert|crit|error)\]`},
+		{ID: "fail", Regex: true, Pattern: `\b(FATAL|EMERG(ENCY)?|ALERT|CRIT(ICAL)?|ERROR|ERR|SEVERE|PANIC|FAIL(ED|URE)?)\b|\b\w*Exception\b`},
+		{ID: "warn", Regex: true, Pattern: `\bWARN(ING)?\b`},
+		{ID: "info", Regex: true, Pattern: `\b(INFO|NOTICE)\b|\[Note\]`},
+		{ID: "debug", Regex: true, Pattern: `\b(DEBUG|TRACE|VERBOSE)\b`},
+		{ID: "time", Regex: true, CaseSensitive: true, Pattern: `\b[A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d\b|\b\d{4}-\d\d-\d\d[ T] ?\d{1,2}:\d\d:\d\d([.,]\d+)?|\b\d{1,2} [A-Z][a-z]{2} \d{4} \d\d:\d\d:\d\d(\.\d+)?|\b\d{4}\.\d\d\.\d\d \d\d:\d\d:\d\d(\.\d+)?|\b\d\d-\d\d \d\d:\d\d:\d\d([.,]\d+)?`},
+		{ID: "mk119", Regex: true, CaseSensitive: true, Pattern: `Entering (FAULT|BACKUP) STATE|NON_PRIM|WSREP: forgetting|Out of memory|Killed process|Main process exited|code=killed`},
+	}
+}
+
+// defaultLogRulesV1 mirrors DEFAULT_LOG_RULES_V1 (revision 1, v1.2.0 … stage 5);
+// the stage-1 benchmarks were measured with these.
+func defaultLogRulesV1() []Rule {
 	return []Rule{
 		{ID: "error", Regex: true, Pattern: `\b(FATAL|EMERG(ENCY)?|ALERT|CRIT(ICAL)?|ERROR|ERR|SEVERE|PANIC|FAIL(ED|URE)?)\b|\b\w*Exception\b`},
 		{ID: "warn", Regex: true, Pattern: `\bWARN(ING)?\b`},
@@ -739,7 +760,7 @@ func TestDefaultRulesMatchTS(t *testing.T) {
 	}
 	re := regexp.MustCompile("pattern: String\\.raw`([^`]*)`")
 	ms := re.FindAllStringSubmatch(string(src), -1)
-	d := defaultLogRules()
+	d := append(defaultLogRules(), defaultLogRulesV1()...) // DEFAULT_LOG_RULES, then DEFAULT_LOG_RULES_V1
 	if len(ms) != len(d) {
 		t.Fatalf("logHighlight.ts has %d patterns, test copy %d", len(ms), len(d))
 	}
