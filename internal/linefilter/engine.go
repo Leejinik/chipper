@@ -492,6 +492,41 @@ func (e *Engine) evictIdleLocked() {
 	}
 }
 
+// freeIdleTemps drops the unreferenced jobs (cached, finished) that hold a
+// temp copy — all but `keep` — and waits a little for their copies to be
+// deleted. False when there was none.
+func (e *Engine) freeIdleTemps(keep *job) bool {
+	e.mu.Lock()
+	var idle []*job
+	for j := range e.jobs {
+		if j == keep {
+			continue
+		}
+		j.mu.Lock()
+		if j.refs == 0 && j.tempFile != "" {
+			idle = append(idle, j)
+		}
+		j.mu.Unlock()
+	}
+	for _, j := range idle {
+		e.dropLocked(j)
+	}
+	e.mu.Unlock()
+	if len(idle) == 0 {
+		return false
+	}
+	done := make(chan struct{})
+	go func() {
+		e.drops.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+	return true
+}
+
 // dropLocked forgets a job: stops it, and once nothing reads its temp copy
 // any more, deletes it.
 func (e *Engine) dropLocked(j *job) {
