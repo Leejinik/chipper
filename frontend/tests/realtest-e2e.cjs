@@ -515,6 +515,11 @@ async function main() {
       ok(`좁고 낮은 창(420×330)에 칩 7개 + 찾기 → 목록 높이 ${h}px ≥ 80`, h >= 80, h);
       const rows = await page.$$eval(".lv-row[data-line]", (e) => e.filter((x) => x.getBoundingClientRect().height > 0).length);
       ok("행이 보임", rows >= 3, rows);
+      // room enough: the chips are not squeezed (the rows' height must not shrink them)
+      await page.setViewportSize({ width: 420, height: 900 });
+      await sleep(300);
+      const exH = await page.$eval(".lv-ex", (e) => [e.scrollHeight, e.clientHeight]);
+      ok(`높은 창(420×900): 칩 줄이 잘리지 않음 (${exH[0]} ≤ ${exH[1]})`, exH[0] <= exH[1] + 1, exH);
       await ctx.close();
     }
 
