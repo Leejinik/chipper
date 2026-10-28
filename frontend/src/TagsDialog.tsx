@@ -461,13 +461,13 @@ export default function TagsDialog({ store, onChange, onApply, onClose, initial,
           {applyMsg && <span className={"tags-apply-msg" + (applyMsg.bad ? " bad" : "")}>{applyMsg.text}</span>}
           <button
             className="tb-btn tags-apply"
-            disabled={!dirty || applying}
+            disabled={!dirty || applying || io.blocking}
             title={dirty ? "고친 내용을 저장하고 편집기 색에 반영합니다 (창은 열린 채)" : "적용할 변경이 없습니다"}
             onClick={() => void apply(false)}
           >
             적용
           </button>
-          <button className="tb-btn primary tags-ok" disabled={applying} title="고친 내용을 저장하고 창을 닫습니다" onClick={() => void apply(true)}>
+          <button className="tb-btn primary tags-ok" disabled={applying || io.blocking} title="고친 내용을 저장하고 창을 닫습니다" onClick={() => void apply(true)}>
             확인
           </button>
           <button className="tb-btn tags-close" title="적용 안 한 변경은 버리고 닫습니다 (Esc)" onClick={onClose}>
