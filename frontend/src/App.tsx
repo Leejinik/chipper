@@ -2334,7 +2334,10 @@ function App() {
           setEditLoad(null);
         }
         // counted in the tab from its next render on
-        window.setTimeout(() => readingWhole.current.delete("edit:" + t.id), 200);
+        window.setTimeout(() => {
+          readingWhole.current.delete("edit:" + t.id);
+          setSizeTick((n) => n + 1); // 🧠 and the ✏️ buttons see it at once
+        }, 200);
       }
     },
     [setLines]

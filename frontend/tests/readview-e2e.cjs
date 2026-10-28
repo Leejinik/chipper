@@ -535,6 +535,7 @@ async function main() {
       await page.click('.choice-ask [data-choice="discard"]');
       await page.waitForSelector('.lines-view[data-mode="all"]');
       ok("버리기 → R, 저장 안 함", calls(be, "SaveFile").length === 1 && JSON.stringify(await tabStates(page)) === '["R"]');
+      ok("버리기 → 예산 풀림(편집 0)", (await until(async () => (await memText(page)).includes("편집 0/768MB"), 1500)) === true, await memText(page));
       await shot(page, "readview-2.png");
       // W then tab close: asks (confirm), stops the read, closes
       be.delay.EditOpenChunk = 400;
