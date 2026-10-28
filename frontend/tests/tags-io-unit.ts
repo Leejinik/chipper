@@ -68,6 +68,18 @@ const store0 = (): TagStore =>
   eq("export common", JSON.parse(exportPayload(s, [COMMON], NOW)).tags[0].rules[0].pattern, "ERROR");
   eq("export ends with newline", js.endsWith("}\n"), true);
 }
+// 10-28 .18: export dropped lineHead (「레벨 자리만 줄 배경」), so a round trip
+// changed the default 오류 rule and re-importing common asked 「바뀜 1」.
+{
+  const withHead = DEFAULT_LOG_RULES.filter((r) => r.lineHead);
+  eq("defaults have a lineHead rule", withHead.length > 0, true);
+  const s = normalizeTagStore({ version: 1, tags: [{ name: COMMON, rules: DEFAULT_LOG_RULES, updated: "" }], assign: { dir: {}, file: {}, name: {} } });
+  const out = JSON.parse(exportPayload(s, [COMMON], NOW)).tags[0].rules;
+  eq("export keeps lineHead", out.filter((r: any) => r.lineHead).map((r: any) => r.lineHead), withHead.map((r) => r.lineHead));
+  const back = out.map((r: any) => (importRule(r) as { rule?: LogRule }).rule);
+  eq("round trip: every rule imports", back.every(Boolean), true);
+  eq("round trip: same rules", sameRules(back as LogRule[], s.tags[0].rules), true);
+}
 
 // ---- file names ----------------------------------------------------------------
 eq("file name: tag", exportFileName("collector"), "collector" + EXPORT_EXT);

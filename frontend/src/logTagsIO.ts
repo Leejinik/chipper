@@ -48,6 +48,7 @@ const exportRule = (r: LogRule) => ({
   color: r.color,
   line: r.line,
   filter: r.filter,
+  ...(validLineHead(r.lineHead) ? { lineHead: r.lineHead } : {}), // 「레벨 자리만 줄 배경」 (6단계)
 });
 
 // The places of `names` in the store: only entries holding one of them, each
