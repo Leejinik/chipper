@@ -54,6 +54,7 @@ import { linesFindHost, openLinesFind } from "./LinesFind";
 import MultiGrid, { paneStyle, usePaneSizes } from "./MultiGrid";
 import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
+import { comboKey, normalizeCombo } from "./keyCombo";
 import "./App.css";
 import {
   OpenFileDialog,
@@ -479,7 +480,7 @@ const RESERVED_COMBOS = new Set([
 // Canonical "ctrl+shift+s" string from a keyboard event, or null when only
 // modifiers are held. Meta (⌘) folds into ctrl so bindings are cross-platform.
 function comboFromEvent(e: KeyboardEvent): string | null {
-  const key = e.key.toLowerCase();
+  const key = comboKey(e); // physical key, so 한글 mode gives "s", not "ㄴ"
   if (key === "control" || key === "shift" || key === "alt" || key === "meta") {
     return null;
   }
@@ -518,7 +519,7 @@ function normalizeKeybinds(raw: any): Record<CmdId, string> {
   const out = { ...DEFAULT_KEYBINDS };
   if (raw && typeof raw === "object") {
     for (const id of CMD_IDS) {
-      if (typeof raw[id] === "string" && raw[id]) out[id] = raw[id];
+      if (typeof raw[id] === "string" && raw[id]) out[id] = normalizeCombo(raw[id]);
     }
   }
   return out;
