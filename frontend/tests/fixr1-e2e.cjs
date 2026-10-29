@@ -160,7 +160,7 @@ function makeBackend() {
     st,
     delay,
     call: async (name, args) => {
-      st.calls.push({ name, args, t: Date.now() });
+      st.calls.push({ name, args: name === "SaveSession" ? [] : args, t: Date.now() }); // sessions: kept in st.session only (big texts)
       if (delay[name]) await sleep(delay[name]);
       if (FILTER.has(name)) return goPost(name, args);
       const f = impl[name];
@@ -889,6 +889,55 @@ async function main() {
       await until(async () => (await page.$$(".tabs-scroll .tab")).length === 3, 5000);
       await page.waitForSelector(".lv-binwarn", { timeout: 5000 }).catch(() => {});
       ok("이진으로 보이는 150MB → 📖 + 경고 띠", (await mode(page)) === "all" && (await page.$(".lv-binwarn")) !== null);
+      await ctx.close();
+    }
+    // =============== N. 내려놓은 편집 문서가 남지 않음 (작은 판 누수 시험) ==================================
+    // 10MB × 7 를 ✏️ 로 열고, 하나씩 📖(고쳤으면 버리기) → ✏️ → 글자 하나(D) 를 되풀이. 바퀴마다 CDP 로 GC 한 뒤 힙.
+    // 8바퀴(모든 탭이 한 번씩 D) 뒤로는 평평해야 함 — 바퀴마다 파일 크기만큼 남으면 누군가 옛 문서를 잡고 있는 것.
+    // (Playwright 의 ElementHandle 도 떼어 낸 편집기를 잡으므로 이 절은 locator().waitFor() 만 씀)
+    if (want("N")) {
+      console.log("N. ✏️ ↔ 📖 + 고침(D) 21바퀴 — GC 뒤 힙이 7바퀴 뒤로 평평");
+      const line = "2026-10-29 01:00:00 INFO collector line with some text here and there\n";
+      const body = line.repeat(Math.ceil((10 << 20) / line.length));
+      const n = 7;
+      for (let k = 0; k < n; k++) fs.writeFileSync(P(`leak${k}.log`), body);
+      const be = makeBackend();
+      be.st.session = session(Array.from({ length: n }, (_, k) => Rt("t" + k, P(`leak${k}.log`))), "t0");
+      const { ctx, page } = await openSess(be);
+      const cdp = await ctx.newCDPSession(page);
+      const heapMB = async () => {
+        await cdp.send("HeapProfiler.collectGarbage");
+        await sleep(150);
+        await cdp.send("HeapProfiler.collectGarbage");
+        return (await cdp.send("Runtime.getHeapUsage")).usedSize / 1048576;
+      };
+      const pick = (k) => page.click(`.tabs-scroll .tab:nth-child(${k + 1})`);
+      const edit = async () => {
+        await page.locator('.lines-view[data-mode="all"]').first().waitFor();
+        await page.click(".lv-edit");
+        await page.click('.choice-ask [data-choice="edit"]');
+        await page.locator(".cm-editor").first().waitFor({ timeout: 30000 });
+      };
+      for (let k = 0; k < n; k++) {
+        await pick(k);
+        await edit();
+      }
+      const hs = [];
+      for (let r = 0; r < 3 * n; r++) {
+        await pick(r % n);
+        await page.locator(".cm-editor").first().waitFor();
+        await page.click(".lines-seg.big button:nth-child(1)");
+        if (await page.locator('.choice-ask[data-kind="dirty"]').waitFor({ timeout: 800 }).then(() => true, () => false)) await page.click('.choice-ask [data-choice="discard"]');
+        await edit();
+        await page.click(".cm-content");
+        await page.keyboard.press("Control+End");
+        await page.keyboard.type(" R" + r);
+        await sleep(250);
+        hs.push(Math.round(await heapMB()));
+      }
+      // from the 8th round on (every tab has been ✏️ → 📖 → ✏️ → D once: its steady cost is in)
+      const grow = hs[hs.length - 1] - hs[n];
+      ok(`GC 뒤 힙: 8바퀴 ${hs[n]}MB → 21바퀴 ${hs[hs.length - 1]}MB (늘어남 ${grow}MB ≤ 8MB, 파일 10MB)`, grow <= 8, hs);
       await ctx.close();
     }
     // =============== K. 6칸에서 칸 머리(칩 여러 줄·찾기 칸)가 길어도 칸 아래 단추 줄이 보이고 눌림 =========
