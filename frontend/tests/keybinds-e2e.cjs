@@ -307,6 +307,7 @@ async function run(browserName, platform, url, dir) {
     ok("줄 목록 묶음 안내(Shift = 넓히기)", note.includes("Shift"), note);
     const fixed = await page.$eval('.keys-group[data-group="fixed"]', (e) => e.textContent);
     ok(`고정 키 목록에 ${mac ? "⌘C · ⌃Tab(⌘Tab 아님)" : "Ctrl+C · Ctrl+Tab"}`, mac ? fixed.includes("⌘C") && fixed.includes("⌃Tab") && !fixed.includes("⌘Tab") && fixed.includes("⌥+드래그") : fixed.includes("Ctrl+C") && fixed.includes("Ctrl+Tab"), fixed.slice(0, 200));
+    ok(mac ? "맥 다시 하기 = ⇧⌘Z (⌘Y 아님)" : "다시 하기 = Ctrl+Y · Ctrl+Shift+Z", mac ? fixed.includes("⌘Z · ⇧⌘Z") && !fixed.includes("⌘Y") : fixed.includes("Ctrl+Z · Ctrl+Y · Ctrl+Shift+Z"), fixed.slice(0, 300));
     const sel = await page.$('.keys-row[data-cmd="wheelZoom"] select');
     ok(mac ? "휠 선택(⌃·⌘·둘 다)이 있음" : "윈도우: 휠 선택 없이 Ctrl+휠 표시", mac ? !!sel : !sel && (await page.$eval('.keys-row[data-cmd="wheelZoom"]', (e) => e.textContent)).includes("Ctrl+휠"));
     if (mac) {

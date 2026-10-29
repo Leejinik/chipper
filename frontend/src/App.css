@@ -682,11 +682,20 @@
   cursor: default;
 }
 .keys-wheel-sel {
+  /* WebKit (macOS) draws a native white select unless the look is ours */
+  -webkit-appearance: none;
+  appearance: none;
+  color-scheme: dark;
+  padding-right: 22px !important;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-dim) 50%), linear-gradient(135deg, var(--text-dim) 50%, transparent 50%);
+  background-position: calc(100% - 13px) 50%, calc(100% - 8px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
   min-width: 160px;
   padding: 4px 6px;
   border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg);
+  background-color: var(--bg);
   color: var(--text);
   font-size: 12px;
 }

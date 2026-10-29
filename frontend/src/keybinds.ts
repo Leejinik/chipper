@@ -120,7 +120,8 @@ export const FIXED_KEYS: { group: string; why: string; keys: FixedKey[] }[] = [
     why: "편집기·OS 공통 키",
     keys: [
       { label: "복사 · 붙여넣기 · 잘라내기", combos: ["ctrl+c", "ctrl+v", "ctrl+x"] },
-      { label: "되돌리기 · 다시 하기", combos: ["ctrl+z", "ctrl+y", "ctrl+shift+z"] },
+      // CodeMirror: redo is Ctrl+Y off macOS, ⇧⌘Z on macOS (⌘Y does nothing there)
+      { label: "되돌리기 · 다시 하기", text: (mac) => (mac ? ["ctrl+z", "ctrl+shift+z"] : ["ctrl+z", "ctrl+y", "ctrl+shift+z"]).map((c) => formatCombo(c, mac)).join(" · ") },
       { label: "모두 고르기", combos: ["ctrl+a"] },
       { label: "다음 같은 글자도 고르기(멀티 커서)", combos: ["ctrl+d"] },
       { label: "세로 멀티 커서", text: (mac) => `${modLabel("alt", mac)}+드래그` },
