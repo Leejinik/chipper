@@ -16,6 +16,10 @@ import {
   isZoomWheel,
   normalizeWheelZoom,
   WHEEL_ZOOMS,
+  defaultKeybinds,
+  formatKeys,
+  macEventProblem,
+  splitKeybinds,
   type CmdId,
 } from "../src/keybinds";
 
@@ -88,7 +92,21 @@ eq("today's hard-wired keys as defaults", [DEFAULT_KEYBINDS.findNext, DEFAULT_KE
 eq("every command has a group and a scope", COMMANDS.every((c) => !!c.group && !!c.scope && !!c.label), true);
 eq("lines commands are pane-scoped", COMMANDS.filter((c) => c.id.startsWith("lv")).every((c) => c.scope === "lines"), true);
 eq("defaults have no problem", COMMANDS.map((c) => bindProblem(c.id, DEFAULT_KEYBINDS[c.id], DEFAULT_KEYBINDS, false)).filter(Boolean), []);
-eq("reserved still has copy/paste/undo/tab", ["ctrl+c", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+a", "ctrl+shift+z", "ctrl+d", "ctrl+tab", "ctrl+shift+tab"].every((c) => RESERVED_COMBOS.has(c)), true);
+eq("reserved still has copy/paste/undo", ["ctrl+c", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+a", "ctrl+shift+z", "ctrl+d"].every((c) => RESERVED_COMBOS.has(c)), true);
+// 10-29 (coordinator): tab moves are settings now
+eq("tab moves no longer reserved", RESERVED_COMBOS.has("ctrl+tab") || RESERVED_COMBOS.has("ctrl+shift+tab"), false);
+eq("next/prev tab commands", [DEFAULT_KEYBINDS.nextTab, DEFAULT_KEYBINDS.prevTab], ["ctrl+tab", "ctrl+shift+tab"]);
+eq("tab commands are app scope", COMMANDS.filter((c) => c.id === "nextTab" || c.id === "prevTab").map((c) => c.scope), ["app", "app"]);
+eq("defaultKeybinds(false) = DEFAULT_KEYBINDS", JSON.stringify(defaultKeybinds(false)) === JSON.stringify(DEFAULT_KEYBINDS), true);
+const M = defaultKeybinds(true);
+eq("mac: ⌃Tab + ⇧⌘]", M.nextTab, "ctrl+tab ctrl+shift+]");
+eq("mac: ⌃⇧Tab + ⇧⌘[", M.prevTab, "ctrl+shift+tab ctrl+shift+[");
+eq("mac: replace ⌥⌘F (⌘H = Hide)", M.replace, "ctrl+alt+f");
+eq("mac: others as Windows", [M.save, M.find, M.findNext, M.lvEnd], ["ctrl+s", "ctrl+f", "f3", "end"]);
+eq("mac defaults have no problem", COMMANDS.flatMap((c) => M[c.id].split(" ").map((k, i, a) => bindProblem(c.id, k, M, true, a.filter((_, j) => j !== i)))).filter(Boolean), []);
+eq("win formatKeys two", formatKeys("ctrl+tab ctrl+shift+]", false), "Ctrl+Tab · Ctrl+Shift+]");
+eq("mac formatKeys two", formatKeys("ctrl+tab ctrl+shift+]", true), "⌃Tab · ⇧⌘]");
+eq("formatKeys none", formatKeys("", true), "없음");
 
 // --- sessions from earlier builds ------------------------------------------------------------
 eq("no blob → defaults", normalizeKeybinds(undefined), DEFAULT_KEYBINDS);
@@ -126,6 +144,42 @@ eq("a default that collides with a saved one becomes unbound", (() => {
   const r = normalizeKeybinds({ lvTop: "end" });
   return [r.lvTop, r.lvEnd];
 })(), ["end", ""]);
+
+// two keys per command (keybindings + keybindings2 in the session)
+eq("second keys read", normalizeKeybinds({ nextTab: "ctrl+tab" }, false, { nextTab: "alt+]" }).nextTab, "ctrl+tab alt+]");
+eq("second key alone ignored", normalizeKeybinds({}, false, { save: "ctrl+k" }).save, "ctrl+s");
+eq("second key taken → dropped", normalizeKeybinds({ save: "ctrl+s", nextTab: "ctrl+tab" }, false, { nextTab: "ctrl+s" }).nextTab, "ctrl+tab");
+eq("second key = first → dropped", normalizeKeybinds({ nextTab: "ctrl+tab" }, false, { nextTab: "ctrl+tab" }).nextTab, "ctrl+tab");
+eq("v1.3.1 on mac: tab defaults", normalizeKeybinds(v131, true).nextTab, "ctrl+tab ctrl+shift+]");
+eq("v1.3.1 on mac: saved ⌘H (Hide) → ⌥⌘F", normalizeKeybinds({ ...v131, replace: "ctrl+h" }, true).replace, "ctrl+alt+f");
+eq("v1.3.1 on Windows: Ctrl+H kept", normalizeKeybinds({ ...v131, replace: "ctrl+h" }, false).replace, "ctrl+h");
+eq("split for the session", splitKeybinds({ ...DEFAULT_KEYBINDS, nextTab: "ctrl+tab ctrl+shift+]", chips: "" }), [
+  { ...DEFAULT_KEYBINDS, nextTab: "ctrl+tab", chips: "" },
+  { nextTab: "ctrl+shift+]" },
+]);
+eq("split → normalize round trip (mac)", (() => {
+  const [a, b] = splitKeybinds(M);
+  return JSON.stringify(normalizeKeybinds(a, true, b)) === JSON.stringify(M);
+})(), true);
+
+// macOS keys the system or the app menu takes first
+eq("mac ⌘Q refused", bindProblem("save", "ctrl+q", DEFAULT_KEYBINDS, true).includes("macOS"), true);
+eq("mac ⌘H refused", bindProblem("open", "ctrl+h", { ...DEFAULT_KEYBINDS, replace: "" }, true).includes("macOS"), true);
+eq("mac ⌘Space refused", bindProblem("save", "ctrl+space", DEFAULT_KEYBINDS, true) !== "", true);
+eq("mac ⇧⌘4 refused", bindProblem("save", "ctrl+shift+4", DEFAULT_KEYBINDS, true) !== "", true);
+eq("mac ⌘M refused", bindProblem("save", "ctrl+m", DEFAULT_KEYBINDS, true) !== "", true);
+eq("Windows Ctrl+Q fine", bindProblem("save", "ctrl+q", DEFAULT_KEYBINDS, false), "");
+eq("Windows Ctrl+M fine", bindProblem("save", "ctrl+m", DEFAULT_KEYBINDS, false), "");
+eq("mac ⌘Tab event refused", macEventProblem(ev("Tab", "Tab", { meta: true }), true) !== "", true);
+eq("mac ⌃Tab event fine", macEventProblem(ev("Tab", "Tab", { ctrl: true }), true), "");
+eq("mac ⌃↑ (Mission Control) refused", macEventProblem(ev("ArrowUp", "ArrowUp", { ctrl: true }), true) !== "", true);
+eq("mac ⌘↑ fine", macEventProblem(ev("ArrowUp", "ArrowUp", { meta: true }), true), "");
+eq("Windows: no event check", macEventProblem(ev("Tab", "Tab", { meta: true }), false), "");
+eq("own other key", bindProblem("nextTab", "ctrl+shift+]", M, true, ["ctrl+shift+]"]) !== "", true);
+eq("other command's second key", bindProblem("save", "ctrl+shift+]", M, true).includes("다음 탭"), true);
+eq("match second key", matchCommand(ev("}", "BracketRight", { meta: true, shift: true }), "app", M), "nextTab");
+eq("match first key", matchCommand(ev("Tab", "Tab", { ctrl: true }), "app", M), "nextTab");
+eq("match prev ⇧⌘[ (한글 mode same key)", matchCommand(ev("{", "BracketLeft", { meta: true, shift: true }), "app", M), "prevTab");
 
 // --- capture + problems ----------------------------------------------------------------------
 const B = { ...DEFAULT_KEYBINDS };

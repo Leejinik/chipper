@@ -13,6 +13,16 @@ const JAMO_KEY: Record<string, string> = {
   ㅃ: "q", ㅉ: "w", ㄸ: "e", ㄲ: "r", ㅆ: "t", ㅒ: "o", ㅖ: "p",
 };
 
+// Punctuation keys by position (US names), so ⇧⌘] is "shift+]" — not "}" — on
+// any input language; and the shifted symbol of a stored combo back to its key.
+const PUNCT_CODE: Record<string, string> = {
+  BracketLeft: "[", BracketRight: "]", Minus: "-", Equal: "=", Semicolon: ";", Quote: "'",
+  Comma: ",", Period: ".", Slash: "/", Backquote: "`", Backslash: "\\",
+};
+const SHIFTED: Record<string, string> = {
+  "{": "[", "}": "]", _: "-", "+": "=", ":": ";", '"': "'", "<": ",", ">": ".", "?": "/", "~": "`", "|": "\\",
+};
+
 // Lower-case key name for a combo: the physical letter/digit when the event
 // says which key it was, else the (lower-cased) key value, with a lone jamo
 // mapped back to its Latin key.
@@ -20,6 +30,7 @@ export function comboKey(e: { key: string; code?: string }): string {
   const code = e.code ?? "";
   if (/^Key[A-Z]$/.test(code)) return code.slice(3).toLowerCase();
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
+  if (PUNCT_CODE[code]) return PUNCT_CODE[code];
   const key = e.key.toLowerCase();
   return JAMO_KEY[key] ?? key;
 }
@@ -30,5 +41,11 @@ export function normalizeCombo(combo: string): string {
   const parts = combo.split("+");
   const last = parts[parts.length - 1];
   if (JAMO_KEY[last]) parts[parts.length - 1] = JAMO_KEY[last];
+  // "ctrl+shift++" splits into […, "shift", "", ""]: the key is "+"
+  if (combo.endsWith("++") && parts.length >= 3) {
+    parts.splice(parts.length - 2, 2, "+");
+  }
+  const key = parts[parts.length - 1];
+  if (parts.includes("shift") && SHIFTED[key]) parts[parts.length - 1] = SHIFTED[key];
   return parts.join("+");
 }

@@ -11,6 +11,10 @@ import {
   cursorLineBoundaryForward,
   cursorDocStart,
   cursorDocEnd,
+  cursorLineBoundaryLeft,
+  cursorLineBoundaryRight,
+  selectLineBoundaryLeft,
+  selectLineBoundaryRight,
   selectPageDown,
   selectPageUp,
   selectLineDown,
@@ -40,8 +44,21 @@ const WITH_CTRL: Record<string, [Command, Command]> = {
   End: [cursorDocEnd, selectDocEnd],
 };
 
+// macOS: ⌘ + arrows, as CodeMirror's own keymap has them there (line start/end,
+// document start/end). Elsewhere ⌘ is the Windows key — not synced.
+const MAC_CMD: Record<string, [Command, Command]> = {
+  ArrowUp: [cursorDocStart, selectDocStart],
+  ArrowDown: [cursorDocEnd, selectDocEnd],
+  ArrowLeft: [cursorLineBoundaryLeft, selectLineBoundaryLeft],
+  ArrowRight: [cursorLineBoundaryRight, selectLineBoundaryRight],
+};
+
 // The command a keydown maps to, or null when the key is not synced.
-export function syncedNavCommand(e: KeyboardEvent): Command | null {
+export function syncedNavCommand(e: KeyboardEvent, mac = false): Command | null {
+  if (mac && e.metaKey && !e.altKey && !e.ctrlKey) {
+    const pair = MAC_CMD[e.key];
+    return pair ? pair[e.shiftKey ? 1 : 0] : null;
+  }
   if (e.altKey || e.metaKey) return null;
   const pair = (e.ctrlKey ? WITH_CTRL : PLAIN)[e.key];
   return pair ? pair[e.shiftKey ? 1 : 0] : null;

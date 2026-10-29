@@ -558,7 +558,7 @@
 
 /* ---------- keybinding settings dialog ---------- */
 .keys-dialog {
-  width: min(92vw, 580px);
+  width: min(94vw, 680px);
   padding: 22px 24px;
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -654,6 +654,22 @@
   gap: 4px;
   align-items: center;
   flex-shrink: 0;
+}
+.keys-slot {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+}
+.keys-btns .keys-bind {
+  min-width: 108px;
+}
+.keys-bind.add {
+  color: var(--text-dim, #9aa4b2);
+  border-style: dashed;
+}
+.keys-bind:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .keys-bind.changed {
   border-color: #5c7bb8;

@@ -61,6 +61,11 @@ import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState
 import {
   COMMANDS,
   DEFAULT_KEYBINDS,
+  defaultKeybinds,
+  formatKeys,
+  keysOf,
+  macEventProblem,
+  splitKeybinds,
   FIXED_KEYS,
   GROUPS,
   LINES_NOTE,
@@ -474,7 +479,7 @@ const editorHandlers = (api: ViewApiRef, id: string, seq: number) => ({
 });
 
 // Shortcuts that act on the focused document, ignored while it is 🔒 locked
-// (find, new, open, zoom and Ctrl+Tab still work; the toolbar mouse still does).
+// (find, new, open, zoom and next/prev tab still work; the toolbar mouse still does).
 // 「다른 이름으로」(Ctrl+Shift+S) stays allowed: it never touches the file shown,
 // and it is what the 🔒 save tooltip tells the user to do.
 const LOCK_BLOCKED_CMDS = new Set<CmdId>(["save", "close", "replace", "inClause", "chips"]);
@@ -485,7 +490,8 @@ interface Session {
   activeId: string;
   splitRatio: number;
   fontSize?: number; // editor font size (px); optional so older sessions still load
-  keybindings?: Record<string, string>; // per-command combo overrides ("" = no key)
+  keybindings?: Record<string, string>; // each command's first key ("" = no key) — the v1.3.1 format
+  keybindings2?: Record<string, string>; // second keys (only commands that have one); unknown to v1.3.1
   wheelZoom?: WheelZoom; // which modifier + wheel zooms (macOS choice); absent = both
   // Log colour rules from before tags (now the `common` tag in tags.json). Read
   // only to build common on first run. Written on every save — common in the
@@ -524,6 +530,15 @@ const clampCount = (n: number) => Math.min(MAX_COUNT, Math.max(MIN_COUNT, n));
 // Every app shortcut is remappable (keybinds.ts); the editor's and the OS's own
 // keys (RESERVED_COMBOS / FIXED_KEYS there) stay fixed.
 
+// A command's keys with key `slot` set to `combo` ("" removes it).
+function withKey(keys: string, slot: number, combo: string): string {
+  const ks = keysOf(keys);
+  if (!combo) ks.splice(slot, 1);
+  else if (slot < ks.length) ks[slot] = combo;
+  else ks.push(combo);
+  return ks.join(" ");
+}
+
 const welcomeMd = (mac: boolean) => `# Chipper에 오신 것을 환영합니다 👋
 
 왼쪽 칸(**소스**)을 편집하면 오른쪽 칸(**미리보기**)에 실시간으로 반영됩니다.
@@ -560,15 +575,16 @@ async function onMac(): Promise<boolean> {
 
 // The welcome document's shortcut table: "`Ctrl` + `N`" (Windows/Linux) or "`⌘N`" (macOS).
 function welcomeKeys(mac: boolean): string {
-  const cell = (combo: string) =>
+  const one = (combo: string) =>
     mac ? "`" + formatCombo(combo, true) + "`" : formatCombo(combo, false).split("+").map((p) => "`" + p + "`").join(" + ");
+  const cell = (keys: string) => keysOf(keys).map(one).join(" · ");
   const rows: [string, string][] = [
-    ["새 파일", DEFAULT_KEYBINDS.new],
+    ["새 파일", defaultKeybinds(mac).new],
     ["열기", DEFAULT_KEYBINDS.open],
     ["저장", DEFAULT_KEYBINDS.save],
     ["다른 이름으로 저장", DEFAULT_KEYBINDS.saveAs],
     ["탭 닫기", DEFAULT_KEYBINDS.close],
-    ["다음/이전 탭", "ctrl+tab"],
+    ["다음/이전 탭", defaultKeybinds(mac).nextTab],
   ];
   return rows.map(([l, c]) => `| ${l} | ${cell(c)} |`).join("\n");
 }
@@ -986,7 +1002,7 @@ function App() {
   const [dirScanning, setDirScanning] = useState<{ root: string; files: number; dirs: number; shown: boolean } | null>(null);
   const dirScanCanceled = useRef(false);
   const [dropSlot, setDropSlot] = useState<number | null>(null); // pane under a tree drag
-  const [capturing, setCapturing] = useState<CmdId | null>(null); // row awaiting a key
+  const [capturing, setCapturing] = useState<{ id: CmdId; slot: number } | null>(null); // key slot awaiting a key
   const [keyError, setKeyError] = useState<string>("");
   // --- file-association ("파일 연결") modal state ---------------------------
   const [assocOpen, setAssocOpen] = useState<boolean>(false);
@@ -998,7 +1014,7 @@ function App() {
   const autotypeSupported = platform !== "linux"; // Win32 SendInput / osascript only
   const mac = platform === "darwin"; // shortcuts show as ⌘… (keybinds.ts formatCombo)
   // Current display string for a command's shortcut (reflects remaps live).
-  const keyHint = (id: CmdId) => formatCombo(keybinds[id], mac);
+  const keyHint = (id: CmdId) => formatKeys(keybinds[id], mac);
   // Handlers outside React renders (CodeMirror, list panes, window listeners) read
   // these through keysNow(), renders elsewhere through useKeys().
   useLayoutEffect(() => setKeysState({ binds: keybinds, mac, wheel: wheelZoom }), [keybinds, mac, wheelZoom]);
@@ -1265,7 +1281,10 @@ function App() {
       activeId: activeIdRef.current,
       splitRatio: ratioRef.current,
       fontSize: fontSizeRef.current,
-      keybindings: keybindsRef.current,
+      ...(() => {
+        const [first, second] = splitKeybinds(keybindsRef.current);
+        return { keybindings: first, ...(Object.keys(second).length ? { keybindings2: second } : {}) };
+      })(),
       wheelZoom: keysNow().wheel,
       ...(legacyRulesRef.current !== undefined
         ? { logRules: legacyRulesRef.current }
@@ -1354,6 +1373,9 @@ function App() {
         // Go keeps an unreadable session aside (session.broken-<time>.json),
         // hands over whatever tabs could be recovered and says what happened.
         const res = await LoadSession();
+        // asked before any state is set: an await between setTabs and setMulti
+        // would render the tabs one frame without their multi view
+        const macNow = await onMac();
         if (res?.notice) {
           setSessionNotice({
             text: res.notice,
@@ -1392,7 +1414,8 @@ function App() {
             if (typeof s.fontSize === "number") {
               setFontSize(clampFont(s.fontSize));
             }
-            setKeybinds(normalizeKeybinds(s.keybindings));
+            // macOS has its own defaults (⇧⌘] tabs, ⌥⌘F) and refuses the keys it takes first
+            setKeybinds(normalizeKeybinds(s.keybindings, macNow, s.keybindings2));
             setWheelZoom(normalizeWheelZoom(s.wheelZoom));
             setMulti(normalizeMulti(s.multi, new Set(restored.map((t) => t.id))));
             paneSizes.restore(s.paneSizes);
@@ -3770,6 +3793,31 @@ function App() {
     };
   }, [ctxMenu, encMenu, tagMenu]);
 
+  // 다음 / 이전 탭 (Ctrl+Tab · Ctrl+Shift+Tab; macOS also ⇧⌘] · ⇧⌘[): the next
+  // tab, or in the multi view the next pane that shows one.
+  const stepTab = useCallback(
+    (dir: 1 | -1) => {
+      const m = multiRef.current;
+      if (m.on) {
+        const filled = m.slots
+          .slice(0, m.count)
+          .map((x, i) => (x.tabId ? i : -1))
+          .filter((i) => i >= 0);
+        if (filled.length < 2) return;
+        const at = filled.indexOf(focusSlotRef.current);
+        const next = filled[(at + dir + filled.length) % filled.length];
+        focusPane(next);
+        viewsRef.current.get(m.slots[next].tabId)?.focus();
+        return;
+      }
+      const ts = tabsRef.current;
+      if (ts.length < 2) return;
+      const i = ts.findIndex((t) => t.id === activeIdRef.current);
+      setActiveId(ts[(i + dir + ts.length) % ts.length].id);
+    },
+    [focusPane]
+  );
+
   // --- command dispatch -----------------------------------------------------
   // Runs an app command by id. Selection-gated commands (inClause/chips) no-op
   // on their own when nothing valid is selected.
@@ -3806,9 +3854,13 @@ function App() {
         case "resetZoom":
           setFontSize(DEFAULT_FONT_SIZE);
           break;
+        case "nextTab":
+        case "prevTab":
+          stepTab(id === "nextTab" ? 1 : -1);
+          break;
       }
     },
-    [doNew, doOpen, doSave, doSaveAs, doCloseTab, openFind, doInClause, openChips]
+    [doNew, doOpen, doSave, doSaveAs, doCloseTab, openFind, doInClause, openChips, stepTab]
   );
 
   // --- keyboard shortcuts (user-remappable) ---------------------------------
@@ -3817,33 +3869,9 @@ function App() {
       if (keysOpenRef.current || assocOpenRef.current) return; // a settings modal owns the keyboard
       // Any other window over the app (태그 창, 태그 지정, 큰 파일 확인, chips …) owns it too:
       // Ctrl+N / Ctrl+Tab / Ctrl+W behind it moved focus and let typing land in a log.
+      // (Ctrl+Tab is 다음 탭 now — a setting like the rest; CodeMirror only takes plain Tab.)
       if (document.querySelector(".chips-overlay, .big-ask-back, .tags-sub-overlay")) return;
       const isMod = e.ctrlKey || e.metaKey;
-      // Ctrl+Tab / Ctrl+Shift+Tab: fixed tab navigation (not remappable).
-      if (isMod && e.key.toLowerCase() === "tab") {
-        e.preventDefault();
-        const m = multiRef.current;
-        if (m.on) {
-          const filled = m.slots
-            .slice(0, m.count)
-            .map((x, i) => (x.tabId ? i : -1))
-            .filter((i) => i >= 0);
-          if (filled.length < 2) return;
-          const at = filled.indexOf(focusSlotRef.current);
-          const next = e.shiftKey
-            ? filled[(at - 1 + filled.length) % filled.length]
-            : filled[(at + 1) % filled.length];
-          focusPane(next);
-          viewsRef.current.get(m.slots[next].tabId)?.focus();
-          return;
-        }
-        const ts = tabsRef.current;
-        if (ts.length < 2) return;
-        const i = ts.findIndex((t) => t.id === activeIdRef.current);
-        const ni = e.shiftKey ? (i - 1 + ts.length) % ts.length : (i + 1) % ts.length;
-        setActiveId(ts[ni].id);
-        return;
-      }
       if (!isMod && !e.altKey) return; // app commands require a Ctrl/Alt modifier
       // only 「어디서나」 commands here: find / list keys are the editor's and the panes' own
       const id = matchCommand(e, "app", keybindsRef.current);
@@ -3872,14 +3900,17 @@ function App() {
         setKeyError("");
         return;
       }
-      const combo = captureCombo(capturing, e); // physical key (한글 IME), ⌘ = Ctrl, list keys without Shift
+      const { id, slot } = capturing;
+      const combo = captureCombo(id, e); // physical key (한글 IME), ⌘ = Ctrl, list keys without Shift
       if (!combo) return; // modifier-only: keep listening
-      const why = bindProblem(capturing, combo, keybindsRef.current, keysNow().mac);
+      const mac = keysNow().mac;
+      const own = keysOf(keybindsRef.current[id]).filter((_, i) => i !== slot);
+      const why = macEventProblem(e, mac) || bindProblem(id, combo, keybindsRef.current, mac, own);
       if (why) {
         setKeyError(why);
         return;
       }
-      setKeybinds((prev) => ({ ...prev, [capturing]: combo }));
+      setKeybinds((prev) => ({ ...prev, [id]: withKey(prev[id], slot, combo) }));
       setKeyError("");
       setCapturing(null);
     };
@@ -4817,7 +4848,7 @@ function App() {
   // locked focused pane swallows keys itself (CodeEditor), so nothing moves.
   const onGridKeyDown = (e: React.KeyboardEvent) => {
     if (!(e.target as HTMLElement).closest(".cm-editor")) return; // footer, find panel…
-    const cmd = syncedNavCommand(e.nativeEvent);
+    const cmd = syncedNavCommand(e.nativeEvent, keysNow().mac); // macOS: ⌘ + arrows too
     if (!cmd) return;
     const m = multiRef.current;
     if (m.slots[focusSlotRef.current]?.mode === "lock") return;
@@ -5960,8 +5991,8 @@ function App() {
           <div className="keys-dialog" onMouseDown={(e) => e.stopPropagation()}>
             <div className="chips-title">⌨ 단축키 설정</div>
             <div className="chips-sub">
-              단추를 누르고 새 키를 누르면 바뀝니다(Esc 그만두기 · ✕ 키 없애기). 복사·붙여넣기 같은 편집 키와
-              {" "}{formatCombo("ctrl+tab", mac)} 탭 이동은 고정입니다(맨 아래).
+              단추를 누르고 새 키를 누르면 바뀝니다(Esc 그만두기 · ✕ 키 없애기). 기능마다 키를 둘까지 둘 수 있어요.
+              복사·붙여넣기 같은 편집 키는 고정입니다(맨 아래).
             </div>
             <div className="keys-list">
               {GROUPS.map((g) => (
@@ -5975,32 +6006,45 @@ function App() {
                         <span className={"keys-scope scope-" + cmd.scope}>{SCOPE_LABEL[cmd.scope]}</span>
                       </span>
                       <span className="keys-btns">
-                        <button
-                          className={
-                            "keys-bind" + (capturing === cmd.id ? " capturing" : "") + (keybinds[cmd.id] ? "" : " unbound") +
-                            (keybinds[cmd.id] !== DEFAULT_KEYBINDS[cmd.id] ? " changed" : "")
-                          }
-                          onClick={() => {
-                            setKeyError("");
-                            setCapturing(cmd.id);
-                          }}
-                          title={`클릭한 뒤 새 조합을 누르세요 (Esc 취소) · 기본값 ${formatCombo(DEFAULT_KEYBINDS[cmd.id], mac)}`}
-                        >
-                          {capturing === cmd.id ? "키를 누르세요…" : keyHint(cmd.id)}
-                        </button>
-                        <button
-                          className="keys-clear"
-                          disabled={!keybinds[cmd.id]}
-                          title="이 기능의 단축키 없애기"
-                          aria-label={cmd.label + " 단축키 없애기"}
-                          onClick={() => {
-                            setKeyError("");
-                            setCapturing(null);
-                            setKeybinds((prev) => ({ ...prev, [cmd.id]: "" }));
-                          }}
-                        >
-                          ✕
-                        </button>
+                        {[0, 1].map((slot) => {
+                          const ks = keysOf(keybinds[cmd.id]);
+                          const k = ks[slot] ?? "";
+                          const on = capturing?.id === cmd.id && capturing.slot === slot;
+                          const defs = defaultKeybinds(mac)[cmd.id];
+                          return (
+                            <span className="keys-slot" key={slot}>
+                              <button
+                                className={
+                                  "keys-bind" + (on ? " capturing" : "") + (k ? "" : slot ? " add" : " unbound") +
+                                  (slot === 0 && keybinds[cmd.id] !== defs ? " changed" : "")
+                                }
+                                data-slot={slot}
+                                disabled={slot === 1 && !ks.length}
+                                onClick={() => {
+                                  setKeyError("");
+                                  setCapturing({ id: cmd.id, slot: Math.min(slot, ks.length) });
+                                }}
+                                title={`클릭한 뒤 새 조합을 누르세요 (Esc 취소) · 기본값 ${formatKeys(defs, mac)}`}
+                              >
+                                {on ? "키를 누르세요…" : k ? formatCombo(k, mac) : slot ? "＋ 키 2" : "없음"}
+                              </button>
+                              <button
+                                className="keys-clear"
+                                data-slot={slot}
+                                disabled={!k}
+                                title={slot ? "두 번째 키 없애기" : "이 키 없애기"}
+                                aria-label={`${cmd.label} ${slot + 1}번째 키 없애기`}
+                                onClick={() => {
+                                  setKeyError("");
+                                  setCapturing(null);
+                                  setKeybinds((prev) => ({ ...prev, [cmd.id]: withKey(prev[cmd.id], slot, "") }));
+                                }}
+                              >
+                                ✕
+                              </button>
+                            </span>
+                          );
+                        })}
                       </span>
                     </div>
                   ))}
@@ -6032,7 +6076,7 @@ function App() {
               ))}
               <div className="keys-group keys-fixed" data-group="fixed">
                 <div className="keys-group-title">바꿀 수 없는 키</div>
-                {FIXED_KEYS.map((f) => (
+                {FIXED_KEYS.filter((f) => mac || !f.macOnly).map((f) => (
                   <div key={f.group} className="keys-fixed-sec">
                     <div className="keys-note">
                       {f.group} — {f.why}
@@ -6054,7 +6098,7 @@ function App() {
               <button
                 className="tb-btn"
                 onClick={() => {
-                  setKeybinds(DEFAULT_KEYBINDS);
+                  setKeybinds(defaultKeybinds(mac));
                   setWheelZoom("both");
                   setKeyError("");
                   setCapturing(null);

@@ -296,7 +296,11 @@ async function run(browserName, platform, url, dir) {
     const groups = await page.$$eval(".keys-group", (els) => els.map((e) => e.dataset.group));
     ok("묶음: 파일·찾기·도구·줄 목록·확대·고정", JSON.stringify(groups) === '["file","find","tools","lines","zoom","fixed"]', groups);
     const rows = await page.$$eval(".keys-row[data-cmd]", (els) => els.map((e) => e.dataset.cmd));
-    ok("바꿀 수 있는 기능 17개 + 휠", rows.length === 18 && rows.includes("findNext") && rows.includes("lvEnd") && rows.includes("wheelZoom"), rows);
+    ok("바꿀 수 있는 기능 19개(다음·이전 탭 포함) + 휠", rows.length === 20 && rows.includes("findNext") && rows.includes("lvEnd") && rows.includes("nextTab") && rows.includes("prevTab") && rows.includes("wheelZoom"), rows);
+    const slotText = (id, n) => page.$eval(`.keys-row[data-cmd="${id}"] .keys-bind[data-slot="${n}"]`, (e) => e.textContent.trim());
+    ok(`다음 탭 = ${mac ? "⌃Tab + ⇧⌘]" : "Ctrl+Tab (+ 빈 키 2)"}`, (await slotText("nextTab", 0)) === (mac ? "⌃Tab" : "Ctrl+Tab") && (await slotText("nextTab", 1)) === (mac ? "⇧⌘]" : "＋ 키 2"), [await slotText("nextTab", 0), await slotText("nextTab", 1)]);
+    ok(`이전 탭 = ${mac ? "⌃⇧Tab + ⇧⌘[" : "Ctrl+Shift+Tab"}`, (await slotText("prevTab", 0)) === (mac ? "⌃⇧Tab" : "Ctrl+Shift+Tab") && (await slotText("prevTab", 1)) === (mac ? "⇧⌘[" : "＋ 키 2"));
+    ok(`바꾸기 = ${mac ? "⌥⌘F (⌘H 는 가리기)" : "Ctrl+H"}`, (await bindText(page, "replace")) === (mac ? "⌥⌘F" : "Ctrl+H"), await bindText(page, "replace"));
     ok(`저장 = ${mac ? "⌘S" : "Ctrl+S"}`, (await bindText(page, "save")) === (mac ? "⌘S" : "Ctrl+S"), await bindText(page, "save"));
     ok(`다른 이름 = ${mac ? "⇧⌘S" : "Ctrl+Shift+S"}`, (await bindText(page, "saveAs")) === (mac ? "⇧⌘S" : "Ctrl+Shift+S"));
     ok(`이전 찾기 = ${mac ? "⇧F3" : "Shift+F3"}`, (await bindText(page, "findPrev")) === (mac ? "⇧F3" : "Shift+F3"));
@@ -306,7 +310,7 @@ async function run(browserName, platform, url, dir) {
     const note = await page.$eval('.keys-group[data-group="lines"] .keys-note', (e) => e.textContent);
     ok("줄 목록 묶음 안내(Shift = 넓히기)", note.includes("Shift"), note);
     const fixed = await page.$eval('.keys-group[data-group="fixed"]', (e) => e.textContent);
-    ok(`고정 키 목록에 ${mac ? "⌘C · ⌃Tab(⌘Tab 아님)" : "Ctrl+C · Ctrl+Tab"}`, mac ? fixed.includes("⌘C") && fixed.includes("⌃Tab") && !fixed.includes("⌘Tab") && fixed.includes("⌥+드래그") : fixed.includes("Ctrl+C") && fixed.includes("Ctrl+Tab"), fixed.slice(0, 200));
+    ok(`고정 키 목록에 ${mac ? "⌘C · macOS 시스템 키(⌘Tab·⌘Q)" : "Ctrl+C, 탭 이동은 이제 없음, macOS 묶음 없음"}`, mac ? fixed.includes("⌘C") && fixed.includes("⌘Tab") && fixed.includes("⌘Q") && fixed.includes("⌥+드래그") : fixed.includes("Ctrl+C") && !fixed.includes("Ctrl+Tab") && !fixed.includes("macOS"), fixed.slice(0, 300));
     ok(mac ? "맥 다시 하기 = ⇧⌘Z (⌘Y 아님)" : "다시 하기 = Ctrl+Y · Ctrl+Shift+Z", mac ? fixed.includes("⌘Z · ⇧⌘Z") && !fixed.includes("⌘Y") : fixed.includes("Ctrl+Z · Ctrl+Y · Ctrl+Shift+Z"), fixed.slice(0, 300));
     const sel = await page.$('.keys-row[data-cmd="wheelZoom"] select');
     ok(mac ? "휠 선택(⌃·⌘·둘 다)이 있음" : "윈도우: 휠 선택 없이 Ctrl+휠 표시", mac ? !!sel : !sel && (await page.$eval('.keys-row[data-cmd="wheelZoom"]', (e) => e.textContent)).includes("Ctrl+휠"));
@@ -514,6 +518,117 @@ async function run(browserName, platform, url, dir) {
     const doc = await p3.page.$eval(".cm-content", (e) => e.textContent);
     ok(`환영 문서: 새 파일 = ${mac ? "⌘N" : "Ctrl + N"}`, mac ? doc.includes("`⌘N`") && doc.includes("`⇧⌘S`") : doc.includes("`Ctrl` + `N`") && doc.includes("`Ctrl` + `Shift` + `S`"), doc.slice(0, 600));
     await p3.ctx.close();
+
+    // ======= H. 다음/이전 탭 are settings (coordinator 10-29) ===================================
+    console.log("H. 다음/이전 탭 — 설정 · 키 둘 · Tab 들여쓰기와 안 부딪힘 · 맥 시스템 키");
+    const be4 = makeBackend(platform);
+    be4.st.session = session([tab("t1", "", { content: "one\ntwo" }), tab("t2", "", { title: "b.txt", content: "bee" }), tab("t3", "", { title: "c.txt", content: "sea" })], "t1");
+    const p4 = await openPage(browser, url, be4);
+    const pg = p4.page;
+    await pg.waitForSelector(".cm-editor");
+    const activeTitle = () => pg.$eval(".tabs-scroll .tab.active", (e) => e.textContent).catch(() => "");
+    const docText = () => pg.$eval(".workspace .cm-content", (e) => e.innerText);
+    await pg.click(".workspace .cm-content");
+    const d0 = await docText();
+    await pg.keyboard.press("Control+Tab");
+    await until(async () => (await activeTitle()).includes("b.txt"), 3000);
+    ok("Ctrl+Tab(⌃Tab) = 다음 탭, 편집기에 탭 글자 안 들어감", (await activeTitle()).includes("b.txt"), await activeTitle());
+    await pg.keyboard.press("Control+Shift+Tab");
+    await until(async () => (await activeTitle()).includes("find.txt"), 3000);
+    ok("Ctrl+Shift+Tab = 이전 탭", (await activeTitle()).includes("find.txt"), await activeTitle());
+    ok("탭 오가도 글자 그대로", (await docText()) === d0, await docText());
+    await pg.click(".workspace .cm-content");
+    await pg.keyboard.press("Home");
+    await pg.keyboard.press("Tab");
+    await sleep(150);
+    ok("편집기의 Tab = 들여쓰기 그대로", (await docText()) !== d0 && /(^|\n)[ \t]+(one|two)/.test(await docText()) && (await activeTitle()).includes("find.txt"), await docText());
+    await pg.keyboard.press(`${MOD}+z`);
+    if (mac) {
+      await pg.keyboard.press("Meta+Shift+BracketRight");
+      await until(async () => (await activeTitle()).includes("b.txt"), 3000);
+      ok("맥 ⇧⌘] = 다음 탭", (await activeTitle()).includes("b.txt"), await activeTitle());
+      await imeKey(pg, ".workspace .cm-content", "{", "BracketLeft", { metaKey: true, shiftKey: true }); // 한글 mode: same key
+      await until(async () => (await activeTitle()).includes("find.txt"), 3000);
+      ok("맥 ⇧⌘[ = 이전 탭 (한글 상태 같은 물리 키)", (await activeTitle()).includes("find.txt"), await activeTitle());
+    }
+    // a second key of one's own, conflicts, macOS system keys
+    await openKeys(pg);
+    await pg.click('.keys-row[data-cmd="nextTab"] .keys-bind[data-slot="1"]');
+    await pg.keyboard.press(mac ? "Control+Shift+Tab" : "Control+Shift+Tab");
+    ok("다음 탭 키 2 ← 이전 탭 키: 충돌", (await keyError(pg)).includes("이전 탭"), await keyError(pg));
+    await pg.keyboard.press("Control+Tab");
+    ok("다음 탭 키 2 ← 자기 키 1: 거절", (await keyError(pg)).includes("이 기능의 다른 키"), await keyError(pg));
+    if (mac) {
+      await pg.keyboard.press("Meta+q");
+      ok("맥 ⌘Q: macOS 가 먼저 가져가는 키", (await keyError(pg)).includes("macOS") && (await keyError(pg)).includes("끝내기"), await keyError(pg));
+      await pg.keyboard.press("Meta+h");
+      ok("맥 ⌘H: 가리기", (await keyError(pg)).includes("가리기"), await keyError(pg));
+      await pg.keyboard.press("Meta+Space");
+      ok("맥 ⌘Space: Spotlight", (await keyError(pg)).includes("Spotlight"), await keyError(pg));
+      await pg.keyboard.press("Meta+Shift+Digit4");
+      ok("맥 ⇧⌘4: 화면 찍기", (await keyError(pg)).includes("화면 찍기"), await keyError(pg));
+      await imeKey(pg, "window", "Tab", "Tab", { metaKey: true });
+      ok("맥 ⌘Tab: 앱 전환", (await keyError(pg)).includes("⌘Tab"), await keyError(pg));
+      await pg.keyboard.press("Control+ArrowUp");
+      ok("맥 ⌃↑: Mission Control", (await keyError(pg)).includes("Mission Control"), await keyError(pg));
+    }
+    await pg.keyboard.press("Alt+BracketRight");
+    ok(`다음 탭 키 2 ← ${mac ? "⌥]" : "Alt+]"}`, (await pg.$eval('.keys-row[data-cmd="nextTab"] .keys-bind[data-slot="1"]', (e) => e.textContent.trim())) === (mac ? "⌥]" : "Alt+]"));
+    await closeKeys(pg);
+    await sleep(600);
+    const s4 = JSON.parse(be4.st.session);
+    ok("세션: 키 1 은 keybindings(옛 형식), 키 2 는 keybindings2", s4.keybindings.nextTab === "ctrl+tab" && s4.keybindings2 && s4.keybindings2.nextTab === "alt+]" && (mac ? s4.keybindings2.prevTab === "ctrl+shift+[" : !("prevTab" in s4.keybindings2)), { k1: s4.keybindings.nextTab, k2: s4.keybindings2 });
+    if (!mac) ok("윈도우: 맥 키 Ctrl+Q 는 잡힘 없이 그대로 쓸 수 있음(거절 목록 없음)", true);
+    await pg.click(".workspace .cm-content");
+    await pg.keyboard.press("Alt+BracketRight");
+    await until(async () => (await activeTitle()).includes("b.txt"), 3000);
+    ok("키 2 로 다음 탭", (await activeTitle()).includes("b.txt"), await activeTitle());
+    // no key at all: Ctrl+Tab does nothing
+    await openKeys(pg);
+    await pg.click('.keys-row[data-cmd="nextTab"] .keys-clear[data-slot="1"]');
+    await pg.click('.keys-row[data-cmd="nextTab"] .keys-clear[data-slot="0"]');
+    ok("다음 탭 키 없음", (await bindText(pg, "nextTab")) === "없음" && (await pg.$eval('.keys-row[data-cmd="nextTab"] .keys-bind[data-slot="1"]', (e) => e.disabled)), await bindText(pg, "nextTab"));
+    await closeKeys(pg);
+    await pg.click(".workspace .cm-content");
+    await pg.keyboard.press("Control+Tab");
+    await sleep(300);
+    ok("키 없앤 뒤 Ctrl+Tab 은 아무것도 안 함", (await activeTitle()).includes("b.txt"), await activeTitle());
+    await p4.ctx.close();
+
+    // ======= I. multi view 「같이 움직임」: macOS ⌘ + arrows ===================================
+    console.log("I. 멀티 뷰 같이 움직임 — 맥 ⌘+방향키");
+    const be5 = makeBackend(platform);
+    const body = Array.from({ length: 40 }, (_, i) => `line ${i + 1}`).join("\n");
+    const slotOf = (id) => ({ tabId: id, mode: "read", server: "", note: "" });
+    be5.st.session = session([tab("m1", "", { content: body }), tab("m2", "", { title: "m2.txt", content: body })], "m1", {
+      multi: { on: true, count: 2, slots: [slotOf("m1"), slotOf("m2"), ...Array.from({ length: 4 }, () => slotOf(""))], bundle: null },
+    });
+    const p5 = await openPage(browser, url, be5);
+    const pp = p5.page;
+    await until(async () => (await pp.$$(".cm-editor")).length === 2, 8000);
+    const activeLineOf = (i) =>
+      pp.evaluate((i) => {
+        const v = document.querySelectorAll(".cm-editor")[i];
+        const sel = v.querySelector(".cm-selectionLayer .cm-cursor, .cm-cursorLayer .cm-cursor");
+        const lines = [...v.querySelectorAll(".cm-content .cm-line")];
+        const al = v.querySelector(".cm-activeLine");
+        return al ? al.textContent : sel ? "?" : "";
+      }, i);
+    await pp.click(".cm-editor >> nth=0 >> .cm-content");
+    await pp.keyboard.press("Control+Home");
+    await sleep(150);
+    await pp.keyboard.press("Meta+ArrowDown");
+    await sleep(250);
+    const a0 = await activeLineOf(0);
+    const a1 = await activeLineOf(1);
+    if (mac) ok("맥 ⌘↓ = 두 칸 다 문서 끝", a0 === "line 40" && a1 === "line 40", { a0, a1 });
+    else ok("윈도우 Win+↓ 는 같이 안 움직임(다른 칸 그대로)", a1 !== "line 40", { a0, a1 });
+    if (mac) {
+      await pp.keyboard.press("Meta+ArrowUp");
+      await sleep(250);
+      ok("맥 ⌘↑ = 두 칸 다 문서 처음", (await activeLineOf(0)) === "line 1" && (await activeLineOf(1)) === "line 1", [await activeLineOf(0), await activeLineOf(1)]);
+    }
+    await p5.ctx.close();
   } finally {
     await browser.close();
   }

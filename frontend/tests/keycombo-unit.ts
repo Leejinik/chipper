@@ -30,6 +30,17 @@ eq("Control", comboKey({ key: "Control", code: "ControlLeft" }), "control");
 eq("space", comboKey({ key: " ", code: "Space" }), " ");
 eq("=", comboKey({ key: "=", code: "Equal" }), "=");
 
+// punctuation by position too (⇧⌘] gives key "}", 한글 mode or not)
+eq("}+BracketRight", comboKey({ key: "}", code: "BracketRight" }), "]");
+eq("{+BracketLeft", comboKey({ key: "{", code: "BracketLeft" }), "[");
+eq("+ on Equal", comboKey({ key: "+", code: "Equal" }), "=");
+eq("_ on Minus", comboKey({ key: "_", code: "Minus" }), "-");
+eq("? on Slash", comboKey({ key: "?", code: "Slash" }), "/");
+eq("NumpadAdd stays +", comboKey({ key: "+", code: "NumpadAdd" }), "+");
+eq("shifted symbol, no code", normalizeCombo("ctrl+shift+}"), "ctrl+shift+]");
+eq("shifted plus, no code", normalizeCombo("ctrl+shift++"), "ctrl+shift+=");
+eq("unshifted plus kept", normalizeCombo("ctrl++"), "ctrl++");
+
 // stored bindings from earlier builds
 eq("ctrl+ㄴ", normalizeCombo("ctrl+ㄴ"), "ctrl+s");
 eq("ctrl+shift+ㅆ", normalizeCombo("ctrl+shift+ㅆ"), "ctrl+shift+t");

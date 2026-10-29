@@ -17,6 +17,8 @@ export type CmdId =
   | "save"
   | "saveAs"
   | "close"
+  | "nextTab"
+  | "prevTab"
   | "find"
   | "replace"
   | "findNext"
@@ -43,6 +45,8 @@ export interface CommandDef {
   group: CmdGroup;
   scope: CmdScope;
   defaultCombo: string;
+  // macOS default when it differs: up to two keys, space-separated
+  macDefault?: string;
 }
 
 export const COMMANDS: CommandDef[] = [
@@ -51,8 +55,12 @@ export const COMMANDS: CommandDef[] = [
   { id: "save", label: "저장", group: "file", scope: "app", defaultCombo: "ctrl+s" },
   { id: "saveAs", label: "다른 이름으로 저장", group: "file", scope: "app", defaultCombo: "ctrl+shift+s" },
   { id: "close", label: "탭 닫기", group: "file", scope: "app", defaultCombo: "ctrl+w" },
+  // ⌃Tab works on macOS too (⌘Tab is the system app switcher); ⇧⌘] / ⇧⌘[ are the Mac tab keys
+  { id: "nextTab", label: "다음 탭 (멀티 뷰: 다음 칸)", group: "file", scope: "app", defaultCombo: "ctrl+tab", macDefault: "ctrl+tab ctrl+shift+]" },
+  { id: "prevTab", label: "이전 탭 (멀티 뷰: 이전 칸)", group: "file", scope: "app", defaultCombo: "ctrl+shift+tab", macDefault: "ctrl+shift+tab ctrl+shift+[" },
   { id: "find", label: "찾기", group: "find", scope: "app", defaultCombo: "ctrl+f" },
-  { id: "replace", label: "바꾸기", group: "find", scope: "app", defaultCombo: "ctrl+h" },
+  // ⌘H hides the app on macOS (App menu): ⌥⌘F there, the Mac editors' replace key
+  { id: "replace", label: "바꾸기", group: "find", scope: "app", defaultCombo: "ctrl+h", macDefault: "ctrl+alt+f" },
   { id: "findNext", label: "다음 찾기", group: "find", scope: "find", defaultCombo: "f3" },
   { id: "findPrev", label: "이전 찾기", group: "find", scope: "find", defaultCombo: "shift+f3" },
   { id: "inClause", label: "IN절 변환", group: "tools", scope: "app", defaultCombo: "ctrl+i" },
@@ -82,14 +90,21 @@ export const SCOPE_LABEL: Record<CmdScope, string> = {
 export const LINES_NOTE = "줄 목록을 눌러 둔 동안만 먹습니다. 이동 키에 Shift 를 더하면 고른 줄이 넓어집니다(Shift 는 따로 정하지 않음).";
 
 export const CMD_IDS = COMMANDS.map((c) => c.id);
+// A command's keys: up to two combos, space-separated ("" = none). Combos never
+// contain a space (the space bar is "space").
+export const MAX_KEYS = 2;
+export const keysOf = (v: string | undefined): string[] => (v ? v.split(" ").filter(Boolean) : []);
 export const DEFAULT_KEYBINDS = Object.fromEntries(COMMANDS.map((c) => [c.id, c.defaultCombo])) as Record<CmdId, string>;
+const MAC_DEFAULT_KEYBINDS = Object.fromEntries(COMMANDS.map((c) => [c.id, c.macDefault ?? c.defaultCombo])) as Record<CmdId, string>;
+export const defaultKeybinds = (mac: boolean): Record<CmdId, string> => (mac ? MAC_DEFAULT_KEYBINDS : DEFAULT_KEYBINDS);
 export const CMD_LABEL = Object.fromEntries(COMMANDS.map((c) => [c.id, c.label])) as Record<CmdId, string>;
 const CMD_SCOPE = Object.fromEntries(COMMANDS.map((c) => [c.id, c.scope])) as Record<CmdId, CmdScope>;
 export type Keybinds = Record<CmdId, string>;
 
 // Standard editing/navigation combos no command may take: CodeMirror's and the
-// OS's editing keys, Ctrl+Tab tab moves, and Ctrl+Home/End (start/end of the
-// document in the editor — and of the list in 줄만 보기, where they stay fixed).
+// OS's editing keys, and Ctrl+Home/End (start/end of the document in the editor
+// — and of the list in 줄만 보기, where they stay fixed). Ctrl+Tab is a setting
+// now (다음/이전 탭); CodeMirror's Tab indent is plain Tab / Shift+Tab only.
 export const RESERVED_COMBOS = new Set([
   "ctrl+c",
   "ctrl+v",
@@ -99,13 +114,43 @@ export const RESERVED_COMBOS = new Set([
   "ctrl+a",
   "ctrl+shift+z",
   "ctrl+d",
-  "ctrl+tab",
-  "ctrl+shift+tab",
   "ctrl+home",
   "ctrl+end",
   "ctrl+shift+home",
   "ctrl+shift+end",
 ]);
+
+// macOS: keys the system or the app menu (menu.go: App + Edit) takes before the
+// app sees them, as folded combos (⌘ or ⌃): Spotlight / input source, screen
+// shots, hide, minimize, quit, log out, force quit, window cycling, Dock, and the
+// Edit menu's 「Paste and Match Style」.
+export const MAC_SYSTEM_COMBOS = new Map<string, string>([
+  ["ctrl+space", "Spotlight·입력 소스 전환"],
+  ["ctrl+alt+space", "Finder 검색·입력 소스"],
+  ["ctrl+shift+3", "화면 찍기"],
+  ["ctrl+shift+4", "화면 찍기"],
+  ["ctrl+shift+5", "화면 찍기"],
+  ["ctrl+h", "앱 가리기"],
+  ["ctrl+alt+h", "다른 앱 가리기"],
+  ["ctrl+m", "창 내리기"],
+  ["ctrl+q", "앱 끝내기"],
+  ["ctrl+shift+q", "로그아웃"],
+  ["ctrl+alt+escape", "강제 종료"],
+  ["ctrl+`", "창 돌아가기"],
+  ["ctrl+alt+d", "Dock 가리기"],
+  ["ctrl+alt+shift+v", "편집 메뉴 「붙여넣고 스타일 맞추기」"],
+]);
+
+// macOS keys that depend on which of ⌘ / ⌃ is held (the folded combo cannot
+// tell): ⌘Tab (app switcher; ⌃Tab is fine) and ⌃ + arrows (Mission Control,
+// Spaces; ⌘ + arrows are fine). For the key press in the settings window.
+export function macEventProblem(e: KeyLike, mac: boolean): string {
+  if (!mac) return "";
+  const k = e.key;
+  if (e.metaKey && k === "Tab") return "⌘Tab 은 macOS 앱 전환 키라 앱에 오지 않아요(⌃Tab 은 됩니다).";
+  if (e.ctrlKey && !e.metaKey && /^Arrow/.test(k)) return "⌃ + 방향키는 macOS Mission Control·데스크탑 전환 키라 쓸 수 없어요(⌘ + 방향키는 됩니다).";
+  return "";
+}
 
 // Fixed keys, shown read-only in the settings window so the user sees what is
 // not theirs to change (and why). Combos use the stored form; text = free text.
@@ -114,7 +159,7 @@ export interface FixedKey {
   combos?: string[];
   text?: (mac: boolean) => string;
 }
-export const FIXED_KEYS: { group: string; why: string; keys: FixedKey[] }[] = [
+export const FIXED_KEYS: { group: string; why: string; macOnly?: boolean; keys: FixedKey[] }[] = [
   {
     group: "편집",
     why: "편집기·OS 공통 키",
@@ -127,11 +172,6 @@ export const FIXED_KEYS: { group: string; why: string; keys: FixedKey[] }[] = [
       { label: "세로 멀티 커서", text: (mac) => `${modLabel("alt", mac)}+드래그` },
       { label: "문서 처음 · 끝", combos: ["ctrl+home", "ctrl+end"] },
     ],
-  },
-  {
-    group: "탭·멀티 뷰",
-    why: "브라우저·편집기 공통 탭 이동 키",
-    keys: [{ label: "다음 · 이전 탭 (멀티 뷰에선 다음 · 이전 칸)", combos: ["ctrl+tab", "ctrl+shift+tab"] }],
   },
   {
     group: "줄 목록 칸",
@@ -148,6 +188,18 @@ export const FIXED_KEYS: { group: string; why: string; keys: FixedKey[] }[] = [
     keys: [
       { label: "닫기 · 그만두기", text: () => "Esc" },
       { label: "기본 단추 · 다음 칸", text: () => "Enter · Tab" },
+    ],
+  },
+  {
+    group: "macOS 시스템·메뉴",
+    why: "시스템이나 앱 메뉴가 먼저 가져가 앱에 오지 않음",
+    macOnly: true,
+    keys: [
+      { label: "Spotlight · 입력 소스", text: () => "⌘Space · ⌃Space" },
+      { label: "앱 전환 · 창 돌아가기", text: () => "⌘Tab · ⌘`" },
+      { label: "가리기 · 내리기 · 끝내기", text: () => "⌘H · ⌥⌘H · ⌘M · ⌘Q" },
+      { label: "화면 찍기", text: () => "⇧⌘3 · ⇧⌘4 · ⇧⌘5" },
+      { label: "Mission Control · 데스크탑 전환", text: () => "⌃ + 방향키" },
     ],
   },
 ];
@@ -172,7 +224,7 @@ export function comboFromEvent(e: KeyLike): string | null {
   if (e.altKey) parts.push("alt");
   if (e.shiftKey) parts.push("shift");
   parts.push(key === " " ? "space" : key);
-  return parts.join("+");
+  return normalizeCombo(parts.join("+")); // a shifted symbol without a code: "}" → "]"
 }
 
 const MOD_ORDER = ["ctrl", "alt", "shift"];
@@ -244,6 +296,12 @@ export function formatCombo(combo: string, mac: boolean): string {
   return [...p.mods.map((m) => modLabel(m as "ctrl", false)), keyName].join("+");
 }
 
+// "Ctrl+Tab · Ctrl+Shift+]" — every key of a command, or "없음".
+export function formatKeys(v: string, mac: boolean): string {
+  const ks = keysOf(v);
+  return ks.length ? ks.map((c) => formatCombo(c, mac)).join(" · ") : "없음";
+}
+
 // --- validity -------------------------------------------------------------------------------
 const isFKey = (k: string) => /^f([1-9]|1[0-9]|2[0-4])$/.test(k);
 const LINES_FIXED = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright", "escape", "tab"]);
@@ -256,7 +314,8 @@ function occupied(id: CmdId, combo: string): string[] {
 
 // Why `combo` may not be bound to `id` (empty = fine). Checks the command's scope,
 // the fixed keys and every other command's key.
-export function bindProblem(id: CmdId, combo: string, binds: Keybinds, mac: boolean): string {
+// `own` = the command's other keys (a second key must differ from the first).
+export function bindProblem(id: CmdId, combo: string, binds: Keybinds, mac: boolean, own: string[] = []): string {
   if (!combo) return "";
   const p = parse(combo);
   if (!p) return "알 수 없는 키입니다.";
@@ -273,12 +332,15 @@ export function bindProblem(id: CmdId, combo: string, binds: Keybinds, mac: bool
   }
   for (const c of occupied(id, combo)) {
     if (RESERVED_COMBOS.has(c)) return `${formatCombo(c, mac)} 은(는) 표준 편집/탐색 키라 쓸 수 없어요.`;
+    const sys = mac ? MAC_SYSTEM_COMBOS.get(c) : undefined;
+    if (sys) return `${formatCombo(c, mac)} 은(는) macOS 가 먼저 가져가는 키(${sys})라 쓸 수 없어요.`;
   }
   const mine = new Set(occupied(id, combo));
+  if (own.some((o) => occupied(id, o).some((c) => mine.has(c)))) return `${formatCombo(combo, mac)} 은(는) 이미 이 기능의 다른 키예요.`;
   for (const other of CMD_IDS) {
     if (other === id) continue;
-    if (occupied(other, binds[other] ?? "").some((c) => mine.has(c)))
-      return `${formatCombo(binds[other], mac)} 은(는) 이미 '${CMD_LABEL[other]}'에 할당됨.`;
+    const hit = keysOf(binds[other]).find((k) => occupied(other, k).some((c) => mine.has(c)));
+    if (hit) return `${formatCombo(hit, mac)} 은(는) 이미 '${CMD_LABEL[other]}'에 할당됨.`;
   }
   return "";
 }
@@ -291,15 +353,28 @@ export function captureCombo(id: CmdId, e: KeyLike): string | null {
   return CMD_SCOPE[id] === "lines" ? withoutShift(c) : c;
 }
 
-// Merge a persisted keybinding blob over the defaults. Saved keys win (in
-// command order); a saved key its command may not use, or one already taken,
-// falls back to the default; a default that is now taken becomes unbound (""),
-// so a session from an earlier build never ends with one key on two commands.
-// Unknown commands and non-strings are dropped; "" (unbound) is kept.
-export function normalizeKeybinds(raw: unknown): Keybinds {
+// Merge persisted keybindings over the defaults: `raw` = each command's first key
+// (the format v1.3.1 reads), `raw2` = second keys. Saved keys win (in command
+// order); a saved key its command may not use, or one already taken, is dropped
+// — when none is left the command gets its default; a default that is now taken
+// is dropped too, so a session from an earlier build never ends with one key on
+// two commands. Unknown commands and non-strings are dropped; "" (no key) is kept.
+// `mac` picks the macOS defaults and refuses the keys macOS takes first.
+export function normalizeKeybinds(raw: unknown, mac = false, raw2?: unknown): Keybinds {
   const out = Object.fromEntries(CMD_IDS.map((id) => [id, ""])) as Keybinds;
   const done = new Set<CmdId>();
   const src = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const src2 = raw2 && typeof raw2 === "object" ? (raw2 as Record<string, unknown>) : {};
+  const take = (id: CmdId, vals: string[]) => {
+    const got: string[] = [];
+    for (const v of vals) {
+      if (got.length >= MAX_KEYS) break;
+      const c = normalizeCombo(v.toLowerCase());
+      if (!bindProblem(id, c, out, mac, got)) got.push(c);
+    }
+    out[id] = got.join(" ");
+    return got.length;
+  };
   for (const id of CMD_IDS) {
     const v = src[id];
     if (typeof v !== "string") continue;
@@ -307,17 +382,25 @@ export function normalizeKeybinds(raw: unknown): Keybinds {
       done.add(id);
       continue;
     }
-    const c = normalizeCombo(v.toLowerCase());
-    if (bindProblem(id, c, out, false)) continue;
-    out[id] = c;
-    done.add(id);
+    const v2 = src2[id];
+    if (take(id, [...keysOf(v), ...(typeof v2 === "string" ? keysOf(v2) : [])])) done.add(id);
   }
-  for (const id of CMD_IDS) {
-    if (done.has(id)) continue;
-    const d = DEFAULT_KEYBINDS[id];
-    out[id] = bindProblem(id, d, out, false) ? "" : d;
-  }
+  const defs = defaultKeybinds(mac);
+  for (const id of CMD_IDS) if (!done.has(id)) take(id, keysOf(defs[id]));
   return out;
+}
+
+// The session form: [first keys (every command, "" = none — what v1.3.1 reads),
+// second keys (only the commands that have one)].
+export function splitKeybinds(b: Keybinds): [Record<string, string>, Record<string, string>] {
+  const first: Record<string, string> = {};
+  const second: Record<string, string> = {};
+  for (const id of CMD_IDS) {
+    const ks = keysOf(b[id]);
+    first[id] = ks[0] ?? "";
+    if (ks[1]) second[id] = ks[1];
+  }
+  return [first, second];
 }
 
 // The command of `scope` a key press is bound to, or null. Lines keys match with
@@ -326,7 +409,7 @@ export function matchCommand(e: KeyLike, scope: CmdScope, binds: Keybinds): CmdI
   let c = comboFromEvent(e);
   if (!c) return null;
   if (scope === "lines") c = withoutShift(c);
-  for (const id of CMD_IDS) if (CMD_SCOPE[id] === scope && binds[id] && binds[id] === c) return id;
+  for (const id of CMD_IDS) if (CMD_SCOPE[id] === scope && keysOf(binds[id]).includes(c)) return id;
   return null;
 }
 
@@ -374,4 +457,4 @@ const subscribe = (f: () => void) => {
 };
 export const useKeys = (): KeysState => useSyncExternalStore(subscribe, keysNow);
 // "Ctrl+F" / "⌘F" for a command, as bound now.
-export const keyText = (id: CmdId, s: KeysState = state) => formatCombo(s.binds[id], s.mac);
+export const keyText = (id: CmdId, s: KeysState = state) => formatKeys(s.binds[id], s.mac);
