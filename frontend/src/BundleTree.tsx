@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { main } from "../wailsjs/go/models";
 import { dirProbe, withEseo, type AssignTarget, type PlaceTags } from "./tagAssign";
 import { canOpenAll, dirIndex, dirName } from "./openDir";
+import { formatCombo, keysNow } from "./keybinds";
 
 // Drag payload type for a tree file dropped onto a multi-view pane.
 export const TREE_DRAG_TYPE = "application/x-chipper-bundle-file";
@@ -641,7 +642,7 @@ export default function BundleTree(p: Props) {
         ref={bodyRef}
         role="tree"
         data-rows={rows.length}
-        aria-label="디렉토리 파일 (↑↓ 이동 · →← 펼치기/접기 · Enter 열기 · Shift+F10 메뉴)"
+        aria-label={`디렉토리 파일 (↑↓ 이동 · →← 펼치기/접기 · Enter 열기 · ${formatCombo("shift+f10", keysNow().mac)} 메뉴)`}
         onScroll={
           windowed
             ? (e) => {

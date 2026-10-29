@@ -58,7 +58,29 @@ import { linesFindHost, openLinesFind } from "./LinesFind";
 import MultiGrid, { paneStyle, usePaneSizes } from "./MultiGrid";
 import type { PaneSizes } from "./paneSizes";
 import { DEFAULT_LINES, filterRules, normalizeLines, ruleOwners, type LinesState } from "./lineView";
-import { comboKey, normalizeCombo } from "./keyCombo";
+import {
+  COMMANDS,
+  DEFAULT_KEYBINDS,
+  FIXED_KEYS,
+  GROUPS,
+  LINES_NOTE,
+  SCOPE_LABEL,
+  WHEEL_ZOOMS,
+  bindProblem,
+  captureCombo,
+  formatCombo,
+  isZoomWheel,
+  keysNow,
+  matchCommand,
+  modLabel,
+  normalizeKeybinds,
+  normalizeWheelZoom,
+  setKeysState,
+  wheelHint,
+  wheelZoomLabel,
+  type CmdId,
+  type WheelZoom,
+} from "./keybinds";
 import "./App.css";
 import { budgetAsks, budgetText, editAskText, editBudgetWhy, heapWhyOf, wholeBudget, wholeWaitText, WHOLE_BUDGET, BUDGET_SMALL } from "./wholeBudget";
 import {
@@ -403,8 +425,8 @@ function docSessionBytes(doc: Text): number {
   return n;
 }
 const SESSION_TAB_OVERHEAD = 512; // the tab's other fields (title, path, …)
-const UNKEPT_TIP =
-  "큰 파일이라 고친 내용을 자동 저장(세션)에 담지 않습니다 — 창을 닫거나 앱이 꺼지면 사라지니 💾 저장(Ctrl+S)하세요. 닫을 때 한 번 더 묻습니다.";
+const unkeptTip = (saveKey: string) =>
+  `큰 파일이라 고친 내용을 자동 저장(세션)에 담지 않습니다 — 창을 닫거나 앱이 꺼지면 사라지니 💾 저장(${saveKey})하세요. 닫을 때 한 번 더 묻습니다.`;
 
 // Columns of the 6-wide grid each pane spans: 1–3 panes sit in one row; 4 is
 // 2×2; 5 is 3 over 2; 6 is 3×2.
@@ -463,7 +485,8 @@ interface Session {
   activeId: string;
   splitRatio: number;
   fontSize?: number; // editor font size (px); optional so older sessions still load
-  keybindings?: Record<string, string>; // per-command combo overrides
+  keybindings?: Record<string, string>; // per-command combo overrides ("" = no key)
+  wheelZoom?: WheelZoom; // which modifier + wheel zooms (macOS choice); absent = both
   // Log colour rules from before tags (now the `common` tag in tags.json). Read
   // only to build common on first run. Written on every save — common in the
   // old format (legacyLogRules) — so v1.2.0 still shows the rules after a
@@ -498,112 +521,10 @@ const MAX_COUNT = 10;
 const clampCount = (n: number) => Math.min(MAX_COUNT, Math.max(MIN_COUNT, n));
 
 // --- keybindings ----------------------------------------------------------
-// Only the app's own "special" commands are remappable here. Standard editor
-// keys (copy/paste/cut/undo/redo/select-all) are owned by CodeMirror and left
-// alone, and Ctrl+Tab tab-navigation is fixed.
-type CmdId =
-  | "new"
-  | "open"
-  | "save"
-  | "saveAs"
-  | "close"
-  | "find"
-  | "replace"
-  | "inClause"
-  | "chips"
-  | "resetZoom";
+// Every app shortcut is remappable (keybinds.ts); the editor's and the OS's own
+// keys (RESERVED_COMBOS / FIXED_KEYS there) stay fixed.
 
-interface CommandDef {
-  id: CmdId;
-  label: string;
-  defaultCombo: string;
-}
-
-const COMMANDS: CommandDef[] = [
-  { id: "new", label: "새 파일", defaultCombo: "ctrl+n" },
-  { id: "open", label: "열기", defaultCombo: "ctrl+o" },
-  { id: "save", label: "저장", defaultCombo: "ctrl+s" },
-  { id: "saveAs", label: "다른 이름으로 저장", defaultCombo: "ctrl+shift+s" },
-  { id: "close", label: "탭 닫기", defaultCombo: "ctrl+w" },
-  { id: "find", label: "찾기", defaultCombo: "ctrl+f" },
-  { id: "replace", label: "바꾸기", defaultCombo: "ctrl+h" },
-  { id: "inClause", label: "IN절 변환", defaultCombo: "ctrl+i" },
-  { id: "chips", label: "chips 자동입력", defaultCombo: "ctrl+p" },
-  { id: "resetZoom", label: "편집기 확대 초기화", defaultCombo: "ctrl+0" },
-];
-
-const CMD_IDS = COMMANDS.map((c) => c.id);
-const DEFAULT_KEYBINDS = Object.fromEntries(
-  COMMANDS.map((c) => [c.id, c.defaultCombo])
-) as Record<CmdId, string>;
-const CMD_LABEL = Object.fromEntries(
-  COMMANDS.map((c) => [c.id, c.label])
-) as Record<CmdId, string>;
-
-// Standard editing/navigation combos that may NOT be reassigned to an app
-// command (they belong to CodeMirror or tab navigation).
-const RESERVED_COMBOS = new Set([
-  "ctrl+c",
-  "ctrl+v",
-  "ctrl+x",
-  "ctrl+z",
-  "ctrl+y",
-  "ctrl+a",
-  "ctrl+shift+z",
-  "ctrl+d",
-  "ctrl+tab",
-  "ctrl+shift+tab",
-]);
-
-// Canonical "ctrl+shift+s" string from a keyboard event, or null when only
-// modifiers are held. Meta (⌘) folds into ctrl so bindings are cross-platform.
-function comboFromEvent(e: KeyboardEvent): string | null {
-  const key = comboKey(e); // physical key, so 한글 mode gives "s", not "ㄴ"
-  if (key === "control" || key === "shift" || key === "alt" || key === "meta") {
-    return null;
-  }
-  const parts: string[] = [];
-  if (e.ctrlKey || e.metaKey) parts.push("ctrl");
-  if (e.altKey) parts.push("alt");
-  if (e.shiftKey) parts.push("shift");
-  parts.push(key === " " ? "space" : key);
-  return parts.join("+");
-}
-
-function formatCombo(combo: string): string {
-  return combo
-    .split("+")
-    .map((p) =>
-      p === "ctrl"
-        ? "Ctrl"
-        : p === "shift"
-        ? "Shift"
-        : p === "alt"
-        ? "Alt"
-        : p === "tab"
-        ? "Tab"
-        : p === "space"
-        ? "Space"
-        : p.length === 1
-        ? p.toUpperCase()
-        : p.charAt(0).toUpperCase() + p.slice(1)
-    )
-    .join("+");
-}
-
-// Merge a persisted keybinding blob over the defaults, keeping only known
-// commands and string values so a corrupt/old blob can't break dispatch.
-function normalizeKeybinds(raw: any): Record<CmdId, string> {
-  const out = { ...DEFAULT_KEYBINDS };
-  if (raw && typeof raw === "object") {
-    for (const id of CMD_IDS) {
-      if (typeof raw[id] === "string" && raw[id]) out[id] = normalizeCombo(raw[id]);
-    }
-  }
-  return out;
-}
-
-const WELCOME_MD = `# Chipper에 오신 것을 환영합니다 👋
+const welcomeMd = (mac: boolean) => `# Chipper에 오신 것을 환영합니다 👋
 
 왼쪽 칸(**소스**)을 편집하면 오른쪽 칸(**미리보기**)에 실시간으로 반영됩니다.
 오른쪽 미리보기는 읽기 전용입니다.
@@ -619,12 +540,7 @@ const WELCOME_MD = `# Chipper에 오신 것을 환영합니다 👋
 
 | 동작 | 키 |
 | --- | --- |
-| 새 파일 | \`Ctrl\` + \`N\` |
-| 열기 | \`Ctrl\` + \`O\` |
-| 저장 | \`Ctrl\` + \`S\` |
-| 다른 이름으로 저장 | \`Ctrl\` + \`Shift\` + \`S\` |
-| 탭 닫기 | \`Ctrl\` + \`W\` |
-| 다음/이전 탭 | \`Ctrl\` + \`Tab\` |
+${welcomeKeys(mac)}
 
 > 이 환영 문서는 편집하거나 닫아도 됩니다. 마음껏 사용해 보세요!
 
@@ -632,6 +548,30 @@ const WELCOME_MD = `# Chipper에 오신 것을 환영합니다 👋
 console.log("Hello, Markdown!");
 \`\`\`
 `;
+
+// Whether this is macOS (shortcuts show as ⌘…); false when the backend cannot say.
+async function onMac(): Promise<boolean> {
+  try {
+    return (await GetPlatform()) === "darwin";
+  } catch {
+    return false;
+  }
+}
+
+// The welcome document's shortcut table: "`Ctrl` + `N`" (Windows/Linux) or "`⌘N`" (macOS).
+function welcomeKeys(mac: boolean): string {
+  const cell = (combo: string) =>
+    mac ? "`" + formatCombo(combo, true) + "`" : formatCombo(combo, false).split("+").map((p) => "`" + p + "`").join(" + ");
+  const rows: [string, string][] = [
+    ["새 파일", DEFAULT_KEYBINDS.new],
+    ["열기", DEFAULT_KEYBINDS.open],
+    ["저장", DEFAULT_KEYBINDS.save],
+    ["다른 이름으로 저장", DEFAULT_KEYBINDS.saveAs],
+    ["탭 닫기", DEFAULT_KEYBINDS.close],
+    ["다음/이전 탭", "ctrl+tab"],
+  ];
+  return rows.map(([l, c]) => `| ${l} | ${cell(c)} |`).join("\n");
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -991,6 +931,7 @@ function App() {
   const [splitRatio, setSplitRatio] = useState<number>(0.5);
   const [fontSize, setFontSize] = useState<number>(DEFAULT_FONT_SIZE);
   const [keybinds, setKeybinds] = useState<Record<CmdId, string>>(DEFAULT_KEYBINDS);
+  const [wheelZoom, setWheelZoom] = useState<WheelZoom>("both"); // Ctrl/⌘ + wheel (keybinds.ts)
   const [keysOpen, setKeysOpen] = useState<boolean>(false); // keybinding settings modal
   // Log colour tags (~/.chipper/tags.json). tagsReady: loaded (or migrated);
   // tagsReadOnlyRef: written by a newer chipper (or unreadable), never saved over.
@@ -1055,6 +996,12 @@ function App() {
   // Drives the file-association guidance and whether chips auto-typing is offered.
   const [platform, setPlatform] = useState<string>("windows");
   const autotypeSupported = platform !== "linux"; // Win32 SendInput / osascript only
+  const mac = platform === "darwin"; // shortcuts show as ⌘… (keybinds.ts formatCombo)
+  // Current display string for a command's shortcut (reflects remaps live).
+  const keyHint = (id: CmdId) => formatCombo(keybinds[id], mac);
+  // Handlers outside React renders (CodeMirror, list panes, window listeners) read
+  // these through keysNow(), renders elsewhere through useKeys().
+  useLayoutEffect(() => setKeysState({ binds: keybinds, mac, wheel: wheelZoom }), [keybinds, mac, wheelZoom]);
   const [assocTypes, setAssocTypes] = useState<{ ext: string; label: string }[]>([]);
   const [assocChecked, setAssocChecked] = useState<Record<string, boolean>>({});
   const [assocMsg, setAssocMsg] = useState<string>("");
@@ -1319,6 +1266,7 @@ function App() {
       splitRatio: ratioRef.current,
       fontSize: fontSizeRef.current,
       keybindings: keybindsRef.current,
+      wheelZoom: keysNow().wheel,
       ...(legacyRulesRef.current !== undefined
         ? { logRules: legacyRulesRef.current }
         : tagsReadyRef.current
@@ -1445,6 +1393,7 @@ function App() {
               setFontSize(clampFont(s.fontSize));
             }
             setKeybinds(normalizeKeybinds(s.keybindings));
+            setWheelZoom(normalizeWheelZoom(s.wheelZoom));
             setMulti(normalizeMulti(s.multi, new Set(restored.map((t) => t.id))));
             paneSizes.restore(s.paneSizes);
             await initTags(legacy);
@@ -1459,7 +1408,7 @@ function App() {
       if (!tagsReadyRef.current) await initTags(legacy);
       const w = makeTab({
         title: "환영합니다.md",
-        content: WELCOME_MD,
+        content: welcomeMd(await onMac()),
         lang: "markdown",
         view: "split",
       });
@@ -1538,7 +1487,7 @@ function App() {
   useEffect(() => {
     if (!loaded) return;
     scheduleAutosave();
-  }, [tabs, activeId, splitRatio, fontSize, keybinds, multi, loaded, scheduleAutosave]);
+  }, [tabs, activeId, splitRatio, fontSize, keybinds, wheelZoom, multi, loaded, scheduleAutosave]);
 
   // --- tags: debounced save, like the session --------------------------------
   const tagsTimer = useRef<number | undefined>(undefined);
@@ -3896,10 +3845,8 @@ function App() {
         return;
       }
       if (!isMod && !e.altKey) return; // app commands require a Ctrl/Alt modifier
-      const combo = comboFromEvent(e);
-      if (!combo) return;
-      const binds = keybindsRef.current;
-      const id = CMD_IDS.find((k) => binds[k] === combo);
+      // only 「어디서나」 commands here: find / list keys are the editor's and the panes' own
+      const id = matchCommand(e, "app", keybindsRef.current);
       if (!id) return;
       e.preventDefault();
       const m = multiRef.current;
@@ -3925,21 +3872,11 @@ function App() {
         setKeyError("");
         return;
       }
-      const combo = comboFromEvent(e);
+      const combo = captureCombo(capturing, e); // physical key (한글 IME), ⌘ = Ctrl, list keys without Shift
       if (!combo) return; // modifier-only: keep listening
-      if (!(e.ctrlKey || e.metaKey || e.altKey)) {
-        setKeyError("Ctrl 또는 Alt 를 포함한 조합을 눌러 주세요.");
-        return;
-      }
-      if (RESERVED_COMBOS.has(combo)) {
-        setKeyError(`${formatCombo(combo)} 은(는) 표준 편집/탐색 키라 쓸 수 없어요.`);
-        return;
-      }
-      const conflict = CMD_IDS.find(
-        (k) => k !== capturing && keybindsRef.current[k] === combo
-      );
-      if (conflict) {
-        setKeyError(`${formatCombo(combo)} 은(는) 이미 '${CMD_LABEL[conflict]}'에 할당됨.`);
+      const why = bindProblem(capturing, combo, keybindsRef.current, keysNow().mac);
+      if (why) {
+        setKeyError(why);
         return;
       }
       setKeybinds((prev) => ({ ...prev, [capturing]: combo }));
@@ -3976,14 +3913,18 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [assocOpen]);
 
-  // --- Ctrl+wheel: zoom the editor AND preview together ---------------------
+  // --- Ctrl/⌘ + wheel: zoom the editor AND preview together ------------------
   // The WebView's built-in Ctrl+wheel zooms the whole page (toolbar, tabs,
   // buttons and all). We swallow that everywhere so the chrome never scales,
-  // and instead drive our own zoom (editor font + preview) whenever the wheel
-  // is over the workspace (either pane). Must be non-passive to preventDefault.
+  // and instead drive our own zoom (editor font + preview + 🏷/📖 lists) whenever
+  // the wheel is over the workspace. Which modifier zooms is a setting (macOS:
+  // ⌃, ⌘ or both — keybinds.ts WheelZoom). Must be non-passive to preventDefault.
   useEffect(() => {
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return;
+      const k = keysNow();
+      // off macOS a Ctrl+wheel never reaches the page zoom, whatever the setting
+      if (e.ctrlKey && !k.mac) e.preventDefault();
+      if (!isZoomWheel(e, k.wheel)) return;
       e.preventDefault(); // block the webview's page zoom (keeps chrome fixed)
       const overContent = (e.target as HTMLElement | null)?.closest?.(".workspace");
       if (!overContent) return;
@@ -4276,7 +4217,7 @@ function App() {
     if (!bar || !el) return;
     // Listen on the whole bar so the wheel also works over the ‹ › buttons.
     const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey) return; // Ctrl+wheel belongs to the global zoom handler
+      if (isZoomWheel(e, keysNow().wheel)) return; // Ctrl/⌘+wheel belongs to the global zoom handler
       const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
       if (!d || el.scrollWidth <= el.clientWidth) return;
       e.preventDefault();
@@ -4794,7 +4735,7 @@ function App() {
             </span>
           )}
           {t && unkept.has(t.id) && (
-            <span className="unkept" title={UNKEPT_TIP}>
+            <span className="unkept" title={unkeptTip(keyHint("save"))}>
               ⚠ 저장해야 남음
             </span>
           )}
@@ -4935,8 +4876,6 @@ function App() {
     </MultiGrid>
   );
 
-  // Current display string for a command's shortcut (reflects remaps live).
-  const keyHint = (id: CmdId) => formatCombo(keybinds[id]);
 
   return (
     <div className="app">
@@ -5103,7 +5042,7 @@ function App() {
               setCapturing(null);
               setKeysOpen(true);
             }}
-            title="단축키 설정 — 특수 기능의 키를 재지정"
+            title="단축키 설정 — 앱 기능의 키를 바꾸기"
           >
             ⌨ 단축키
           </button>
@@ -5244,7 +5183,7 @@ function App() {
               </span>
             )}
             {unkept.has(t.id) && (
-              <span className="unkept" title={UNKEPT_TIP}>
+              <span className="unkept" title={unkeptTip(keyHint("save"))}>
                 ⚠
               </span>
             )}
@@ -5255,7 +5194,7 @@ function App() {
                 e.stopPropagation();
                 doCloseTab(t.id);
               }}
-              title="닫기 (Ctrl+W)"
+              title={`닫기 (${keyHint("close")})`}
             >
               ×
             </span>
@@ -5272,7 +5211,7 @@ function App() {
             ›
           </button>
         )}
-        <button className="tab-new" onClick={doNew} title="새 파일 (Ctrl+N)">
+        <button className="tab-new" onClick={doNew} title={`새 파일 (${keyHint("new")})`}>
           ＋
         </button>
       </div>
@@ -5395,7 +5334,7 @@ function App() {
                 <div className="pane-head">
                   {active.lines?.on && active.path ? (active.lines.read ? "📖 읽기 보기 · 읽기 전용" : "태그 줄만 · 읽기 전용") : "소스 · 편집"}
                   {!active.lines?.on && (
-                    <span className="pane-hint">Alt+드래그 멀티커서 · Ctrl+D 다음 선택 · 우클릭 메뉴</span>
+                    <span className="pane-hint">{modLabel("alt", mac)}+드래그 멀티커서 · {formatCombo("ctrl+d", mac)} 다음 선택 · 우클릭 메뉴</span>
                   )}
                   {active.path && linesSeg(active)}
                 </div>
@@ -5474,7 +5413,7 @@ function App() {
               {memBar}
               <button
                 className="st-font"
-                title="에디터 글꼴 크기 · Ctrl+휠로 확대/축소, 클릭 또는 Ctrl+0으로 기본값(14px) 재설정"
+                title={`에디터 글꼴 크기 · ${wheelHint(wheelZoom, mac)}로 확대/축소, 클릭${keybinds.resetZoom ? ` 또는 ${keyHint("resetZoom")}` : ""}으로 기본값(14px) 재설정`}
                 onMouseDown={(e) => {
                   e.stopPropagation();
                   setFontSize(DEFAULT_FONT_SIZE);
@@ -5611,7 +5550,7 @@ function App() {
                 {(viewsRef.current.get(active.id)?.state.doc.length ?? active.content.length).toLocaleString()}자
               </span>
               {unkept.has(active.id) && (
-                <span className="st-unkept" title={UNKEPT_TIP}>
+                <span className="st-unkept" title={unkeptTip(keyHint("save"))}>
                   ⚠ 큰 파일 — 고친 내용은 저장해야 남습니다
                 </span>
               )}
@@ -5771,24 +5710,24 @@ function App() {
           onMouseDown={(e) => e.stopPropagation()}
         >
           <button className="menu-item" onClick={() => runCtx("undo")}>
-            실행 취소<span className="menu-key">Ctrl+Z</span>
+            실행 취소<span className="menu-key">{formatCombo("ctrl+z", mac)}</span>
           </button>
           <button className="menu-item" onClick={() => runCtx("redo")}>
-            다시 실행<span className="menu-key">Ctrl+Y</span>
+            다시 실행<span className="menu-key">{formatCombo(mac ? "ctrl+shift+z" : "ctrl+y", mac)}</span>
           </button>
           <div className="menu-sep" />
           <button className="menu-item" disabled={!ctxMenu.hasSel} onClick={() => runCtx("cut")}>
-            잘라내기<span className="menu-key">Ctrl+X</span>
+            잘라내기<span className="menu-key">{formatCombo("ctrl+x", mac)}</span>
           </button>
           <button className="menu-item" disabled={!ctxMenu.hasSel} onClick={() => runCtx("copy")}>
-            복사<span className="menu-key">Ctrl+C</span>
+            복사<span className="menu-key">{formatCombo("ctrl+c", mac)}</span>
           </button>
           <button className="menu-item" onClick={() => runCtx("paste")}>
-            붙여넣기<span className="menu-key">Ctrl+V</span>
+            붙여넣기<span className="menu-key">{formatCombo("ctrl+v", mac)}</span>
           </button>
           <div className="menu-sep" />
           <button className="menu-item" onClick={() => runCtx("selectAll")}>
-            모두 선택<span className="menu-key">Ctrl+A</span>
+            모두 선택<span className="menu-key">{formatCombo("ctrl+a", mac)}</span>
           </button>
           <div className="menu-sep" />
           <button
@@ -6021,25 +5960,94 @@ function App() {
           <div className="keys-dialog" onMouseDown={(e) => e.stopPropagation()}>
             <div className="chips-title">⌨ 단축키 설정</div>
             <div className="chips-sub">
-              특수 기능의 단축키를 바꿀 수 있어요. 복사·붙여넣기·실행취소 같은 표준 편집 키와
-              Ctrl+Tab 탭 이동은 고정입니다.
+              단추를 누르고 새 키를 누르면 바뀝니다(Esc 그만두기 · ✕ 키 없애기). 복사·붙여넣기 같은 편집 키와
+              {" "}{formatCombo("ctrl+tab", mac)} 탭 이동은 고정입니다(맨 아래).
             </div>
             <div className="keys-list">
-              {COMMANDS.map((cmd) => (
-                <div className="keys-row" key={cmd.id}>
-                  <span className="keys-label">{cmd.label}</span>
-                  <button
-                    className={capturing === cmd.id ? "keys-bind capturing" : "keys-bind"}
-                    onClick={() => {
-                      setKeyError("");
-                      setCapturing(cmd.id);
-                    }}
-                    title="클릭한 뒤 새 조합을 누르세요 (Esc 취소)"
-                  >
-                    {capturing === cmd.id ? "키를 누르세요…" : keyHint(cmd.id)}
-                  </button>
+              {GROUPS.map((g) => (
+                <div className="keys-group" key={g.id} data-group={g.id}>
+                  <div className="keys-group-title">{g.label}</div>
+                  {g.id === "lines" && <div className="keys-note">{LINES_NOTE}</div>}
+                  {COMMANDS.filter((c) => c.group === g.id).map((cmd) => (
+                    <div className="keys-row" key={cmd.id} data-cmd={cmd.id}>
+                      <span className="keys-label">
+                        {cmd.label}
+                        <span className={"keys-scope scope-" + cmd.scope}>{SCOPE_LABEL[cmd.scope]}</span>
+                      </span>
+                      <span className="keys-btns">
+                        <button
+                          className={
+                            "keys-bind" + (capturing === cmd.id ? " capturing" : "") + (keybinds[cmd.id] ? "" : " unbound") +
+                            (keybinds[cmd.id] !== DEFAULT_KEYBINDS[cmd.id] ? " changed" : "")
+                          }
+                          onClick={() => {
+                            setKeyError("");
+                            setCapturing(cmd.id);
+                          }}
+                          title={`클릭한 뒤 새 조합을 누르세요 (Esc 취소) · 기본값 ${formatCombo(DEFAULT_KEYBINDS[cmd.id], mac)}`}
+                        >
+                          {capturing === cmd.id ? "키를 누르세요…" : keyHint(cmd.id)}
+                        </button>
+                        <button
+                          className="keys-clear"
+                          disabled={!keybinds[cmd.id]}
+                          title="이 기능의 단축키 없애기"
+                          aria-label={cmd.label + " 단축키 없애기"}
+                          onClick={() => {
+                            setKeyError("");
+                            setCapturing(null);
+                            setKeybinds((prev) => ({ ...prev, [cmd.id]: "" }));
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    </div>
+                  ))}
+                  {g.id === "zoom" && (
+                    <div className="keys-row keys-wheel" data-cmd="wheelZoom">
+                      <span className="keys-label">
+                        글자 키우기·줄이기 (휠)
+                        <span className="keys-scope scope-app">편집기·미리보기·줄 목록 위에서</span>
+                      </span>
+                      {mac ? (
+                        <select
+                          className="keys-wheel-sel"
+                          value={wheelZoom}
+                          aria-label="휠로 글자 크기를 바꿀 때 누를 키"
+                          onChange={(e) => setWheelZoom(normalizeWheelZoom(e.target.value))}
+                        >
+                          {WHEEL_ZOOMS.map((m) => (
+                            <option key={m} value={m}>
+                              {wheelZoomLabel(m, true)} + 휠
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <span className="keys-fixed-key">{wheelHint("both", false)}</span>
+                      )}
+                    </div>
+                  )}
                 </div>
               ))}
+              <div className="keys-group keys-fixed" data-group="fixed">
+                <div className="keys-group-title">바꿀 수 없는 키</div>
+                {FIXED_KEYS.map((f) => (
+                  <div key={f.group} className="keys-fixed-sec">
+                    <div className="keys-note">
+                      {f.group} — {f.why}
+                    </div>
+                    {f.keys.map((k) => (
+                      <div className="keys-row fixed" key={k.label}>
+                        <span className="keys-label">{k.label}</span>
+                        <span className="keys-fixed-key">
+                          {k.text ? k.text(mac) : (k.combos ?? []).map((c) => formatCombo(c, mac)).join(" · ")}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
             </div>
             <div className={keyError ? "keys-error on" : "keys-error"}>{keyError || " "}</div>
             <div className="chips-actions">
@@ -6047,6 +6055,7 @@ function App() {
                 className="tb-btn"
                 onClick={() => {
                   setKeybinds(DEFAULT_KEYBINDS);
+                  setWheelZoom("both");
                   setKeyError("");
                   setCapturing(null);
                 }}

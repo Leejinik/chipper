@@ -10,6 +10,7 @@ import {
   replaceAll,
 } from "@codemirror/search";
 import { subscribeDocChanges } from "./CodeEditor";
+import { formatCombo, keysNow, keyText, matchCommand, useKeys } from "./keybinds";
 
 // One editor the panel searches. In multi view every synced pane is a target;
 // otherwise it is just the active editor.
@@ -229,8 +230,16 @@ export default function FindReplace({
     } else if (e.key === "Enter") {
       e.preventDefault();
       step((v) => (e.shiftKey ? findPrevious(v) : findNext(v)));
+    } else {
+      // 다음·이전 찾기 (F3 / Shift+F3 by default — keybinds.ts) work in the boxes too
+      const id = matchCommand(e.nativeEvent, "find", keysNow().binds);
+      if (!id) return;
+      e.preventDefault();
+      step(id === "findPrev" ? findPrevious : findNext);
     }
   };
+  const ks = useKeys();
+  const also = (id: "findNext" | "findPrev") => (ks.binds[id] ? " · " + keyText(id, ks) : "");
 
   const keys = Object.keys(counts);
   const fmt = (n: number) => (n > COUNT_CAP ? `${COUNT_CAP}+` : `${n}`);
@@ -265,10 +274,10 @@ export default function FindReplace({
         <span className="find-count" title={keys.length > 1 ? "칸마다의 개수는 각 칸 아래에 표시됩니다" : ""}>
           {countLabel}
         </span>
-        <button className="find-btn" onClick={() => step(findPrevious)} disabled={!canRun} title="이전 찾기 (Shift+Enter)">
+        <button className="find-btn" onClick={() => step(findPrevious)} disabled={!canRun} title={`이전 찾기 (${formatCombo("shift+enter", ks.mac)}${also("findPrev")})`}>
           ▲
         </button>
-        <button className="find-btn" onClick={() => step(findNext)} disabled={!canRun} title="다음 찾기 (Enter)">
+        <button className="find-btn" onClick={() => step(findNext)} disabled={!canRun} title={`다음 찾기 (Enter${also("findNext")})`}>
           ▼
         </button>
         <button

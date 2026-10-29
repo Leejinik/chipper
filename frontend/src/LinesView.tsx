@@ -41,6 +41,7 @@ import {
   type FRow,
 } from "./lineView";
 import { RULE_KINDS, type RuleKind } from "./logHighlight";
+import { isZoomWheel, keysNow, matchCommand } from "./keybinds";
 
 // 「🏷 태그 줄만」: the lines of the file on disk that the applied tags' 「줄만」
 // rules match, with `above`/`below` lines around each, other stretches folded
@@ -741,7 +742,7 @@ export default function LinesView(p: LinesViewProps) {
     const el = scRef.current;
     if (!el || !geo.scaled) return;
     const wheel = (e: WheelEvent) => {
-      if (e.ctrlKey || Math.abs(e.deltaY) < Math.abs(e.deltaX)) return;
+      if (isZoomWheel(e, keysNow().wheel) || Math.abs(e.deltaY) < Math.abs(e.deltaX)) return; // Ctrl/⌘+wheel = zoom (App)
       e.preventDefault();
       const rows = e.deltaMode === 1 ? e.deltaY : e.deltaMode === 2 ? e.deltaY * vis : e.deltaY / rowH;
       scrollToRow(rowAtScroll(el.scrollTop, countRef.current, rowH, el.clientHeight) + rows);
@@ -850,7 +851,21 @@ export default function LinesView(p: LinesViewProps) {
     const page = Math.max(1, Math.floor(viewH / rowH) - 1);
     const ctrl = e.ctrlKey || e.metaKey;
     let handled = true;
-    switch (e.key) {
+    // Home / End / PageUp / PageDown / Enter are settings (keybinds.ts, 「줄 목록 칸
+    // 안에서」); Ctrl(⌘)+Home / End stay as fixed aliases, like the editor's.
+    const bound = matchCommand(e.nativeEvent, "lines", keysNow().binds);
+    const key =
+      bound === "lvTop" ? "Home"
+      : bound === "lvEnd" ? "End"
+      : bound === "lvPageUp" ? "PageUp"
+      : bound === "lvPageDown" ? "PageDown"
+      : bound === "lvOpen" ? "Enter"
+      : ctrl && !e.altKey && (e.key === "Home" || e.key === "End") ? e.key
+      : e.key === "Home" || e.key === "End" || e.key === "PageUp" || e.key === "PageDown" || e.key === "Enter" ? "off" // remapped away: not even the browser's own scroll
+      : e.key;
+    switch (key) {
+      case "off":
+        break;
       case "ArrowDown":
         moveTo(sel ? h + 1 : h, e.shiftKey);
         break;

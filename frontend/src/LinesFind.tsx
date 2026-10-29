@@ -3,6 +3,7 @@ import { FilterFind } from "../wailsjs/go/main/App";
 import { linefilter } from "../wailsjs/go/models";
 import { compileRule, ruleCheck, type LogRule, type RuleKind, type RuleMatcher } from "./logHighlight";
 import "./LinesFind.css";
+import { formatCombo, keysNow, keyText, matchCommand, useKeys } from "./keybinds";
 
 // 「찾기」 (Ctrl+F) inside the 「🏷 태그 줄만」 view (2단계 판정 ③).
 //
@@ -286,15 +287,19 @@ export default function LinesFind(p: LinesFindProps) {
         (found.partial ? " · 거르는 중 — 지금까지" : "");
   }
   const where = p.all ? "읽기 보기 안에서 찾기" : "줄만 보기 안에서 찾기";
+  const ks = useKeys();
 
   const onKey = (e: React.KeyboardEvent) => {
+    // Esc / Enter are the box's own; 다음·이전 찾기 and 찾기 are settings (keybinds.ts)
+    const { binds } = keysNow();
+    const find = matchCommand(e.nativeEvent, "find", binds);
     if (e.key === "Escape") {
       e.preventDefault();
       p.onClose();
-    } else if (e.key === "Enter" || e.key === "F3") {
+    } else if (e.key === "Enter" || find === "findNext" || find === "findPrev") {
       e.preventDefault();
-      go(e.shiftKey ? -1 : 1);
-    } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "f") {
+      go(find === "findPrev" || (e.key === "Enter" && e.shiftKey) ? -1 : 1);
+    } else if (matchCommand(e.nativeEvent, "app", binds) === "find") {
       e.preventDefault();
       inputRef.current?.select();
     } else return;
@@ -321,10 +326,10 @@ export default function LinesFind(p: LinesFindProps) {
           ◂ 이 줄에서 찾은 글자는 안 보이는 뒤쪽(4KB 넘어)에 있습니다
         </span>
       )}
-      <button className="lv-btn" title="이전 (Shift+Enter)" disabled={!rows.length} onClick={() => go(-1)}>
+      <button className="lv-btn" title={`이전 (${formatCombo("shift+enter", ks.mac)}${ks.binds.findPrev ? " · " + keyText("findPrev", ks) : ""})`} disabled={!rows.length} onClick={() => go(-1)}>
         ▲
       </button>
-      <button className="lv-btn" title="다음 (Enter)" disabled={!rows.length} onClick={() => go(1)}>
+      <button className="lv-btn" title={`다음 (Enter${ks.binds.findNext ? " · " + keyText("findNext", ks) : ""})`} disabled={!rows.length} onClick={() => go(1)}>
         ▼
       </button>
       <label className="lv-find-opt" title="대소문자 구분">

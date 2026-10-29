@@ -25,6 +25,7 @@ import { html } from "@codemirror/lang-html";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { columnSelection } from "./columnSelection";
 import { logHighlighter, type LogRule, type RuleLayers } from "./logHighlight";
+import { keysNow, matchCommand } from "./keybinds";
 
 export type EditorLang = "markdown" | "html" | "plaintext";
 
@@ -60,6 +61,21 @@ const findPrevSafe = (v: EditorView) => {
   const q = getSearchQuery(v.state);
   return q && q.search && q.valid ? findPrevious(v) : true;
 };
+
+// 다음·이전 찾기 (F3 / Shift+F3 by default) are settings (keybinds.ts), read at
+// each key press so a remap acts at once. Ahead of the default keymap, so a key
+// bound here wins over CodeMirror's own use of it.
+const findKeys = Prec.high(
+  EditorView.domEventHandlers({
+    keydown: (e, view) => {
+      const id = matchCommand(e, "find", keysNow().binds);
+      if (!id) return false;
+      e.preventDefault();
+      (id === "findPrev" ? findPrevSafe : findNextSafe)(view);
+      return true;
+    },
+  })
+);
 
 function langExtension(lang: EditorLang) {
   if (lang === "markdown") return markdown();
@@ -164,12 +180,11 @@ export default function CodeEditor({
         oneDark,
         fontComp.current.of(fontSizeTheme(fontSize)),
         modeComp.current.of(modeExtension(mode)),
+        findKeys,
         logComp.current.of(logRules ? logHighlighter(logRules) : []),
         keymap.of([
           indentWithTab,
           { key: "Mod-d", run: selectNextOccurrence, preventDefault: true },
-          { key: "F3", run: findNextSafe, preventDefault: true },
-          { key: "Shift-F3", run: findPrevSafe, preventDefault: true },
           ...defaultKeymap,
           ...historyKeymap,
         ]),

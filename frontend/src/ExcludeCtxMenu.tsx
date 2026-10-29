@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { ClipboardSetText } from "../wailsjs/runtime";
 import { addExcludeText, excludeMenuState, excludeTarget, menuText, MAX_PICK } from "./excludeCtx";
 import type { ExcludeRule } from "./lineView";
+import { formatCombo, keysNow } from "./keybinds";
 
 type Target = { pattern: string; problem: string };
 const elementOf = (n: Node | null): Element | null => (n ? (n instanceof Element ? n : n.parentElement) : null);
@@ -111,7 +112,7 @@ export function useExcludeCtx(scRef: React.RefObject<HTMLElement>, list: () => E
             void ClipboardSetText(menu.copy);
           }}
         >
-          복사<span className="menu-key">Ctrl+C</span>
+          복사<span className="menu-key">{formatCombo("ctrl+c", keysNow().mac)}</span>
         </button>
         <div className="menu-sep" />
         <button
