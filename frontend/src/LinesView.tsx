@@ -189,6 +189,11 @@ export default function LinesView(p: LinesViewProps) {
   // The user scrolled / moved (wheel, keys, the bar) just now: a scroll then is
   // theirs, not the view settling.
   const userAt = useRef(0);
+  // When the rows were last dropped for a change (a chip, a tag, the context,
+  // a restart): only a press / wheel / key after it makes a scroll the user's.
+  // One just before (a row clicked, then a chip at once) is not what scrolled
+  // the emptied list, and taking it for the user's lost the place (10-29).
+  const changeAt = useRef(0);
   // Bumped by the user's own move (released): a way back to a place asked
   // before it (a chip, a context change) does not land over it — End / Home
   // pressed while the view was going back was lost (.18 부하 시험 10-29).
@@ -528,6 +533,7 @@ export default function LinesView(p: LinesViewProps) {
     let alive = true;
     let unsub = () => {};
     let mine = "";
+    changeAt.current = performance.now();
     epochRef.current++;
     jobRef.current = "";
     storeRef.current.clear();
@@ -653,6 +659,7 @@ export default function LinesView(p: LinesViewProps) {
     anchorLine.current = line > 1 ? line : 0;
     restLine.current = line > 1 ? line : 0;
     abRef.current = { A, B };
+    changeAt.current = performance.now();
     epochRef.current++;
     storeRef.current.clear();
     emptyAt.current.clear();
@@ -757,7 +764,7 @@ export default function LinesView(p: LinesViewProps) {
     // the user's own scroll (not the list emptied / filled while settling): the
     // view stays where they put it, a seek still on its way does not pull it back
     if (ownScroll.current) ownScroll.current = false;
-    else if (performance.now() - userAt.current < 300) released();
+    else if (performance.now() - userAt.current < 300 && userAt.current >= changeAt.current) released();
     // Not while the view is going back to a line: filtering again empties the
     // list, the browser clamps scrollTop to the short list, and with a scan
     // that is done at once (a cached one — a 「제외」 chip switched off) that

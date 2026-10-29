@@ -54,6 +54,7 @@ import { ropeOf, textOfParts } from "./editParts";
 import { upgradeCommonDefaults } from "./commonDefaults";
 import RuleFromText, { selectionForRule } from "./RuleFromText";
 import { editorExcludeTarget, ExcludeEditorItem } from "./ExcludeCtxMenu";
+import { settleEditorSelection, trackEditorPress } from "./editorCtxPick";
 import { linesFindHost, openLinesFind } from "./LinesFind";
 import MultiGrid, { paneStyle, usePaneSizes } from "./MultiGrid";
 import type { PaneSizes } from "./paneSizes";
@@ -3631,11 +3632,13 @@ function App() {
   );
 
   // --- editor right-click context menu --------------------------------------
+  useEffect(() => trackEditorPress(), []); // the selection at a context click's press (editorCtxPick.ts)
   const openCtxMenu = useCallback((e: React.MouseEvent) => {
     // Let the find/replace inputs use the browser's native text menu.
     if ((e.target as HTMLElement).closest(".find-panel")) return;
     e.preventDefault();
     const v = getFocusedView();
+    if (v) settleEditorSelection(v); // the menu's selection = the one shown (editorCtxPick.ts)
     const hasSel = v ? v.state.selection.ranges.some((r) => !r.empty) : false;
     let inOk = false;
     let rule = { pattern: "", problem: "글자를 먼저 고르세요", line: "" };

@@ -1168,6 +1168,11 @@ func (j *job) runAppend(st fileState, fp fingerprint) {
 	kc := sort.Search(len(j.commits), func(i int) bool { return j.commits[i].tmpEnd > rp.tmp })
 	j.commits = append([]commit(nil), j.commits[:kc]...)
 	j.scannedLines, j.scannedOff, j.totalLines = rp.line-1, rp.tmp, 0
+	if j.tempFile != "" {
+		// the temp copy is cut back to the restart point below (decoded again
+		// from there): nothing past it is readable until the decode writes it
+		j.size = rp.tmp
+	}
 	j.invalid -= j.invalidTail
 	j.invalidTail = 0
 	if j.invalidLine >= rp.line {
@@ -1206,6 +1211,14 @@ func (j *job) runAppend(st fileState, fp fingerprint) {
 			return err
 		}
 		defer tmp.Close()
+		// The copy is decoded again from the restart point: drop what the last
+		// decode wrote past it. The new text can be shorter — a UTF-16 / CP949
+		// file read with a character half written ended in U+FFFD (3 bytes) that
+		// the finished character replaces with fewer, and the rest of the old
+		// tail stayed after the new end as a garbage line (「��」, 10-29).
+		if err := tmp.Truncate(rp.tmp); err != nil {
+			return err
+		}
 		sr = newScanRun(j, tempFile, rp.tmp, rp.line-1, false)
 		j.setSR(sr)
 		var pw sync.WaitGroup

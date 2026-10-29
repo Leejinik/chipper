@@ -9,11 +9,13 @@
 // two-finger tap (the contextmenu event only) on, beside or away from the text.
 //  A. 「🏷 줄만」 rows   B. 「📖 읽기」 rows   C. the whole-file editor's menu
 //  D. a big file, in the middle: the place is kept after a quick pick
+//  E. the same file: a left click in the list (a row picked, a drag) and then at
+//     once a re-filter (a chip switched, a chip added from the menu) keeps the place
 // Set-up copied from exclude-ctx-e2e.cjs (frontend/dist + the REAL engine via
 // the Go helper TestFilterE2EServer, the other bindings faked on the Node side).
 //
 //   cd frontend && npm run build && node tests/mac-exclude-e2e.cjs
-//   MODES=chromium,webkit,webkit+mac (default)   ONLY=A,B,C,D   TABLE=<file> (the comparison as JSON)
+//   MODES=chromium,webkit,webkit+mac (default)   ONLY=A,B,C,D,E   TABLE=<file> (the comparison as JSON)
 //   PLAYWRIGHT=<path to playwright package>  (default D:/QA/workspace/playwright/node_modules/playwright)
 const http = require("http");
 const fs = require("fs");
@@ -668,10 +670,13 @@ async function main() {
         if (want("C")) {
           console.log(`C. [${mode}] 전체 보기 편집기: 끌어 고르기 → 우클릭 「🚫 줄만 보기 제외에 추가」`);
           const cs = [
-            { id: "1", name: "놓은 자리 우클릭", how: "right", at: (w) => [w.x1 - 1, w.y], must: true },
-            { id: "2", name: "끝에서 반 글자 오른쪽 우클릭", how: "right", at: (w) => [w.x1 + w.cw * 0.6, w.y], must: false },
+            { id: "1", name: "놓은 자리 우클릭", how: "right", at: (w) => [w.x1 - 1, w.y] },
+            { id: "2", name: "끝에서 반 글자 오른쪽 우클릭", how: "right", at: (w) => [w.x1 + w.cw * 0.6, w.y] },
+            { id: "4", name: "시작에서 반 글자 왼쪽 우클릭", how: "right", at: (w) => [w.x0 - w.cw * 0.6, w.y] },
+            { id: "5", name: "끝 바로 다음 글자 위 우클릭", how: "right", at: (w) => [w.x1 + w.cw * 1.4, w.y] },
+            { id: "6", name: "가운데 두 손가락 탭(contextmenu 만)", how: "tap", at: (w) => [(w.x0 + w.x1) / 2, w.y] },
           ];
-          if (mac) cs.push({ id: "3", name: "가운데 Ctrl+클릭", how: "ctrl", at: (w) => [(w.x0 + w.x1) / 2, w.y], must: true });
+          if (mac) cs.push({ id: "3", name: "가운데 Ctrl+클릭", how: "ctrl", at: (w) => [(w.x0 + w.x1) / 2, w.y] }, { id: "7", name: "끝 옆 Ctrl+클릭", how: "ctrl", at: (w) => [w.x1 + w.cw * 0.6, w.y] });
           for (const c of cs) {
             const { be, ctx, page } = await fresh({ on: false, above: 1, below: 1, off: [], ex: [] });
             await page.waitForSelector(".cm-content");
@@ -682,9 +687,11 @@ async function main() {
             const [x, y] = c.at(w);
             await ctxAt(page, c.how, x, y);
             const m = await menuOf(page, true);
-            table.push({ mode, sec: "C" + c.id, step: "편집기 " + c.name, shown: await selNow(page), menu: menuStr(m, "🚫 줄만 보기 제외에 추가: ") });
-            if (c.must) ok(`C${c.id} ${c.name} → 「commonConnection」`, !!m && m.on && m.text === "🚫 줄만 보기 제외에 추가: 「commonConnection」", m);
-            else ok(`C${c.id} ${c.name} → 고른 글자이거나 꺼짐 (다른 글자는 아님)`, !!m && (m.on ? m.text === "🚫 줄만 보기 제외에 추가: 「commonConnection」" : m.why.includes("먼저 고르세요")), m);
+            await sleep(150); // CodeMirror has read whatever the press did to the screen's selection
+            const shown = await selNow(page);
+            table.push({ mode, sec: "C" + c.id, step: "편집기 " + c.name, shown, menu: menuStr(m, "🚫 줄만 보기 제외에 추가: ") });
+            ok(`C${c.id} ${c.name} → 「commonConnection」`, !!m && m.on && m.text === "🚫 줄만 보기 제외에 추가: 「commonConnection」", m);
+            ok(`C${c.id} … 화면 선택도 같은 글자 (메뉴 = 화면)`, shown === "commonConnection", shown);
             if (m && m.on) {
               await page.click(".ctx-menu .exclude-from-text-item");
               await sleep(700);
@@ -698,6 +705,29 @@ async function main() {
             }
             await ctx.close();
           }
+        }
+
+        if (want("C")) {
+          const { ctx, page } = await fresh({ on: false, above: 1, below: 1, off: [], ex: [] });
+          await page.waitForSelector(".cm-content");
+          await until(async () => (await page.textContent(".cm-content")).includes("60 plain"));
+          const w = await textBox(page, ".cm-content", "commonConnection");
+          await drag(page, w.x0 + 1, w.y, w.x1 - 1, w.y);
+          await sleep(150);
+          const k = await textBox(page, ".cm-content", "keepalive", 1); // line 14
+          await ctxAt(page, "right", (k.x0 + k.x1) / 2, k.y);
+          const m = await menuOf(page, true);
+          await sleep(150);
+          const shown = await selNow(page);
+          table.push({ mode, sec: "C8", step: "편집기 먼 다른 줄 「keepalive」 위 우클릭", shown, menu: menuStr(m, "🚫 줄만 보기 제외에 추가: ") });
+          // far away: the menu stays on CodeMirror's selection as before (engines differ
+          // in whether it has read the press yet), and the screen shows that one
+          ok(
+            "C8 편집기 먼 다른 줄 위 우클릭 → 메뉴 = 화면",
+            !!m && (m.on ? m.text === `🚫 줄만 보기 제외에 추가: 「${shown}」` : m.why.includes("먼저 고르세요") && shown === ""),
+            { m, shown }
+          );
+          await ctx.close();
         }
 
         // ============ D. a big file, in the middle: a quick pick keeps the place ===============
@@ -726,7 +756,7 @@ async function main() {
           await page.mouse.down({ button: "right" });
           await page.mouse.up({ button: "right" });
           await page.click(".lv-exctx-add");
-          await until(async () => (await viewData(page)).state === "done" && /제외/.test(await stat(page)), 8000);
+          await until(async () => (await viewData(page)).state === "done" && /제외/.test(await stat(page)), 20000);
           const after = await until(async () => {
             await sleep(400);
             const l = await topLine(page);
@@ -734,6 +764,76 @@ async function main() {
           }, 5000);
           ok(`D 첫 칩 뒤에도 보던 자리 근처 (${before} → ${after})`, after >= before - 5 && after <= before + 10, { before, after });
           ok("D … 그 근처에 걸린 「commonConnection」 줄 없음", !(await page.$$eval(".lv-row.lv-hit[data-line]", (els) => els.some((e) => e.textContent.includes("commonConnection")))));
+          await ctx.close();
+        }
+        // ============ E. a left click in the list, then a quick re-filter =====================
+        if (want("E")) {
+          console.log(`E. [${mode}] 큰 파일 가운데: 줄 목록 안 왼쪽 클릭 뒤 바로 다시 거르기 (300ms 안)`);
+          const be = makeBackend();
+          be.st.tags = tags;
+          be.st.session = session([tab("t1", P("big.log"), { lines: { on: true, above: 0, below: 1, off: [], ex: [{ pattern: "commonConnection", kind: "text", caseSensitive: false, on: false }] } })], "t1");
+          const { ctx, page } = await openPage(browser, url, be, { width: 1400, height: 900 }, inits);
+          await page.waitForSelector(".lines-view");
+          await waitDone(page);
+          const goMiddle = async () => {
+            const r0 = await goPost("FilterRowOfLine", [lastStart(be).result.jobId, 0, 1, 100000]);
+            await page.evaluate((r) => {
+              const sc = document.querySelector(".lv-scroll");
+              sc.scrollTop = r * parseFloat(getComputedStyle(document.querySelector(".lv-row")).height);
+            }, r0);
+            await sleep(500);
+            return topLine(page);
+          };
+          const settled = async (exOn) => {
+            await until(async () => (await viewData(page)).state === "done" && /제외/.test(await stat(page)) === exOn, 20000);
+            return until(async () => {
+              await sleep(400);
+              const l = await topLine(page);
+              return l > 1 && l;
+            }, 5000);
+          };
+          const near = (a, b) => b >= a - 5 && b <= a + 10;
+          // 1. a row clicked (picked), then the chip at once
+          let before = await goMiddle();
+          ok("E (앞 조건) 가운데 (줄 ~100,000)", before > 99000 && before < 101000, before);
+          // the k-th row with a line on screen, and one of its words
+          const visRow = (k, word) =>
+            page.evaluate(
+              ({ k, word }) => {
+                const sc = document.querySelector(".lv-scroll").getBoundingClientRect();
+                const rows = [...document.querySelectorAll(".lv-row[data-line]")]
+                  .filter((e) => e.getBoundingClientRect().top > sc.top && e.getBoundingClientRect().bottom < sc.bottom)
+                  .sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top)
+                  .filter((e) => !word || e.textContent.includes(word));
+                return rows[k] ? +rows[k].dataset.line : 0;
+              },
+              { k, word }
+            );
+          await page.click(`.lines-view .lv-row[data-line="${await visRow(4)}"] .lv-text`);
+          await page.click(".lv-ex .lv-chip-t");
+          let after = await settled(true);
+          ok(`E1 줄을 누르고 곧바로 칩 켜기 → 보던 자리 근처 (${before} → ${after})`, near(before, after), { before, after });
+          // 2. a drag in a row, then the chip off at once
+          before = await goMiddle();
+          const w = await textBox(page, `.lines-view .lv-row[data-line="${await visRow(2, "request")}"] .lv-text`, "request").catch(() => null);
+          if (w) await drag(page, w.x0 + 1, w.y, w.x1 - 1, w.y);
+          await page.click(".lv-ex .lv-chip-t");
+          after = await settled(false);
+          ok(`E2 끌어 고르고 곧바로 칩 끄기 → 보던 자리 근처 (${before} → ${after})`, !!w && near(before, after), { before, after, w: !!w });
+          // 3. the scroll bar (the user's own scroll) still wins over the way back
+          before = await goMiddle();
+          const n3 = calls(be, "FilterStart").length;
+          await page.click(".lv-ex .lv-chip-t");
+          await until(() => calls(be, "FilterStart").length > n3, 3000); // the re-filter has started
+          // … and has rows again (an emptied list has nothing to scroll: no scroll event at all)
+          await until(() => page.evaluate(() => document.querySelector(".lv-space").offsetHeight > 2000), 20000);
+          await page.evaluate(() => {
+            const sc = document.querySelector(".lv-scroll");
+            sc.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+            sc.scrollTop = 0; // the user dragged the bar to the top meanwhile
+          });
+          after = await settled(true);
+          ok(`E3 다시 거르는 사이 사용자가 막대로 맨 위로 → 맨 위 그대로 (${before} → ${after})`, after < 50, { before, after });
           await ctx.close();
         }
       } finally {
