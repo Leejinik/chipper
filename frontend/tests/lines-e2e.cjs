@@ -703,6 +703,11 @@ async function main() {
       const readCalls = [...calls(be, "ReadFile"), ...calls(be, "ReadFileAs")];
       const gzRead = readCalls.some((x) => x.args[0] === gz);
       ok(".gz → 줄만 보기 탭(읽지 않음, 인코딩 자동)", sGz.args[0].path === gz && sGz.args[0].encoding === "" && !gzRead, { request: sGz.args[0], readsBeforeGz, readCount: readCalls.length, gzRead, reads: readCalls.map((x) => x.args[0]) });
+      // .gz 는 크기 상관없이 기본 📖(user 10-29, agy F-08 — 예전: 작은 .gz 는 🏷) → 🏷 로 바꿔 거름을 봄
+      ok(".gz → 기본 📖 읽기", (await page.$eval(".lines-view", (e) => e.dataset.mode)) === "all");
+      await page.click('.mpane-foot .lines-seg button:nth-child(2)');
+      await page.waitForSelector('.lines-view[data-mode="lines"]');
+      await waitDone(page);
       w = refRows(blines, (l) => /\bERROR\b/.test(l), 0, 3); // common only: outside the folder tag? no — same folder
       const shownGz = (await until(async () => {
         const r = await shownRows(page);
@@ -887,7 +892,9 @@ async function main() {
         const { ctx, page } = await openPage(browser, url, be);
         await page.click('.empty-actions button:has-text("파일 열기")');
         await page.waitForSelector(".lines-view", { timeout: 3000 }).catch(() => {});
-        ok("작은 .gz → 묻지 않고 줄만 보기", !!(await page.$(".lines-view")) && !(await page.$(".big-ask")) && (await hasRow(page, "70:ERROR e70")));
+        // .gz 는 크기 상관없이 기본 📖(user 10-29, agy F-08 — 예전: 🏷 줄만 보기에서 70번째 ERROR 줄)
+        await until(async () => await hasRow(page, "1:info 1"), 5000);
+        ok("작은 .gz → 묻지 않고 📖 읽기", (await page.$eval(".lines-view", (e) => e.dataset.mode).catch(() => "")) === "all" && !(await page.$(".big-ask")) && (await hasRow(page, "1:info 1")));
         await ctx.close();
       }
       // the tree: the same rule; the .gz row says it opens as 줄만 보기

@@ -674,7 +674,7 @@ func (a *App) readDoc(path string) (FileDoc, error) {
 	content, enc := decodeBytes(data)
 	doc := a.docWithStat(path, content)
 	doc.Encoding = enc
-	doc.Binary = looksBinary([]byte(content))
+	doc.Binary = binaryText(data, content, enc)
 	fillFormat(&doc, data, content)
 	return doc, nil
 }
@@ -696,7 +696,7 @@ func (a *App) ReadFileAs(path string, enc string) (FileDoc, error) {
 	}
 	doc := a.docWithStat(path, content)
 	doc.Encoding = enc
-	doc.Binary = looksBinary([]byte(content))
+	doc.Binary = binaryText(data, content, enc)
 	fillFormat(&doc, data, content)
 	return doc, nil
 }

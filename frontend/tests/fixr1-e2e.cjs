@@ -91,7 +91,7 @@ const goGet = (p) => fetch(`http://${goAddr}${p}`).then((r) => r.text());
 
 // ---- fake Go side for everything else ------------------------------------------------------
 function makeBackend() {
-  const st = { session: "", tags: null, calls: [], files: {}, sizes: {}, scan: null, openFiles: [], tooBigSave: 0, saveAs: [], gone: new Set() };
+  const st = { session: "", tags: null, calls: [], files: {}, sizes: {}, scan: null, openFiles: [], tooBigSave: 0, saveAs: [], gone: new Set(), bin: new Set() };
   const read = (p) => {
     if (st.files[p] != null) return st.files[p];
     if (fs.existsSync(p)) return fs.readFileSync(p, "utf8");
@@ -114,7 +114,7 @@ function makeBackend() {
     },
     ReadFile: (p) => {
       const c = read(p);
-      return { path: p, name: p.split(/[\\/]/).pop(), content: c, modTime: 1, size: c.length, encoding: "utf-8", binary: false, canceled: false };
+      return { path: p, name: p.split(/[\\/]/).pop(), content: c, modTime: 1, size: c.length, encoding: "utf-8", binary: st.bin.has(p), canceled: false };
     },
     ReadFileAs: (p, enc) => ({ ...impl.ReadFile(p), encoding: enc }),
     StatFile: (p) => {
@@ -133,6 +133,14 @@ function makeBackend() {
     OpenFolderDialog: () => (st.scan ? st.scan.root : ""),
     OpenFilesDialog: () => st.openFiles,
     OpenFileDialog: () => st.openFiles[0] || "",
+    // 「화면 메모리 정리」 (Go hostgc): st.gcReady = it is there; st.onGc = what a collection does (the test lowers the fake heap)
+    SniffBinary: (p) => st.bin.has(p),
+    HostGCReady: () => !!st.gcReady,
+    CollectWindowGarbage: async () => {
+      st.gcCalls = (st.gcCalls || 0) + 1;
+      if (st.onGc) await st.onGc();
+      return st.gcReady ? "" : "off: test";
+    },
     SaveFileDialog: (name) => {
       st.saveAs.push(name);
       return { canceled: true };
@@ -802,6 +810,85 @@ async function main() {
       if (ask) await page.click('.big-ask button:has-text("📖 읽기")');
       await sleep(400);
       ok("… 📖 로 열림(편집기로 안 읽음)", calls(be, "ReadFile").length === 0 && calls(be, "EditOpenBegin").length === 0);
+      await ctx.close();
+    }
+    // =============== J2. 「화면 메모리 정리」(호스트 GC) 가 있으면: ✏️ 는 켜져 있고 누르면 정리 뒤 진행 · 내려놓은 뒤 높으면 정리 =====
+    if (want("J2")) {
+      console.log("J2. 호스트 GC 있음: 힙이 차 있어도 ✏️ 켜짐 → 누르면 정리 → 내려가면 확인 창 / 안 내려가면 이유 · 📖 로 내려놓은 뒤 힙 60% 넘으면 정리");
+      const GB = 1 << 30;
+      const be = makeBackend();
+      be.st.gcReady = true;
+      be.st.sizes[P("a.log")] = 60 * MB;
+      be.st.sizes[P("b.log")] = 60 * MB;
+      be.st.session = session([Rt("t1", P("a.log")), Rt("t2", P("b.log"))], "t1");
+      const { ctx, page } = await openSess(be);
+      be.st.onGc = () => page.evaluate((GB) => (window.__fakeHeap = { used: 1.0 * GB, limit: 4.1 * GB }), GB);
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.4 * GB, limit: 4.1 * GB }), GB);
+      await sleep(2500);
+      ok("힙 3.4GB 여도 ✏️ 켜짐(누르면 정리)", await page.$eval(".lv-edit", (b) => !b.disabled));
+      await page.click(".lv-edit");
+      await page.waitForSelector('.choice-ask[data-kind="edit"]', { timeout: 5000 }).catch(() => {});
+      ok("누름 → 정리 1번 → 힙 내려감 → 확인 창", (be.st.gcCalls || 0) === 1 && (await page.$('.choice-ask[data-kind="edit"]')) !== null, be.st.gcCalls);
+      await page.click('.choice-ask [data-choice="edit"]');
+      await page.waitForSelector(".cm-editor", { timeout: 15000 });
+      // let it go with the heap high: collected once
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 2.8 * GB, limit: 4.1 * GB }), GB);
+      const c0 = be.st.gcCalls;
+      await seg(page, 1);
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      await until(() => be.st.gcCalls > c0, 3000);
+      ok("✏️ → 📖, 힙 2.8GB(60% 넘음) → 정리 1번", be.st.gcCalls === c0 + 1, be.st.gcCalls - c0);
+      // low heap: not collected
+      await page.click(".lv-edit");
+      await page.click('.choice-ask [data-choice="edit"]');
+      await page.waitForSelector(".cm-editor", { timeout: 15000 });
+      const c1 = be.st.gcCalls;
+      await seg(page, 1);
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      await sleep(1200);
+      ok("✏️ → 📖, 힙 1.0GB → 정리 안 함(창이 멈추니)", be.st.gcCalls === c1, be.st.gcCalls - c1);
+      // the collection does not bring it down: the reason, no question
+      be.st.onGc = null;
+      await page.evaluate((GB) => (window.__fakeHeap = { used: 3.4 * GB, limit: 4.1 * GB }), GB);
+      await page.click(".tabs-scroll .tab:nth-child(2)");
+      await page.waitForSelector('.lines-view[data-mode="all"]');
+      await sleep(300);
+      await page.click(".lv-edit");
+      await sleep(4000);
+      ok("정리해도 안 내려감 → 확인 창 없이 이유(「다시 여세요」)", (await page.$(".choice-ask")) === null && (await flashText(page)).includes("다시 여세요"), await flashText(page));
+      await ctx.close();
+    }
+    // =============== M. F-08 .gz 는 크기 상관없이 📖 · F-09 이진 파일은 막지 않고 경고 + 📖 =====================
+    if (want("M")) {
+      console.log("M. 작은 .gz → 📖 · 이진 파일 → 알림 없이 📖 + 「텍스트 파일이 아닌 것 같습니다」 · 보통 파일엔 띠 없음");
+      fs.writeFileSync(P("struct.bin"), "x");
+      const be = makeBackend();
+      be.st.bin.add(P("struct.bin"));
+      be.st.bin.add(P("h.log"));
+      be.st.sizes[P("h.log")] = 150 * MB;
+      be.st.session = session([], "");
+      be.st.openFiles = [P("small.log.gz")];
+      const { ctx, page } = await openSess(be);
+      await page.keyboard.press("Control+o");
+      await page.waitForSelector(".lines-view", { timeout: 8000 });
+      ok("작은 .gz(1KB) → 기본 📖 읽기", (await mode(page)) === "all", await mode(page));
+      ok("… 보통 파일엔 경고 띠 없음", (await page.$(".lv-binwarn")) === null);
+      be.st.openFiles = [P("struct.bin")];
+      const d0 = page.__dialogs.length;
+      await page.keyboard.press("Control+o");
+      await until(async () => (await page.$$(".tabs-scroll .tab")).length === 2, 5000);
+      await page.waitForSelector(".lv-binwarn", { timeout: 5000 }).catch(() => {});
+      ok(
+        "이진 파일(작음) → 알림 없이 📖 + 경고 띠",
+        page.__dialogs.length === d0 && (await mode(page)) === "all" && (await page.$(".cm-editor")) === null && (await page.$eval(".lv-binwarn", (e) => e.textContent).catch(() => "")).includes("텍스트 파일이 아닌 것 같습니다"),
+        page.__dialogs.slice(d0)
+      );
+      be.st.openFiles = [P("h.log")];
+      await page.keyboard.press("Control+o");
+      await until(async () => (await page.$$(".tabs-scroll .tab")).length === 3, 5000);
+      await page.waitForSelector(".lv-binwarn", { timeout: 5000 }).catch(() => {});
+      ok("이진으로 보이는 150MB → 📖 + 경고 띠", (await mode(page)) === "all" && (await page.$(".lv-binwarn")) !== null);
       await ctx.close();
     }
     // =============== K. 6칸에서 칸 머리(칩 여러 줄·찾기 칸)가 길어도 칸 아래 단추 줄이 보이고 눌림 =========

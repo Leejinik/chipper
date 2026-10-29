@@ -134,6 +134,18 @@ export function MarkReleaseNotesSeen() {
   return window['go']['main']['App']['MarkReleaseNotesSeen']();
 }
 
+export function HostGCReady() {
+  return window['go']['main']['App']['HostGCReady']();
+}
+
+export function CollectWindowGarbage() {
+  return window['go']['main']['App']['CollectWindowGarbage']();
+}
+
+export function SniffBinary(arg1) {
+  return window['go']['main']['App']['SniffBinary'](arg1);
+}
+
 export function MemInfo() {
   return window['go']['main']['App']['MemInfo']();
 }

@@ -72,6 +72,9 @@ import {
   EditOpenBegin,
   EditOpenChunk,
   EditOpenEnd,
+  HostGCReady,
+  CollectWindowGarbage,
+  SniffBinary,
   SaveFileDialog,
   SaveFileAs,
   SaveFile,
@@ -303,6 +306,10 @@ const CHUNK_OPEN = 8 << 20;
 // Reading a file in waits for room in the window's JS memory too (wholeBudget.ts
 // heapWhyOf — the budget alone let 99MB×7 ✏️ ↔ 📖 kill the window, .18 10-29).
 const heapWhy = (size: number): string => heapWhyOf(jsHeap(), size, fmtSize);
+// 「화면 메모리 정리」 after letting text go only from this share of the heap's limit
+// up (≈2.5GB of 4.1GB): below it there is room enough, and a collection stops
+// the window for about a second.
+const HEAP_GC_AFTER = 0.6;
 // Never read a file larger than this (Go readDoc refuses it too): 500MB+ crashed
 // the WebView in the v1.2.0 tests. 384MB = 402,653,184 bytes.
 const TOO_BIG_FILE = 384 << 20;
@@ -994,6 +1001,8 @@ function App() {
   const closeAfterSave = useRef(new Set<string>());
   // file sizes known (normPath → bytes): the open gate, a stat of a 📖 tab
   const knownSize = useRef(new Map<string, number>());
+  // files that look binary (Go SniffBinary / a read that said so): normPath → yes/no
+  const binFiles = useRef(new Map<string, boolean>());
   const [, setSizeTick] = useState(0);
   const bigAskRef = useRef<BigAsk | null>(null);
   const [treeOpen, setTreeOpen] = useState<boolean>(true); // directory tree beside the panes
@@ -1143,6 +1152,54 @@ function App() {
   // (then the tab counts it — never both) or the read ends without it.
   const readingWhole = useRef(new Map<string, number>());
   const heapWaitAt = useRef(0); // when ✏️ / a read was last refused for the heap (heapWhy)
+  // 「화면 메모리 정리」 (Go CollectWindowGarbage, hostgc_windows.go): the host
+  // makes the window collect the text it let go. null = not known yet, false =
+  // off (not Windows, Wails not as expected, a call failed): the heap limit
+  // then refuses as before (「다시 여세요」).
+  const hostGc = useRef<boolean | null>(null);
+  const gcBusy = useRef<Promise<boolean> | null>(null);
+  // Ask for it and wait until the heap came down (≤ 3s). true = under the limit now.
+  const collectHeap = useCallback((): Promise<boolean> => {
+    if (!hostGc.current) return Promise.resolve(false);
+    if (gcBusy.current) return gcBusy.current;
+    const run = (async () => {
+      const before = jsHeap();
+      const t0 = performance.now();
+      const r = await CollectWindowGarbage().catch((e) => String(e));
+      if (r && r !== "busy") hostGc.current = false; // off for this run (Go logs why once)
+      if (!r && before) {
+        for (let i = 0; i < 20; i++) {
+          const h = jsHeap();
+          if (!h || h.used < before.used * 0.9) break;
+          await new Promise((res) => window.setTimeout(res, 150));
+        }
+      }
+      document.documentElement.dataset.hostGcMs = String(Math.round(performance.now() - t0));
+      setSizeTick((n) => n + 1);
+      const h = jsHeap();
+      return !h || !heapWhyOf(h, 1, fmtSize);
+    })();
+    gcBusy.current = run;
+    run.finally(() => (gcBusy.current = null));
+    return run;
+  }, []);
+  // After text was let go (✏️ → 📖, a closed editor tab): collect at once when
+  // the heap is high (≥ HEAP_GC_AFTER of its limit) — a collection stops the
+  // window for ~1s (.18: 0.75–1.2s), so not every time.
+  useEffect(() => {
+    HostGCReady()
+      .then((v) => {
+        if (hostGc.current === null) hostGc.current = !!v;
+        setSizeTick((n) => n + 1);
+      })
+      .catch(() => (hostGc.current = false));
+  }, []);
+  const collectSoon = useCallback(() => {
+    window.setTimeout(() => {
+      const h = jsHeap();
+      if (hostGc.current && h && h.used > h.limit * HEAP_GC_AFTER) void collectHeap();
+    }, 400);
+  }, [collectHeap]);
   // What a tab holding text counts (WHOLE_BUDGET): the file's bytes, or the
   // text's length when that is more (typed / pasted, never-saved text).
   const tabHeld = useCallback((t: Tab): number => {
@@ -1868,7 +1925,8 @@ function App() {
       }
       // BIG_FILE and over (.gz too, and files over the open limit): 「📖 읽기
       // 보기」 at once — no question, nothing read into the window (user 10-28).
-      const isRead = (x: { size: number }) => x.size >= BIG_FILE;
+      // .gz too, whatever its size (user 10-29, agy F-08)
+      const isRead = (x: { path: string; size: number }) => x.size >= BIG_FILE || isGz(x.path);
       // Over the whole-file total, every file of some size is asked about too
       // (small ones add up), with no 「전체 열기」.
       const wb = wholeBudget(held, sized.map((x) => ({ size: x.size, whole: !noWhole(x) && !isRead(x) })));
@@ -1967,7 +2025,12 @@ function App() {
         if (size >= CHUNK_OPEN) flash("");
         if (!res) continue;
         if (res.binary) {
-          skipped.push((res.name || baseName(path)) + " (텍스트 문서가 아님)");
+          // not text (agy F-09, user 10-29): 📖 with the warning, not the editor, not refused
+          binFiles.current.set(normPath(path), true);
+          const id = openLinesOnly(path, "", true);
+          seen.add(normPath(path));
+          lastId = id;
+          ids.push(id);
           continue;
         }
         const lang = langFromPath(res.path);
@@ -2291,7 +2354,8 @@ function App() {
       const na = next[idx] ?? next[idx - 1] ?? next[0];
       setActiveId(na ? na.id : "");
     }
-  }, []);
+    if (!t.needsLoad) collectSoon(); // its text let go
+  }, [collectSoon]);
 
   // --- 「📖 읽기 보기」 ↔ 「🏷 줄만」 ↔ 「✏️ 편집」 of a big file ------------------
   // (readview-qa-plan.md §2 is the contract: R 📖 · L 🏷 · C question · W ⏳ ·
@@ -2400,7 +2464,8 @@ function App() {
         if (why) return why;
         const hw = heapWhy(size);
         if (hw) heapWaitAt.current = Date.now();
-        return hw;
+        // 「화면 메모리 정리」 on: ✏️ stays on — pressing it collects first (requestEdit)
+        return hostGc.current ? "" : hw;
       }
       return "";
     },
@@ -2592,6 +2657,21 @@ function App() {
         setSizeTick((n) => n + 1);
         return;
       }
+      // the window's memory is near its ceiling: 「화면 메모리 정리」 once, then on if it came down
+      if (heapWhy(size)) {
+        if (hostGc.current) {
+          flash("화면 메모리를 정리하는 중…");
+          await collectHeap();
+          flash("");
+        }
+        const hw = heapWhy(size);
+        if (hw) {
+          flash(hw);
+          setSizeTick((n) => n + 1);
+          return;
+        }
+        if (choiceRef.current || editLoadRef.current) return;
+      }
       const from: "R" | "L" = t2.lines?.on && !t2.lines.read ? "L" : "R";
       const c = await askChoice(
         "edit",
@@ -2613,7 +2693,7 @@ function App() {
       }
       void startEditLoad(now, size, from);
     },
-    [askChoice, editWhy, flash, heldWhole, setLines, startEditLoad, paneToEdit]
+    [askChoice, editWhy, flash, heldWhole, setLines, startEditLoad, paneToEdit, collectHeap]
   );
 
   // To 「📖 읽기」 (E / D / L → R): the editor's text is let go (the budget
@@ -2654,9 +2734,10 @@ function App() {
               }
         )
       );
+      if (!t.needsLoad) collectSoon(); // its text let go
       return true;
     },
-    [askDirty, flash, saveTab]
+    [askDirty, flash, saveTab, collectSoon]
   );
   toReadRef.current = toRead;
   // Headless tests (window.__chipperTestHooks set before the page loads):
@@ -2682,6 +2763,22 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [choice]);
   // the size of a 📖 tab (its 「✏️」 says at once whether the budget allows)
+  // 「텍스트 파일이 아닌 것 같습니다」 above 📖 / 🏷 (agy F-09): the file's start, once
+  useEffect(() => {
+    for (const t of tabs) {
+      const k = normPath(t.path);
+      if (!t.lines?.on || !t.path || binFiles.current.has(k)) continue;
+      binFiles.current.set(k, false);
+      SniffBinary(t.path)
+        .then((b) => {
+          if (b) {
+            binFiles.current.set(k, true);
+            setSizeTick((n) => n + 1);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [tabs]);
   const statting = useRef(new Set<string>());
   useEffect(() => {
     for (const t of tabs) {
@@ -2776,8 +2873,12 @@ function App() {
       if (size >= CHUNK_OPEN) flashRef.current("");
       if (res && !res.binary) keepDoc(t.id, res);
       if (res?.binary) {
-        res = null;
-        err = "텍스트 파일이 아닙니다.";
+        // not text: 📖 with the warning instead of the editor (agy F-09)
+        binFiles.current.set(normPath(t.path), true);
+        loadingIds.current.delete(t.id);
+        readingWhole.current.delete("tab:" + t.id);
+        setTabs((prev) => prev.map((x) => (x.id === t.id ? { ...x, lines: { ...(x.lines ?? DEFAULT_LINES), on: true, read: true, big: true }, encAuto: true } : x)));
+        return;
       }
     } catch (e) {
       err = String(e);
@@ -2892,7 +2993,7 @@ function App() {
   const openOne = useCallback(async (path: string, label: string): Promise<string | null> => {
     // Bundle callers also use this helper; never send compressed logs through
     // the editor reader even if a caller misses the lines-only routing.
-    if (isGz(path)) return openLinesOnly(path, label);
+    if (isGz(path)) return openLinesOnly(path, label, true);
     const existing = tabsRef.current.find((t) => samePath(t.path, path));
     if (existing) {
       if (!existing.label) {
@@ -2909,7 +3010,11 @@ function App() {
     }
     const res = await readForEditor(path, "", size, (n) => flash(`「${label || baseName(path)}」 여는 중 ${n}%`));
     if (size >= CHUNK_OPEN) flash("");
-    if (!res || res.binary) return null;
+    if (!res) return null;
+    if (res.binary) {
+      binFiles.current.set(normPath(path), true);
+      return openLinesOnly(path, label, true); // 📖 with the warning (agy F-09)
+    }
     const lang = langFromPath(res.path);
     const tab = makeTab({
       title: res.name,
@@ -4345,6 +4450,11 @@ function App() {
     const ro = l.big && t.needsLoad && !!readOnlyWhy(t.path, Math.max(0, sizeOf(t)));
     return (
       <div className="lines-host" data-tab={t.id}>
+      {binFiles.current.get(normPath(t.path)) && (
+        <div className="lv-binwarn" role="note">
+          ⚠ 텍스트 파일이 아닌 것 같습니다 — 글자가 깨져 보일 수 있습니다
+        </div>
+      )}
       <LinesView
         key={t.id + (read ? "#all" : "#lines")}
         mode={read ? "all" : "lines"}

@@ -70,6 +70,12 @@ export function LoadTags():Promise<main.TagsLoad>;
 
 export function MarkReleaseNotesSeen():Promise<void>;
 
+export function HostGCReady():Promise<boolean>;
+
+export function CollectWindowGarbage():Promise<string>;
+
+export function SniffBinary(arg1:string):Promise<boolean>;
+
 export function MemInfo():Promise<main.MemInfo>;
 
 export function OpenDefaultAppsSettings():Promise<void>;
