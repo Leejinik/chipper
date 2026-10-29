@@ -8,7 +8,7 @@
 // A selection that cannot be a chip (none, several lines, spaces only, too
 // long, the 「⋯ 생략」 row) leaves the item off with the reason under it.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ClipboardSetText } from "../wailsjs/runtime";
 import { addExcludeText, excludeMenuState, excludeTarget, menuText, MAX_PICK } from "./excludeCtx";
@@ -52,10 +52,49 @@ export function rowsSelection(root: HTMLElement): { text: string; copy: string; 
 const MW = 300;
 const MH = 120;
 
+// A context click's press, taken before the browser handles it (capture, on
+// the rows): what was picked then. The press itself changes the selection when
+// it is not inside it — every engine collapses it there, and on macOS WebKit
+// then selects the word under the pointer before the contextmenu event
+// (EventHandler::sendContextMenuEvent, EditingBehavior Mac: 10-29, a Mac
+// tester's drag → 제외 gave another word's chip or a disabled 「공백뿐」 item).
+// A press just beside the picked text (its row, a character or so off its
+// ends) still means that text; one further away is about what is under it.
+type Press = { x: number; y: number; t: number; range: Range; rects: DOMRect[]; text: string; copy: string };
+const PRESS_MS = 5000; // a menu opened later than this after the press (held button) is not about it
+function nearPicked(p: Press, x: number, y: number): boolean {
+  const n = Math.max(1, [...p.text].length);
+  return p.rects.some((r) => {
+    const m = Math.min(24, Math.max(6, (1.5 * r.width) / n)); // about 1.5 characters
+    return y >= r.top - 1 && y <= r.bottom + 1 && x >= r.left - m && x <= r.right + m;
+  });
+}
+
 // The rows' right-click menu: 복사 (the browser's menu it replaces had it) and
 // 🚫 제외에 추가. `list`/`onChange` = the tab's chips (LinesView props).
 export function useExcludeCtx(scRef: React.RefObject<HTMLElement>, list: () => ExcludeRule[], onChange: (next: ExcludeRule[]) => void) {
-  const [menu, setMenu] = useState<{ x: number; y: number; copy: string; t: Target } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; copy: string; t: Target; seq: number } | null>(null);
+  const menuRef = useRef(menu);
+  menuRef.current = menu;
+  const seqRef = useRef(0);
+  const press = useRef<Press | null>(null);
+  useEffect(() => {
+    const el = scRef.current;
+    if (!el) return;
+    const down = (e: MouseEvent) => {
+      press.current = null;
+      if (!(e.button === 2 || (e.button === 0 && e.ctrlKey))) return; // right button, Ctrl+click (macOS)
+      const ws = window.getSelection();
+      if (!ws || ws.rangeCount === 0 || ws.isCollapsed) return;
+      const r = ws.getRangeAt(0);
+      if (!el.contains(r.commonAncestorContainer)) return;
+      const s = rowsSelection(el);
+      if (!s.text || s.problem) return;
+      press.current = { x: e.clientX, y: e.clientY, t: performance.now(), range: r.cloneRange(), rects: [...r.getClientRects()], text: s.text, copy: s.copy };
+    };
+    el.addEventListener("mousedown", down, true);
+    return () => el.removeEventListener("mousedown", down, true);
+  }, [scRef]);
   useEffect(() => {
     if (!menu) return;
     const close = () => setMenu(null);
@@ -84,9 +123,37 @@ export function useExcludeCtx(scRef: React.RefObject<HTMLElement>, list: () => E
     const root = scRef.current;
     if (!root) return;
     e.preventDefault();
-    const s = rowsSelection(root);
+    let s = rowsSelection(root);
+    const pd = press.current;
+    press.current = null;
+    if (pd && s.text !== pd.text && performance.now() - pd.t < PRESS_MS && nearPicked(pd, pd.x, pd.y)) {
+      // the press beside the picked text changed the selection: that text, shown picked again
+      const ws = window.getSelection();
+      if (ws && root.contains(pd.range.commonAncestorContainer)) {
+        ws.removeAllRanges();
+        ws.addRange(pd.range);
+      }
+      s = { text: pd.text, copy: pd.copy, problem: "" };
+    }
     const t = s.problem ? { pattern: "", problem: s.problem } : excludeTarget(s.text);
-    setMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - MW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - MH)), copy: s.copy, t });
+    const seq = ++seqRef.current;
+    setMenu({ x: Math.max(0, Math.min(e.clientX, window.innerWidth - MW)), y: Math.max(0, Math.min(e.clientY, window.innerHeight - MH)), copy: s.copy, t, seq });
+    // The button is still down (macOS sends the menu on the press): its release
+    // may clear the selection (a Ctrl+click on it does) — show the text the
+    // menu is about picked again while the menu is open.
+    const ws = window.getSelection();
+    if (e.buttons !== 0 && ws && ws.rangeCount > 0 && !ws.isCollapsed && root.contains(ws.getRangeAt(0).commonAncestorContainer)) {
+      const keep = ws.getRangeAt(0).cloneRange();
+      const was = String(ws);
+      const up = () =>
+        setTimeout(() => {
+          const w2 = window.getSelection();
+          if (!w2 || menuRef.current?.seq !== seq || String(w2) === was || !root.contains(keep.commonAncestorContainer)) return;
+          w2.removeAllRanges();
+          w2.addRange(keep);
+        }, 0); // after the release's own handling
+      window.addEventListener("mouseup", up, { capture: true, once: true });
+    }
   };
 
   let node: React.ReactNode = null;

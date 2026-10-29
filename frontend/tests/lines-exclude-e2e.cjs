@@ -15,7 +15,8 @@ const os = require("os");
 const path = require("path");
 const zlib = require("zlib");
 const { spawn, execFileSync } = require("child_process");
-const { chromium } = require(process.env.PLAYWRIGHT || "D:/QA/workspace/playwright/node_modules/playwright");
+// BROWSER=webkit runs the same steps in WebKit (the engine of the macOS app's WKWebView; 10-29 맥 「제외」)
+const chromium = require(process.env.PLAYWRIGHT || "D:/QA/workspace/playwright/node_modules/playwright")[process.env.BROWSER || "chromium"];
 
 const DIST = path.join(__dirname, "..", "dist");
 const ROOT = path.join(__dirname, "..", "..");

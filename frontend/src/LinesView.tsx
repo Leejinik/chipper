@@ -1250,7 +1250,12 @@ export default function LinesView(p: LinesViewProps) {
           onKeyDown(e);
         }}
         onWheel={() => (userAt.current = performance.now())}
-        onPointerDown={() => (userAt.current = performance.now())}
+        // a press that can move the view (the bar, a drag); not a context click (right
+        // button, Ctrl+click on macOS): 「🚫 제외에 추가」 picked within 300ms of it
+        // took the list emptying for the user's scroll and lost the place (10-29)
+        onPointerDown={(e) => {
+          if (e.button === 0 && !e.ctrlKey) userAt.current = performance.now();
+        }}
         onContextMenu={exCtx.onContextMenu}
       >
         <div className="lv-space" style={{ height: Math.max(geo.height, 1) }}>
