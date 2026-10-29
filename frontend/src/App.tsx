@@ -416,6 +416,41 @@ const PANE_MODES: { id: PaneMode; icon: string; tip: string }[] = [
 
 const noop = () => {};
 
+// What the long-lived views (a pane's 📖 / 🏷 LinesView, an editor) are handed
+// to call back is made out here, not in App's render: a closure made in a
+// render keeps that render's whole scope — its `tabs`, with every tab's text as
+// it was then. A 📖 pane keeps closures of its props for long (the wheel
+// listener of a scaled list, its find's effects; CodeMirror keeps the editor's
+// from its mount), so each kept an old `tabs` and every text it held: 99MB × 7
+// ✏️ ↔ 📖 next to three 300MB 📖 panes kept about a file more each round
+// (.18, 10-29). These reach App only through `api.current` (the newest render's).
+interface ViewApi {
+  requestEdit: (id: string) => void;
+  setLines: (id: string, f: (l: LinesState) => LinesState) => void;
+  showWhole: (id: string, line?: number) => void;
+  leaveLines: (id: string, line: number) => void;
+  initialDoc: (id: string, seq: number) => string | Text;
+  markEdited: (id: string) => void;
+  flush: (id: string, seq: number, text: string) => void;
+  setView: (id: string, v: EditorView | null) => void;
+}
+type ViewApiRef = { current: ViewApi };
+const linesHandlers = (api: ViewApiRef, id: string) => ({
+  onEdit: () => api.current.requestEdit(id),
+  onContext: (above: number, below: number) => api.current.setLines(id, (x) => ({ ...x, above, below })),
+  onToggleTag: (n: string) => api.current.setLines(id, (x) => ({ ...x, off: x.off.includes(n) ? x.off.filter((y) => y !== n) : [...x.off, n] })),
+  onExclude: (ex: NonNullable<LinesState["ex"]>) => api.current.setLines(id, (x) => ({ ...x, ex })),
+  onJump: (line: number) => api.current.showWhole(id, line),
+  onFull: () => api.current.showWhole(id),
+  onLeave: (line: number) => api.current.leaveLines(id, line),
+});
+const editorHandlers = (api: ViewApiRef, id: string, seq: number) => ({
+  initialDoc: () => api.current.initialDoc(id, seq),
+  onDocChanged: () => api.current.markEdited(id),
+  onFlush: (text: string) => api.current.flush(id, seq, text),
+  onView: (v: EditorView | null) => api.current.setView(id, v),
+});
+
 // Shortcuts that act on the focused document, ignored while it is 🔒 locked
 // (find, new, open, zoom and Ctrl+Tab still work; the toolbar mouse still does).
 // 「다른 이름으로」(Ctrl+Shift+S) stays allowed: it never touches the file shown,
@@ -1070,6 +1105,7 @@ function App() {
   // view; tab.content is refreshed only when the editor goes away (onFlush) or a
   // save writes it, so typing never copies the whole document.
   const viewsRef = useRef(new Map<string, EditorView>());
+  const viewApi = useRef<ViewApi>(null as unknown as ViewApi); // set every render (below), see ViewApi
   // A big file read in pieces: its editor document made from the pieces
   // (editParts.ts), used while the tab's content is still that text.
   const bigDocs = useRef(new Map<string, { content: string; text: Text }>());
@@ -4107,6 +4143,12 @@ function App() {
       const t = tabs.find((x) => x.id === id);
       if (!t || t.content !== b.content) bigDocs.current.delete(id);
     }
+    // the session's byte counts of texts let go: the cache kept the text itself
+    // (a 16MB tab ✏️ → edited → 📖 kept its edited text until it was edited again)
+    for (const [id, c] of textBytesCache.current) {
+      const t = tabs.find((x) => x.id === id);
+      if (!t || t.content !== c.s) textBytesCache.current.delete(id);
+    }
   }, [tabs]);
   const initialDocFor = useCallback((id: string, seq: number) => {
     const parked = flushedRef.current.get(id);
@@ -4415,6 +4457,18 @@ function App() {
       </span>
     );
   };
+  // What the panes' views and the editors call back (see ViewApi): this
+  // render's functions, reached through the ref only.
+  viewApi.current = {
+    requestEdit: (id) => void requestEdit(id),
+    setLines,
+    showWhole: (id, line) => void showWhole(id, line),
+    leaveLines: (id, line) => linesAnchor.current.set(id, line),
+    initialDoc: initialDocFor,
+    markEdited,
+    flush: flushContent,
+    setView,
+  };
   // 「태그 줄만」 of a tab: filtered by the saved tags (filterStore), coloured
   // like the editor (live tags).
   const renderLines = (t: Tab, focused: boolean) => {
@@ -4447,6 +4501,7 @@ function App() {
       );
     const read = !!l.read;
     const why = l.big ? editWhy(t, sizeOf(t)) : "";
+    const h = linesHandlers(viewApi, t.id); // not closures of this render (see ViewApi)
     const ro = l.big && t.needsLoad && !!readOnlyWhy(t.path, Math.max(0, sizeOf(t)));
     return (
       <div className="lines-host" data-tab={t.id}>
@@ -4458,7 +4513,7 @@ function App() {
       <LinesView
         key={t.id + (read ? "#all" : "#lines")}
         mode={read ? "all" : "lines"}
-        onEdit={l.big ? () => void requestEdit(t.id) : undefined}
+        onEdit={l.big ? h.onEdit : undefined}
         editWhy={why}
         readOnly={ro}
         fullLabel={l.big ? "📖 전체" : undefined}
@@ -4475,15 +4530,13 @@ function App() {
         dirty={t.dirty}
         autoFocus={focused}
         initialLine={linesAnchor.current.get(t.id) ?? 0}
-        onContext={(above, below) => setLines(t.id, (x) => ({ ...x, above, below }))}
-        onToggleTag={(n) =>
-          setLines(t.id, (x) => ({ ...x, off: x.off.includes(n) ? x.off.filter((y) => y !== n) : [...x.off, n] }))
-        }
+        onContext={h.onContext}
+        onToggleTag={h.onToggleTag}
         exclude={l.ex ?? []}
-        onExclude={(ex) => setLines(t.id, (x) => ({ ...x, ex }))}
-        onJump={(line) => void showWhole(t.id, line)}
-        onFull={() => void showWhole(t.id)}
-        onLeave={(line) => linesAnchor.current.set(t.id, line)}
+        onExclude={h.onExclude}
+        onJump={h.onJump}
+        onFull={h.onFull}
+        onLeave={h.onLeave}
       />
       </div>
     );
@@ -4722,15 +4775,12 @@ function App() {
           ) : (
             <CodeEditor
               key={t.id + "#" + t.reloadSeq}
-              initialDoc={() => initialDocFor(t.id, t.reloadSeq)}
+              {...editorHandlers(viewApi, t.id, t.reloadSeq) /* not closures of this render (see ViewApi) */}
               lang={t.lang}
               fontSize={fontSize}
               mode={saving.includes(t.id) && slot.mode === "edit" ? "read" : slot.mode /* S: no typing while saving */}
               autoFocus={focused}
               logRules={logOn(t) ? layersForTab(t) : null}
-              onDocChanged={() => markEdited(t.id)}
-              onFlush={(text) => flushContent(t.id, t.reloadSeq, text)}
-              onView={(v) => setView(t.id, v)}
               onSelectionChange={focused ? onSelectionChange : noop}
             />
           )}
@@ -5358,14 +5408,11 @@ function App() {
                   <ErrorBoundary what="편집기" resetKey={active.id + "#" + active.reloadSeq}>
                     <CodeEditor
                       key={active.id + "#" + active.reloadSeq}
-                      initialDoc={() => initialDocFor(active.id, active.reloadSeq)}
+                      {...editorHandlers(viewApi, active.id, active.reloadSeq) /* not closures of this render (see ViewApi) */}
                       lang={active.lang}
                       fontSize={fontSize}
                       mode={saving.includes(active.id) ? "read" : "edit" /* S: no typing while saving */}
                       logRules={logOn(active) ? layersForTab(active) : null}
-                      onDocChanged={() => markEdited(active.id)}
-                      onFlush={(text) => flushContent(active.id, active.reloadSeq, text)}
-                      onView={(v) => setView(active.id, v)}
                       onSelectionChange={onSelectionChange}
                     />
                   </ErrorBoundary>

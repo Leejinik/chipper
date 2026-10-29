@@ -186,7 +186,11 @@ const INIT = () => {
     /* no performance.memory */
   }
   window.__events = {};
-  const call = (name) => (...args) => window.__goCall(name, args);
+  // Wails hands every answer over as JSON text the page parses (window.wails.Callback →
+  // JSON.parse), so each is a new string; Playwright's binding can hand back the same
+  // string for the same text, which hid a text kept twice (O)
+  const fresh = (r) => (r == null ? r : JSON.parse(JSON.stringify(r)));
+  const call = (name) => (...args) => window.__goCall(name, args).then(fresh);
   window.go = { main: { App: new Proxy({}, { get: (_, name) => call(String(name)) }) } };
   window.runtime = new Proxy(
     {
@@ -938,6 +942,96 @@ async function main() {
       // from the 8th round on (every tab has been ✏️ → 📖 → ✏️ → D once: its steady cost is in)
       const grow = hs[hs.length - 1] - hs[n];
       ok(`GC 뒤 힙: 8바퀴 ${hs[n]}MB → 21바퀴 ${hs[hs.length - 1]}MB (늘어남 ${grow}MB ≤ 8MB, 파일 10MB)`, grow <= 8, hs);
+      await ctx.close();
+    }
+    // =============== O. 큰 📖 칸 조작과 ✏️ ↔ 📖 가 겹칠 때 옛 글자가 남지 않음 (.18 10-29 재현) ==================
+    // 4칸: 칸 0 = 편집 탭 3개(16MB, 조각 읽기)를 ✏️ ↔ 📖, 칸 1~3 = 줄이 많아 스크롤 막대가 줄어든 📖(바퀴 리스너가 붙음)
+    // 에서 찾기를 닫았다 다시 엶(칸 높이가 바뀌어 칸이 처리기를 다시 붙임). 칸이 그때 App 렌더의 클로저를 잡으면
+    // 그 렌더의 tabs 와 모든 탭 글자가 남아, 다 📖 로 돌려도 GC 뒤 힙이 파일 수만큼 높음.
+    if (want("O")) {
+      console.log("O. 큰 📖 칸 3개(찾기 닫기·열기) + 편집 3개 ✏️ ↔ 📖 — 다 📖 로 돌리면 GC 뒤 힙이 처음으로");
+      const ed = (k) => {
+        const ls = [];
+        let n = 0;
+        for (let i = 0; n < 16 * MB; i++) {
+          const l = `2026-10-29 01:00:00,000 INFO [e${k}] ${i % 97 === 0 ? "java.lang.Exception: failed " : "point ok "}line ${i} ${"abcdefghij".repeat(4)}\n`;
+          ls.push(l);
+          n += l.length;
+        }
+        fs.writeFileSync(P(`oe${k}.log`), ls.join(""));
+      };
+      for (let k = 0; k < 3; k++) ed(k);
+      const pl = [];
+      for (let i = 1; i <= 450000; i++) pl.push(`2026-10-29 01:00:00 INFO ${i % 101 === 0 ? "Exception " : ""}row ${i}`);
+      for (let k = 0; k < 3; k++) fs.writeFileSync(P(`op${k}.log`), pl.join("\n"));
+      const be = makeBackend();
+      const ts = [0, 1, 2].map((k) => Rt("e" + k, P(`oe${k}.log`))).concat([0, 1, 2].map((k) => Rt("p" + k, P(`op${k}.log`))));
+      const slots = Array.from({ length: 6 }, (_, i) => ({ tabId: i === 0 ? "e0" : i <= 3 ? "p" + (i - 1) : "", mode: "read", server: "" }));
+      be.st.session = session(ts, "e0", { multi: { on: true, count: 4, slots, bundle: null } });
+      const { ctx, page } = await openSess(be, { width: 1400, height: 900 });
+      const cdp = await ctx.newCDPSession(page);
+      const heapMB = async () => {
+        await cdp.send("HeapProfiler.collectGarbage");
+        await sleep(150);
+        await cdp.send("HeapProfiler.collectGarbage");
+        return Math.round((await cdp.send("Runtime.getHeapUsage")).usedSize / 1048576);
+      };
+      const PS = (i) => `.mpane[data-slot="${i}"]`;
+      const pick = (k) => page.selectOption(PS(0) + " .mp-pick", { index: k + 1 });
+      const edit = async () => {
+        await page.locator(PS(0) + ' .lines-view[data-mode="all"]').first().waitFor({ timeout: 30000 });
+        await until(async () => !(await page.$eval(PS(0) + " .lv-edit", (x) => x.disabled)), 10000);
+        await page.click(PS(0) + " .lv-edit");
+        await page.click('.choice-ask [data-choice="edit"]');
+        await page.locator(PS(0) + " .cm-editor").first().waitFor({ timeout: 60000 });
+      };
+      const toRead = async (k) => {
+        await pick(k);
+        await page.locator(PS(0) + " .cm-editor").first().waitFor();
+        await page.click(PS(0) + " .lines-seg.big button:nth-child(1)");
+        if (await page.locator('.choice-ask[data-kind="dirty"]').first().waitFor({ timeout: 800 }).then(() => true, () => false)) await page.click('.choice-ask [data-choice="discard"]');
+        await page.locator(PS(0) + ' .lines-view[data-mode="all"]').first().waitFor({ timeout: 30000 });
+      };
+      for (let i = 1; i <= 3; i++) await page.locator(PS(i) + ' .lines-view[data-state="done"]').first().waitFor({ timeout: 60000 });
+      const scaled = await page.$$eval(".mpane .lv-scroll", (els) => els.slice(1).map((e) => e.scrollHeight));
+      ok("칸 1~3 은 스크롤 막대가 줄어든 큰 목록(8,000,000px)", scaled.every((h) => h === 8000000), scaled);
+      for (let i = 1; i <= 3; i++) {
+        await page.click(PS(i) + " .lv-scroll");
+        await page.keyboard.press("Control+f");
+        await page.fill(PS(i) + " .lv-find-input", "Exception");
+      }
+      await sleep(500);
+      const base = await heapMB();
+      for (let k = 0; k < 3; k++) {
+        await pick(k);
+        await edit();
+      }
+      const hs = [];
+      for (let r = 0; r < 3; r++) {
+        for (let i = 1; i <= 3; i++) {
+          await page.click(PS(i) + " .lv-find-input");
+          await page.keyboard.press("Escape");
+          await page.click(PS(i) + " .lv-scroll");
+          await page.keyboard.press("Control+f");
+          await page.fill(PS(i) + " .lv-find-input", "Exception");
+          await page.keyboard.press("Enter");
+        }
+        for (let k = 0; k < 3; k++) {
+          await toRead(k);
+          await edit();
+          if (k === 0) {
+            await page.click(PS(0) + " .cm-content");
+            await page.keyboard.press("Control+End");
+            await page.keyboard.type(" R" + r);
+          }
+        }
+        hs.push(await heapMB());
+      }
+      ok(`✏️ 3개 들고 3바퀴: GC 뒤 힙 ${hs.join(" → ")}MB (늘어남 ${hs[2] - hs[0]}MB ≤ 8MB, 파일 16MB)`, hs[2] - hs[0] <= 8, hs);
+      for (let k = 0; k < 3; k++) await toRead(k);
+      await sleep(500);
+      const end = await heapMB();
+      ok(`다 📖 로 돌린 뒤 GC 뒤 힙 ${end}MB ≈ ✏️ 전 ${base}MB (남음 ${end - base}MB ≤ 8MB — 파일 3개면 48MB)`, end - base <= 8, { base, hs, end });
       await ctx.close();
     }
     // =============== K. 6칸에서 칸 머리(칩 여러 줄·찾기 칸)가 길어도 칸 아래 단추 줄이 보이고 눌림 =========
