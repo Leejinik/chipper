@@ -110,10 +110,12 @@ export interface LinesFindProps {
   done: boolean; // the scan has ended
   version: number; // Progress.version (appends)
   sel: number | null; // the selected row
+  top: number; // the first row on screen (where 다음/이전 starts when no row is selected)
   focusNonce: number; // changes when Ctrl+F asks again → focus the box
   scroller: RefObject<HTMLDivElement>;
   onGo: (row: number) => void; // select and show a row
   onClose: () => void;
+  all?: boolean; // in 「📖 읽기」 (every line), not 「🏷 줄만」
 }
 
 interface Found {
@@ -147,6 +149,9 @@ export default function LinesFind(p: LinesFindProps) {
   const [regex, setRegex] = useState(false);
   const [found, setFound] = useState<Found | null>(null);
   const [busy, setBusy] = useState(false);
+  // the selected match is in the part of a long line not shown (past 4KB):
+  // nothing to highlight, so it is said (agy F-10)
+  const [farCur, setFarCur] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const idRef = useRef(++hlSeq);
   const pr = useRef(p);
@@ -213,10 +218,14 @@ export default function LinesFind(p: LinesFindProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, p.done, tick]);
 
-  const rows = found?.rows ?? [];
+  // only rows of this job / layout: a chip switched (new job) or the context
+  // changed leaves the old rows wrong until the new answer (agy review)
+  const rows = found && found.key === key ? found.rows : [];
   const go = (dir: 1 | -1) => {
     if (!rows.length) return;
-    const cur = p.sel ?? -1;
+    // no row selected (a chip changed clears it): from what is on screen,
+    // not from the first match of the file (agy review)
+    const cur = p.sel ?? (dir > 0 ? p.top - 1 : p.top);
     let i: number;
     if (dir > 0) {
       i = after(rows, cur);
@@ -234,6 +243,7 @@ export default function LinesFind(p: LinesFindProps) {
     const sc = p.scroller.current;
     const all: Range[] = [];
     const cur: Range[] = [];
+    let far = false;
     if (sc && matcher && rows.length) {
       for (const el of sc.querySelectorAll<HTMLElement>(".lv-row[data-line]")) {
         const row = +(el.dataset.row ?? -1);
@@ -243,11 +253,15 @@ export default function LinesFind(p: LinesFindProps) {
         if (!t) continue;
         const rs = rowRanges(t, matcher);
         all.push(...rs);
-        if (row === p.sel) cur.push(...rs);
+        if (row === p.sel) {
+          cur.push(...rs);
+          far = !rs.length && !!t.querySelector(".lv-cut");
+        }
       }
     }
     hlAll.set(idRef.current, { all, cur });
     publish();
+    if (far !== farCur) setFarCur(far);
   });
   useEffect(
     () => () => {
@@ -271,6 +285,7 @@ export default function LinesFind(p: LinesFindProps) {
         (found.capped ? ` (앞 ${found.rows.length.toLocaleString("en-US")}줄로 이동)` : "") +
         (found.partial ? " · 거르는 중 — 지금까지" : "");
   }
+  const where = p.all ? "읽기 보기 안에서 찾기" : "줄만 보기 안에서 찾기";
 
   const onKey = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
@@ -287,20 +302,25 @@ export default function LinesFind(p: LinesFindProps) {
   };
 
   return (
-    <div className="lv-find" onKeyDown={onKey} role="search" aria-label="줄만 보기 안에서 찾기">
+    <div className="lv-find" onKeyDown={onKey} role="search" aria-label={where}>
       <span className="lv-find-title" title="걸러진 결과 전체(화면에 안 보이는 행 포함)에서 찾습니다. 「⋯ 생략」 줄 안은 찾지 않습니다">
         🔍
       </span>
       <input
         ref={inputRef}
         className={"lv-find-input" + (found?.issue && q ? " invalid" : "")}
-        placeholder="줄만 보기 안에서 찾기"
+        placeholder={where}
         value={q}
         onChange={(e) => setQ(e.target.value)}
       />
       <span className="lv-find-count" aria-live="polite">
         {status}
       </span>
+      {farCur && atText && (
+        <span className="lv-find-far" title="한 줄이 4KB 넘으면 앞 4KB 만 보여 줍니다 — 찾은 글자는 그 뒤에 있습니다">
+          ◂ 이 줄에서 찾은 글자는 안 보이는 뒤쪽(4KB 넘어)에 있습니다
+        </span>
+      )}
       <button className="lv-btn" title="이전 (Shift+Enter)" disabled={!rows.length} onClick={() => go(-1)}>
         ▲
       </button>

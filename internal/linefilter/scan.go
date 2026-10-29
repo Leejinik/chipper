@@ -22,9 +22,11 @@ type chunkResult struct {
 	hits        []hit
 	ext         []uint64 // the hits' rules past the 64th (see hit.ext)
 	longs       []longLine
-	full        bool  // stopped at MaxRows+1 hits (the rest of the region was not scanned)
-	invalid     int64 // bytes that are not UTF-8 (UTF-8 files only)
-	invalidLine int64 // region-local index of the first line with one, -1 none
+	full        bool    // stopped at MaxRows+1 hits (the rest of the region was not scanned)
+	invalid     int64   // bytes that are not UTF-8 (UTF-8 files only)
+	invalidLine int64   // region-local index of the first line with one, -1 none
+	excluded    int64   // matched lines left out by the exclude rules (whole region scanned so far)
+	exBefore    []int64 // per hit: excluded lines before it in the region (with exclude rules only)
 	err         error
 }
 
@@ -279,7 +281,7 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 		reg := sr.regions[sr.published]
 		base := sr.linesBefore + sr.linesDone + 1 // region-local 0 → file line number
 		j.mu.Lock()
-		room := j.e.opt.MaxRows + 1 - len(j.hits)
+		room := j.capHits() - len(j.hits)
 		hs := r.hits
 		trunc := false
 		if len(hs) >= room {
@@ -289,7 +291,7 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 			// grow by doubling (append grows 1.25x for big slices: 5x the
 			// final size allocated in total)
 			nc := max(2*cap(j.hits), 1024, need)
-			if lim := j.e.opt.MaxRows + 1; nc > lim {
+			if lim := j.capHits(); nc > lim {
 				nc = max(lim, need)
 			}
 			nh := make([]hit, len(j.hits), nc)
@@ -322,6 +324,19 @@ func (sr *scanRun) deposit(k int, res *chunkResult) {
 		j.invalid += r.invalid
 		if r.invalidLine >= 0 && j.invalidLine == 0 {
 			j.invalidLine = r.invalidLine + base
+		}
+		if j.ex != nil {
+			if trunc {
+				// only the lines before the last hit kept count as scanned
+				if len(hs) > 0 {
+					j.excluded += r.exBefore[len(hs)-1]
+				}
+			} else {
+				j.excluded += r.excluded
+			}
+		}
+		if j.all {
+			j.notePosLocked(base, reg.start)
 		}
 		if trunc {
 			j.truncated = true
@@ -407,6 +422,9 @@ func (sr *scanRun) worker(mem int) {
 	}
 	defer func() { j.e.pool <- wb }()
 	ws := newWState(j.m, mem)
+	if j.ex != nil {
+		ws.ex = newWState(j.ex, mem/4)
+	}
 	ws.fold = wb.fold
 	defer func() {
 		if cap(ws.fold) <= cap(wb.buf) {
@@ -433,16 +451,51 @@ func (sr *scanRun) worker(mem int) {
 		}
 		res := sr.processRegion(f, ws, wb, reg)
 		res.ext, ws.ext = ws.ext, nil
+		res.excluded, res.exBefore = ws.exN, ws.exBefore
+		ws.exN, ws.exBefore = 0, nil
 		ws.clearHi()
 		sr.deposit(k, res)
 	}
+}
+
+// excludedIn counts the matched lines the exclude rules leave out in [from,
+// to) of the scanned file, judged exactly as a scan of that region does (the
+// last line ends at `to`). Used before an append scans that part again.
+func (j *job) excludedIn(path string, from, to int64) int64 {
+	if j.ex == nil || to <= from {
+		return 0
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	wb := <-j.e.pool
+	if wb == nil || cap(wb.buf) < j.e.opt.BufSize {
+		wb = &workBuf{buf: make([]byte, 0, j.e.opt.BufSize)}
+	}
+	defer func() { j.e.pool <- wb }()
+	mem := j.e.opt.DFAMemory / j.e.opt.Workers
+	ws := newWState(j.m, mem)
+	ws.ex = newWState(j.ex, mem/4)
+	ws.fold = wb.fold
+	sr := newScanRun(j, path, from, 0, false)
+	res := sr.processRegion(f, ws, wb, region{from, to})
+	if cap(ws.fold) <= cap(wb.buf) {
+		wb.fold = ws.fold
+	}
+	putHits(res.hits)
+	if res.err != nil {
+		return 0
+	}
+	return ws.exN
 }
 
 // processRegion scans one region with the worker's buffer.
 func (sr *scanRun) processRegion(f *os.File, ws *wstate, wb *workBuf, r region) *chunkResult {
 	j := sr.j
 	res := &chunkResult{hits: getHits(), invalidLine: -1}
-	capHits := j.e.opt.MaxRows + 1
+	capHits := j.capHits()
 	buf := wb.buf[:0]
 	capb := cap(wb.buf)
 	off := r.start
@@ -568,7 +621,7 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 			}
 		}
 		var full bool
-		res.hits, _, full = ws.scanBuf(line, lineStart, res.hits, lineIdx, j.e.opt.MaxRows+1, nil)
+		res.hits, _, full = ws.scanBuf(line, lineStart, res.hits, lineIdx, j.capHits(), nil)
 		res.full = full
 		ws.fold, ws.low, ws.lowPtr = nil, nil, nil // do not keep a giant copy around
 		return next, nil
@@ -584,9 +637,24 @@ func (sr *scanRun) giantLine(f *os.File, ws *wstate, res *chunkResult, buf []byt
 			res.invalidLine = lineIdx
 		}
 	}
+	if ws.lineHit(mask) && ws.ex != nil {
+		// the exclude rules also judge the line piece by piece
+		xm, _, err := ws.ex.streamLine(f, lineStart, le, buf[:cap(buf)], &j.stop)
+		excl := ws.ex.lineHit(xm)
+		ws.ex.clearHi()
+		if err != nil {
+			ws.clearHi()
+			return 0, err
+		}
+		if excl {
+			ws.clearHi()
+			ws.exN++
+			mask = 0
+		}
+	}
 	if ws.lineHit(mask) {
 		res.hits = ws.addHit(res.hits, hit{line: lineIdx, start: lineStart, end: le, mask: mask, col: -1})
-		if len(res.hits) >= j.e.opt.MaxRows+1 {
+		if len(res.hits) >= j.capHits() {
 			res.full = true
 		}
 	}

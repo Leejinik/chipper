@@ -109,6 +109,22 @@ func TestFilterE2EServer(t *testing.T) {
 			var rs []linefilter.Rule
 			arg(0, &rs)
 			res = a.ValidateFilterRules(rs)
+		// 「✏️ 편집으로 열기」 in pieces and 🧠 (readview-e2e.cjs)
+		case "EditOpenBegin":
+			var p, enc string
+			arg(0, &p)
+			arg(1, &enc)
+			res, err = a.EditOpenBegin(p, enc)
+		case "EditOpenChunk":
+			var i int
+			arg(0, &id)
+			arg(1, &i)
+			res, err = a.EditOpenChunk(id, i)
+		case "EditOpenEnd":
+			arg(0, &id)
+			a.EditOpenEnd(id)
+		case "MemInfo":
+			res = a.MemInfo()
 		default:
 			http.Error(w, "unknown binding "+req.Name, 404)
 			return

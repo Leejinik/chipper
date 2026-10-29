@@ -49,6 +49,21 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%dKB", n>>10)
 }
 
+// lowDisk: while writing a temp copy, the volume is down to the margin even
+// after the idle cached copies gave way.
+func (j *job) lowDisk() (uint64, bool) {
+	free, err := j.e.diskFree(j.e.opt.TempDir)
+	if err != nil || free >= diskMargin {
+		return free, false
+	}
+	if j.e.freeIdleTemps(j) {
+		if f2, err := j.e.diskFree(j.e.opt.TempDir); err == nil {
+			free = f2
+		}
+	}
+	return free, free < diskMargin
+}
+
 // checkDisk fails when the temp volume has less than need + margin free.
 func (j *job) checkDisk(need int64) error {
 	if err := os.MkdirAll(j.e.opt.TempDir, 0o700); err != nil {
@@ -57,6 +72,13 @@ func (j *job) checkDisk(need int64) error {
 	free, err := j.e.diskFree(j.e.opt.TempDir)
 	if err != nil {
 		return nil // cannot tell: try anyway
+	}
+	if int64(free) < need+diskMargin && j.e.freeIdleTemps(j) {
+		// copies of finished scans nobody looks at (other chips / tags of a
+		// .gz or CP949 log: a copy each) gave way — look again
+		if f2, err := j.e.diskFree(j.e.opt.TempDir); err == nil {
+			free = f2
+		}
 	}
 	if int64(free) < need+diskMargin {
 		return fmt.Errorf("임시 폴더(%s)의 디스크 여유 공간이 부족합니다: 필요 약 %s, 남은 %s", j.e.opt.TempDir, humanBytes(need+diskMargin), humanBytes(int64(free)))
@@ -207,7 +229,7 @@ func (w *orderedWriter) write(x *decoded, off int64) error {
 	if err == nil {
 		w.written += int64(len(x.data))
 		if w.written>>28 != (w.written-int64(len(x.data)))>>28 { // every 256MB
-			if free, e := j.e.diskFree(j.e.opt.TempDir); e == nil && free < diskMargin {
+			if free, low := j.lowDisk(); low {
 				err = fmt.Errorf("임시 폴더(%s)의 디스크 여유 공간이 부족해 멈췄습니다 (남은 %s)", j.e.opt.TempDir, humanBytes(int64(free)))
 			}
 		}
@@ -509,7 +531,7 @@ func (j *job) inflate(sr *scanRun, g *gzipSource, tmp *os.File, enc string, skip
 						before := off
 						off += int64(len(pc.b))
 						if off>>28 != before>>28 {
-							if free, e := j.e.diskFree(j.e.opt.TempDir); e == nil && free < diskMargin {
+							if free, low := j.lowDisk(); low {
 								err = fmt.Errorf("임시 폴더(%s)의 디스크 여유 공간이 부족해 멈췄습니다 (남은 %s)", j.e.opt.TempDir, humanBytes(int64(free)))
 							}
 						}

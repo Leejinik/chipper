@@ -3,7 +3,10 @@
   display: contents; /* App's wrapper so Ctrl+F finds a tab's view; no box of its own */
 }
 .lv-find {
-  flex: none;
+  /* a short pane: gives way (scrolling inside) before the rows do */
+  flex: 0 1 auto;
+  min-height: 24px;
+  overflow-y: auto;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -30,6 +33,15 @@
 }
 .lv-find-input.invalid {
   border-color: var(--danger);
+}
+.lv-find-far {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent, #6aa9ff);
+  font-size: 11px;
 }
 .lv-find-count {
   min-width: 70px;

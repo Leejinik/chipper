@@ -207,6 +207,7 @@ func refText(raw string, maxDisplay int) (string, bool) {
 
 type refOpts struct {
 	above, below, maxRows, maxDisplay int
+	exclude                           []Rule                 // Request.Exclude: a matched line one of these matches is not a hit
 	giantCol                          func(lineLen int) bool // col unknown (-1) allowed for this line
 }
 
@@ -219,6 +220,7 @@ func refFilter(text string, rules []Rule, o refOpts) ([]Row, bool) {
 	}
 	hitRules := make([][]int, len(lines))
 	cols := make([]int32, len(lines))
+	excluded := refExcluded(lines, rules, o.exclude)
 	for li, ln := range lines {
 		best := -1
 		// ANSI colour codes: rules see the line without them (the editor's
@@ -237,6 +239,10 @@ func refFilter(text string, rules []Rule, o refOpts) ([]Row, bool) {
 			}
 		}
 		cols[li] = -1
+		if excluded[li] {
+			hitRules[li] = nil
+			best = -1
+		}
 		if best >= 0 {
 			cols[li] = refCol(ln, best)
 		}
@@ -279,6 +285,76 @@ func refFilter(text string, rules []Rule, o refOpts) ([]Row, bool) {
 		rows = append(rows, Row{Skip: gap, From: int64(len(lines)) - gap + 1, Col: -1})
 	}
 	return rows, false
+}
+
+// refExcluded: per line, whether it matches a filter rule and an exclude rule
+// (both on the line without its ANSI codes).
+func refExcluded(lines []string, rules, exclude []Rule) []bool {
+	out := make([]bool, len(lines))
+	if len(exclude) == 0 {
+		return out
+	}
+	bad := map[int]bool{}
+	for _, is := range Validate(rules) {
+		bad[is.Index] = true
+	}
+	xbad := map[int]bool{}
+	for _, is := range Validate(exclude) {
+		xbad[is.Index] = true
+	}
+	use := func(bad map[int]bool, rs []Rule, judge string) bool {
+		for ri, r := range rs {
+			if bad[ri] || !r.enabled() || r.Pattern == "" {
+				continue
+			}
+			if ok, _ := refMatch(r, judge); ok {
+				return true
+			}
+		}
+		return false
+	}
+	for li, ln := range lines {
+		judge, _ := refStripANSI(ln)
+		out[li] = use(bad, rules, judge) && use(xbad, exclude, judge)
+	}
+	return out
+}
+
+// refCounts: what Progress says when the scan is over — hits, excluded lines
+// and per-rule hits, the scan stopping at the (maxRows+1)-th hit (then only
+// the excluded lines before it count).
+func refCounts(text string, rules []Rule, o refOpts) (hits, excluded int64, ruleHits []int64, truncated bool) {
+	rows, _ := refFilter(text, rules, refOpts{maxRows: 1 << 30, maxDisplay: 1 << 30, exclude: o.exclude})
+	lines := refLines(text)
+	ex := refExcluded(lines, rules, o.exclude)
+	ruleHits = make([]int64, len(rules))
+	exAt := 0 // lines looked at for excluded so far
+	for _, r := range rows {
+		if !r.Hit {
+			continue
+		}
+		if hits == int64(o.maxRows) {
+			truncated = true // the (maxRows+1)-th hit: kept, the scan ends here
+		}
+		for ; exAt < int(r.Line-1); exAt++ {
+			if ex[exAt] {
+				excluded++
+			}
+		}
+		hits++
+		for _, k := range r.Rules {
+			ruleHits[k]++
+		}
+		if truncated {
+			return
+		}
+	}
+	for ; exAt < len(lines); exAt++ {
+		if ex[exAt] {
+			excluded++
+		}
+	}
+	return
 }
 
 // ---- helpers -----------------------------------------------------------------
@@ -383,6 +459,27 @@ var vocab = []string{
 	"a", "b", " ", "  ", "-", "(", ")", "[Note]", "é", "É", "\t", "foo.bar", "Exception", "NullPointerException",
 	"Kafka", "\u212Aafka", "ſ", "s", "S", "😀", "연결 실패",
 	"Дом", "дом", "ДОМ", "ΣΟΦΙΑ", "σοφια", "Σοφιας", "Straße", "STRASSE", "ÉCOLE", "école", "Ölçü", "öLÇÜ",
+}
+
+// randExcludes: 「🚫 제외」 rules — text (the chip's default kind) with and
+// without case, a word, regexes (one with an issue: RE2 cannot run it) and
+// one switched off.
+var randExcludes = []Rule{
+	{Kind: "text", Pattern: "x"},
+	{Kind: "text", Pattern: "ERR", CaseSensitive: true},
+	{Kind: "text", Pattern: "rebalance"},
+	{Kind: "text", Pattern: "kafka rebalance"},
+	{Kind: "text", Pattern: "가나"},
+	{Kind: "text", Pattern: "é"},
+	{Kind: "text", Pattern: "дом"},
+	{Kind: "text", Pattern: "info"},
+	{Kind: "text", Pattern: " "},
+	{Kind: "word", Pattern: "error"},
+	{Kind: "regex", Pattern: `\d{2}`},
+	{Kind: "regex", Pattern: `^[A-Z]`, CaseSensitive: true},
+	{Kind: "regex", Pattern: `(?<=x)y`},
+	{Kind: "text", Pattern: "a", On: on(false)},
+	{Kind: "regex", Pattern: `[A-Z]{3}\d|Exception$`, CaseSensitive: true},
 }
 
 var badBytes = []string{"\xff", "\xc3", "\xe0\x80", "\xed\xa0\x80"}
@@ -525,6 +622,15 @@ func TestRandomAgainstReference(t *testing.T) {
 				rules = append(rules, r)
 			}
 		}
+		// 「🚫 제외」: none in a third of the runs (the path without them)
+		var exclude []Rule
+		if rng.Intn(3) > 0 && os.Getenv("LF_NOEX") == "" {
+			for _, r := range randExcludes {
+				if rng.Intn(4) == 0 {
+					exclude = append(exclude, r)
+				}
+			}
+		}
 		k := knobs{
 			litPass:  []int{0, 4, 1000}[rng.Intn(3)],
 			group:    []int{1, 2, 3, 8}[rng.Intn(4)],
@@ -555,7 +661,7 @@ func TestRandomAgainstReference(t *testing.T) {
 			first = fileData[:appendSplit]
 		}
 		p := writeTemp(t, first)
-		res, err := e.Start(Request{Path: p, Encoding: enc, Rules: rules})
+		res, err := e.Start(Request{Path: p, Encoding: enc, Rules: rules, Exclude: exclude})
 		if err != nil {
 			restore()
 			t.Fatal(err)
@@ -576,7 +682,7 @@ func TestRandomAgainstReference(t *testing.T) {
 			defer restore()
 			defer func() {
 				if t.Failed() {
-					t.Logf("iter %d chunk=%d buf=%d maxRows=%d disp=%d A=%d B=%d knobs=%+v enc=%q gz=%v appendAt=%d rules=%+v\ndoc=%q", it, chunk, bufSize, maxRows, maxDisplay, above, below, k, enc, gz, appendSplit, rules, data)
+					t.Logf("iter %d chunk=%d buf=%d maxRows=%d disp=%d A=%d B=%d knobs=%+v enc=%q gz=%v appendAt=%d rules=%+v exclude=%+v\ndoc=%q", it, chunk, bufSize, maxRows, maxDisplay, above, below, k, enc, gz, appendSplit, rules, exclude, data)
 				}
 			}()
 			if prog.Error != "" {
@@ -596,8 +702,12 @@ func TestRandomAgainstReference(t *testing.T) {
 			text := refDecode(data, prog.Encoding)
 			colOK := func(g, w Row) bool { return g.Hit && g.Col == -1 && GiantMax < 1000 }
 			got, last := collect(t, e, res.JobID, above, below, rng)
-			want, wantTrunc := refFilter(text, rules, refOpts{above: above, below: below, maxRows: maxRows, maxDisplay: maxDisplay})
+			want, wantTrunc := refFilter(text, rules, refOpts{above: above, below: below, maxRows: maxRows, maxDisplay: maxDisplay, exclude: exclude})
 			diffRows(t, got, want, colOK)
+			wh, wx, wrh, wtr := refCounts(text, rules, refOpts{maxRows: maxRows, exclude: exclude})
+			if prog.Hits != wh || prog.Excluded != wx || prog.Truncated != wtr || !reflect.DeepEqual(prog.RuleHits, wrh) {
+				t.Fatalf("counts: hits %d excluded %d truncated %v ruleHits %v; want %d %d %v %v", prog.Hits, prog.Excluded, prog.Truncated, prog.RuleHits, wh, wx, wtr, wrh)
+			}
 			if (last.Truncated == "rows") != wantTrunc {
 				t.Fatalf("truncated=%q want %v", last.Truncated, wantTrunc)
 			}
@@ -610,8 +720,18 @@ func TestRandomAgainstReference(t *testing.T) {
 					x = v.j.appendLines[0] - int64(above)
 				}
 				v.j.mu.Unlock()
+				// The frontend drops from FilterRowOfLine(x) of the new layout:
+				// that row can be a gap that now reaches x though the old one
+				// ended before it (a last line that stopped being a hit — e.g.
+				// it grew and now holds an excluded string).
+				cut := len(before)
+				if x >= 1 {
+					if c, err := e.RowOfLine(res.JobID, above, below, x); err == nil {
+						cut = c
+					}
+				}
 				for i, r := range before {
-					if r.Line >= x || (r.Line == 0 && r.From+r.Skip-1 >= x) {
+					if i >= cut || r.Line >= x || (r.Line == 0 && r.From+r.Skip-1 >= x) {
 						break
 					}
 					if i >= len(got) || !reflect.DeepEqual(normRows([]Row{r}), normRows([]Row{got[i]})) {
@@ -622,7 +742,7 @@ func TestRandomAgainstReference(t *testing.T) {
 			// Another N on the same job must not rescan and must still match.
 			a2, b2 := rng.Intn(5), rng.Intn(5)
 			got2, _ := collect(t, e, res.JobID, a2, b2, rng)
-			want2, _ := refFilter(text, rules, refOpts{above: a2, below: b2, maxRows: maxRows, maxDisplay: maxDisplay})
+			want2, _ := refFilter(text, rules, refOpts{above: a2, below: b2, maxRows: maxRows, maxDisplay: maxDisplay, exclude: exclude})
 			diffRows(t, got2, want2, colOK)
 			if !prog.Truncated {
 				lines := len(refLines(text))

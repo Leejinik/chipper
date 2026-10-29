@@ -35,6 +35,8 @@ export namespace linefilter {
 	    totalBytes: number;
 	    scannedLines: number;
 	    hits: number;
+	    excluded: number;
+	    mode?: string;
 	    ruleHits: number[];
 	    encoding: string;
 	    compressed?: string;
@@ -47,6 +49,7 @@ export namespace linefilter {
 	    error?: string;
 	    totalLines: number;
 	    slowRules?: number[];
+	    slowExclude?: number[];
 	    version: number;
 	    tailLine: number;
 	    elapsedMs: number;
@@ -64,6 +67,8 @@ export namespace linefilter {
 	        this.totalBytes = source["totalBytes"];
 	        this.scannedLines = source["scannedLines"];
 	        this.hits = source["hits"];
+	        this.excluded = source["excluded"];
+	        this.mode = source["mode"];
 	        this.ruleHits = source["ruleHits"];
 	        this.encoding = source["encoding"];
 	        this.compressed = source["compressed"];
@@ -76,6 +81,7 @@ export namespace linefilter {
 	        this.error = source["error"];
 	        this.totalLines = source["totalLines"];
 	        this.slowRules = source["slowRules"];
+	        this.slowExclude = source["slowExclude"];
 	        this.version = source["version"];
 	        this.tailLine = source["tailLine"];
 	        this.elapsedMs = source["elapsedMs"];
@@ -185,6 +191,8 @@ export namespace linefilter {
 	    path: string;
 	    encoding?: string;
 	    rules: Rule[];
+	    exclude?: Rule[];
+	    mode?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Request(source);
@@ -195,6 +203,8 @@ export namespace linefilter {
 	        this.path = source["path"];
 	        this.encoding = source["encoding"];
 	        this.rules = this.convertValues(source["rules"], Rule);
+	        this.exclude = this.convertValues(source["exclude"], Rule);
+	        this.mode = source["mode"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
@@ -236,6 +246,7 @@ export namespace linefilter {
 	export class StartResult {
 	    jobId: string;
 	    issues?: RuleIssue[];
+	    excludeIssues?: RuleIssue[];
 	    cached: boolean;
 	    progress: Progress;
 	
@@ -247,6 +258,7 @@ export namespace linefilter {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.jobId = source["jobId"];
 	        this.issues = this.convertValues(source["issues"], RuleIssue);
+	        this.excludeIssues = this.convertValues(source["excludeIssues"], RuleIssue);
 	        this.cached = source["cached"];
 	        this.progress = this.convertValues(source["progress"], Progress);
 	    }
@@ -440,6 +452,43 @@ export namespace main {
 	        this.unchanged = source["unchanged"];
 	    }
 	}
+	export class EditOpen {
+	    id: string;
+	    doc: FileDoc;
+	    length: number;
+	    chunks: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new EditOpen(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.id = source["id"];
+	        this.doc = this.convertValues(source["doc"], FileDoc);
+	        this.length = source["length"];
+	        this.chunks = source["chunks"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class FileStat {
 	    exists: boolean;
 	    modTime: number;
@@ -454,6 +503,24 @@ export namespace main {
 	        this.exists = source["exists"];
 	        this.modTime = source["modTime"];
 	        this.size = source["size"];
+	    }
+	}
+	export class MemInfo {
+	    goWorkingSet: number;
+	    goHeap: number;
+	    webView: number;
+	    webViewProcs: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new MemInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.goWorkingSet = source["goWorkingSet"];
+	        this.goHeap = source["goHeap"];
+	        this.webView = source["webView"];
+	        this.webViewProcs = source["webViewProcs"];
 	    }
 	}
 	export class SaveOptions {

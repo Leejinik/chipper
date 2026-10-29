@@ -22,6 +22,12 @@ export function CheckForUpdate():Promise<updater.UpdateInfo>;
 
 export function CloseWithSession(arg1:string):Promise<void>;
 
+export function EditOpenBegin(arg1:string,arg2:string):Promise<main.EditOpen>;
+
+export function EditOpenChunk(arg1:string,arg2:number):Promise<string>;
+
+export function EditOpenEnd(arg1:string):Promise<void>;
+
 export function ExportTagsDialog(arg1:string,arg2:string):Promise<main.TagsExportResult>;
 
 export function ExportTagsTo(arg1:string,arg2:string):Promise<string>;
@@ -63,6 +69,14 @@ export function LoadSession():Promise<main.SessionLoad>;
 export function LoadTags():Promise<main.TagsLoad>;
 
 export function MarkReleaseNotesSeen():Promise<void>;
+
+export function HostGCReady():Promise<boolean>;
+
+export function CollectWindowGarbage():Promise<string>;
+
+export function SniffBinary(arg1:string):Promise<boolean>;
+
+export function MemInfo():Promise<main.MemInfo>;
 
 export function OpenDefaultAppsSettings():Promise<void>;
 

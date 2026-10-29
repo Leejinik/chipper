@@ -7,18 +7,98 @@
 // the result and changing the context sizes costs one page.
 
 import { noteRuleTrouble } from "./ruleHealth";
-import { compileRule, lineHeadOf, paintLine, ruleKey, type LogRule, type RuleLayers, type RuleMatcher } from "./logHighlight";
+import { compileRule, lineHeadOf, paintLine, ruleCheck, ruleKey, RULE_KINDS, type LogRule, type RuleKind, type RuleLayers, type RuleMatcher } from "./logHighlight";
 import { COMMON, rulesFor, type TagStore } from "./logTags";
 
 // --- per-tab state (kept in the session) -------------------------------------
 
 export interface LinesState {
-  on: boolean; // the tab shows 「태그 줄만」 instead of the whole file
+  on: boolean; // the tab shows the Go engine's view (「📖 읽기」 or 「🏷 줄만」) instead of the editor
+  // 「📖 읽기 보기」: every line of the file (the chips hide lines) instead of
+  // the tag lines — what 「전체」 is for a big file (BIG_FILE+, .gz), which is
+  // not read into the editor unless asked (「✏️ 편집으로 열기」).
+  read: boolean;
+  // A big file's tab: its 「전체」 is 「📖 읽기」 and the editor is 「✏️ 편집」.
+  big: boolean;
   above: number; // lines shown before each matched line (grep -B)
   below: number; // … after it (grep -A)
   off: string[]; // applied tags left out of the filter (e.g. "common")
+  ex: ExcludeRule[]; // 「🚫 제외」 chips (this tab only, not the tags) — in 「📖 읽기」 they hide lines
 }
-export const DEFAULT_LINES: LinesState = { on: false, above: 0, below: 3, off: [] };
+export const DEFAULT_LINES: LinesState = { on: false, read: false, big: false, above: 0, below: 3, off: [], ex: [] };
+
+// 「🚫 제외」: a matched line that also holds one of these is left out — with
+// the lines above/below it brought (they stay when another hit shows them).
+// Same kinds and matching as a tag rule (the engine's Request.Exclude); a chip
+// that is off is kept but not used.
+export interface ExcludeRule {
+  pattern: string;
+  kind: RuleKind; // "text" by default
+  caseSensitive: boolean;
+  on: boolean;
+}
+export const MAX_EXCLUDE = 50;
+export const MAX_EXCLUDE_LEN = 1000; // as a tag rule's pattern (import limit)
+
+export function normalizeExclude(raw: unknown): ExcludeRule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ExcludeRule[] = [];
+  for (const x of raw) {
+    if (!x || typeof x !== "object" || typeof x.pattern !== "string" || x.pattern === "") continue;
+    if (x.pattern.length > MAX_EXCLUDE_LEN || /[\r\n]/.test(x.pattern)) continue;
+    const kind: RuleKind = RULE_KINDS.includes(x.kind) ? x.kind : "text";
+    const r: ExcludeRule = { pattern: x.pattern, kind, caseSensitive: x.caseSensitive === true, on: x.on !== false };
+    if (out.some((y) => sameExclude(y, r))) continue;
+    out.push(r);
+    if (out.length >= MAX_EXCLUDE) break;
+  }
+  return out;
+}
+
+export const sameExclude = (a: Pick<ExcludeRule, "pattern" | "kind" | "caseSensitive">, b: Pick<ExcludeRule, "pattern" | "kind" | "caseSensitive">) =>
+  a.pattern === b.pattern && a.kind === b.kind && a.caseSensitive === b.caseSensitive;
+
+// A chip added: the same one already there is switched on instead (no twin).
+export function addExclude(list: ExcludeRule[], r: Omit<ExcludeRule, "on">): ExcludeRule[] {
+  const i = list.findIndex((x) => sameExclude(x, r));
+  if (i >= 0) return list.map((x, k) => (k === i ? { ...x, on: true } : x));
+  if (list.length >= MAX_EXCLUDE) return list;
+  return [...list, { ...r, on: true }];
+}
+export const toggleExclude = (list: ExcludeRule[], i: number): ExcludeRule[] => list.map((x, k) => (k === i ? { ...x, on: !x.on } : x));
+export const removeExclude = (list: ExcludeRule[], i: number): ExcludeRule[] => list.filter((_, k) => k !== i);
+
+// The chips the engine gets (the ones on), and for each the chip's index —
+// Request.Exclude indexes (excludeIssues, slowExclude) map back through it.
+export function excludeRequest(list: ExcludeRule[]): { rules: { kind: RuleKind; pattern: string; caseSensitive: boolean; on: boolean }[]; chip: number[] } {
+  const rules: { kind: RuleKind; pattern: string; caseSensitive: boolean; on: boolean }[] = [];
+  const chip: number[] = [];
+  list.forEach((x, i) => {
+    if (!x.on || x.pattern === "") return;
+    rules.push({ kind: x.kind, pattern: x.pattern, caseSensitive: x.caseSensitive, on: true });
+    chip.push(i);
+  });
+  return { rules, chip };
+}
+// What makes two chip lists filter the same lines (off chips don't count).
+export const excludeKey = (list: ExcludeRule[]): string =>
+  JSON.stringify(excludeRequest(list).rules.map((r) => [r.kind, r.caseSensitive ? 1 : 0, r.pattern]));
+
+// Can this be a chip? "" = yes; otherwise why not (the tag rules' check — the
+// same reasons as the tag window).
+export function excludeProblem(r: Pick<ExcludeRule, "pattern" | "kind" | "caseSensitive">): string {
+  if (r.pattern === "") return "";
+  if (r.pattern.length > MAX_EXCLUDE_LEN) return `${MAX_EXCLUDE_LEN}자까지 넣을 수 있습니다`;
+  if (/[\r\n]/.test(r.pattern)) return "줄바꿈이 들어 있어 어느 줄에도 걸리지 않습니다";
+  const c = ruleCheck(r);
+  return c.problem ? c.reason : "";
+}
+
+// A chip's label: the text, with marks for a word / regex chip and case.
+export function excludeLabel(r: ExcludeRule): string {
+  const k = r.kind === "regex" ? "/" + r.pattern + "/" : r.kind === "word" ? "‹" + r.pattern + "›" : r.pattern;
+  return r.caseSensitive ? k + " Aa" : k;
+}
 export const MAX_CONTEXT = 1000; // the engine takes up to 10,000; more is never useful on screen
 
 export const clampContext = (n: unknown): number => {
@@ -30,9 +110,12 @@ export function normalizeLines(raw: any): LinesState | null {
   if (!raw || typeof raw !== "object") return null;
   return {
     on: raw.on === true,
+    read: raw.read === true, // a session from before 「📖 읽기」: 「🏷 줄만」
+    big: raw.big === true,
     above: clampContext(raw.above ?? DEFAULT_LINES.above),
     below: clampContext(raw.below ?? DEFAULT_LINES.below),
     off: Array.isArray(raw.off) ? raw.off.filter((x: unknown): x is string => typeof x === "string").slice(0, 100) : [],
+    ex: normalizeExclude(raw.ex), // a session from before 「제외」: none
   };
 }
 

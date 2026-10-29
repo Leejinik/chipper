@@ -35,9 +35,9 @@ const eq = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 
 // --- normalizeLines ---
 ok("garbage → null", normalizeLines(null) === null && normalizeLines("x") === null);
-ok("defaults", eq(normalizeLines({}), { on: false, above: 0, below: 3, off: [] }));
-ok("clamps", eq(normalizeLines({ on: true, above: -5, below: 99999, off: ["a", 3, "b"] }), { on: true, above: 0, below: 1000, off: ["a", "b"] }));
-ok("strings → numbers", eq(normalizeLines({ above: "7", below: "x" }), { on: false, above: 7, below: 0, off: [] }));
+ok("defaults", eq(normalizeLines({}), { on: false, read: false, big: false, above: 0, below: 3, off: [], ex: [] }));
+ok("clamps", eq(normalizeLines({ on: true, above: -5, below: 99999, off: ["a", 3, "b"] }), { on: true, read: false, big: false, above: 0, below: 1000, off: ["a", "b"], ex: [] }));
+ok("strings → numbers", eq(normalizeLines({ above: "7", below: "x" }), { on: false, read: false, big: false, above: 7, below: 0, off: [], ex: [] }));
 ok("DEFAULT_LINES = 위 0 아래 3", DEFAULT_LINES.above === 0 && DEFAULT_LINES.below === 3);
 
 // --- which rules filter ---
@@ -163,5 +163,10 @@ ok("복사 글자", rowsText([row(1), gap, row(1245)]) === "l1\n⋯ 1,234줄 생
   ok("꺼진 규칙 → 칠하지 않음", off.empty && off.paint("x").spans.length === 0);
 }
 
+// 「📖 읽기 보기」 (readview): the tab remembers the view and that it is a big file
+ok("read·big 세션 왕복", eq(normalizeLines({ on: true, read: true, big: true }), { on: true, read: true, big: true, above: 0, below: 3, off: [], ex: [] }));
+ok("read·big 잘못된 값 → false", eq(normalizeLines({ on: true, read: "yes", big: 1 }), { on: true, read: false, big: false, above: 0, below: 3, off: [], ex: [] }));
+
 console.log(`lines-unit: ${pass} passed, ${fail} failed`);
 if (fail) process.exit(1);
+

@@ -101,7 +101,7 @@ func (ws *wstate) scanBufLines(data []byte, base int64, out []hit, lineBase int6
 				ws.lowPtr = nil // the scratch buffer is reused: forget its lower-cased copy
 			}
 		}
-		if mask, s := ws.lineAny(judge); ws.lineHit(mask) {
+		if mask, s := ws.lineAny(judge); ws.lineHit(mask) && ws.keep(judge) {
 			if at != nil {
 				if s > len(judge) {
 					s = len(judge)

@@ -907,12 +907,28 @@
   min-width: 0;
   min-height: 0;
   background: var(--bg);
+  container-type: inline-size;
+}
+/* A narrow pane (6 panes in a small window): [📖|🏷|✏️] shows its icons only and
+   the foot wraps instead of pushing the pane mode / tab pick / × out (agy F-03) */
+@container (max-width: 560px) {
+  .mpane-foot .seg-l {
+    display: none;
+  }
+  .mpane-foot {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .mpane-foot .mp-pick {
+    max-width: 96px;
+  }
 }
 .mpane-body {
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden; /* what does not fit stays inside: never over the foot */
 }
 .mpane-body .empty {
   padding: 12px;

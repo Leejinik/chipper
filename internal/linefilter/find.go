@@ -63,6 +63,17 @@ func (e *Engine) Find(id string, above, below int, q Rule) (FindResult, error) {
 	stale := func() bool { return v.findSeq.Load() != seq }
 
 	j := v.j
+	if j.all {
+		crs, issues := compileRules([]Rule{q})
+		if len(issues) > 0 || len(crs) == 0 {
+			out.Issue = "찾을 수 없는 글자입니다"
+			if len(issues) > 0 {
+				out.Issue = issues[0].Reason
+			}
+			return out, nil
+		}
+		return e.allFind(v, j, crs, stale)
+	}
 	j.checkFile(false)
 	A, B := clampCtx(above), clampCtx(below)
 	j.mu.Lock()
